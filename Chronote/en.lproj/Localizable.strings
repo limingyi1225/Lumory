@@ -1,0 +1,85 @@
+/* Localizable.strings for English (en) */
+
+"设置" = "Settings";
+"语言" = "Language";
+"简体中文" = "简体中文";
+"数据" = "Data";
+"关于" = "About";
+"粘贴导入日记…" = "Import Diary from Clipboard...";
+"删除所有日记" = "Delete All Entries";
+"联系开发者" = "Contact Developer";
+"确认删除所有日记？" = "Confirm deletion of all entries?";
+"删除" = "Delete";
+"取消" = "Cancel";
+"此操作无法撤销，是否确认？" = "This action cannot be undone. Are you sure?";
+"删除完成" = "Deletion Complete";
+"好" = "OK";
+"已删除所有日记" = "All entries have been deleted";
+"完成" = "Done";
+
+"今天是怎样的一天呢？" = "How was your day?";
+"全部日记" = "All Entries";
+"暂无日记，快去记录吧～" = "No entries yet, start journaling!";
+"导入中" = "Importing";
+
+"摘要" = "Summary";
+"我的记录" = "My Entry";
+"录音" = "Recording";
+"日记详情" = "Diary Details";
+"确认删除此日记？" = "Confirm deletion of this entry?";
+"此操作无法撤销，是否确定？" = "This action cannot be undone. Are you sure?";
+
+"选择时间范围" = "Select Time Range";
+"开始日期" = "Start Date";
+"结束日期" = "End Date";
+"AI 分析总结" = "AI Analysis Summary";
+"生成" = "Generate";
+"关闭" = "Close";
+"该时间段内没有日记数据。" = "No diary data for this time period.";
+"生成报告失败，请稍后再试。" = "Failed to generate report. Please try again later.";
+
+"%@ 的日记" = "Journal for %@";
+"当日暂无日记" = "No entries for this day";
+"情绪报告" = "Emotional Report";
+"至" = "to";
+"生成报告" = "Generate Report";
+"删除录音？" = "Delete Recording?";
+
+"日历视图" = "Calendar View";
+"导入日记" = "Import Diaries";
+"导入" = "Import";
+"将你的日记粘贴到下面的文本框，支持多篇日记连贴。" = "Paste your diary entries below. Multiple entries supported.";
+"日历视图" = "Calendar View";
+
+"iCloud 同步" = "iCloud Sync";
+"同步数据" = "Sync Data";
+"已同步" = "Synced";
+"同步失败" = "Sync Failed";
+"至少需要3篇日记才能生成报告（当前：%d篇）" = "At least 3 entries are required to generate a report (current: %d entries)";
+"至少需要3篇日记才能生成报告。" = "At least 3 entries are required to generate a report.";
+
+/* Additional localizations */
+"编辑" = "Edit";
+"保存" = "Save";
+"(未设置)" = "(Not Set)";
+"添加摘要..." = "Add summary...";
+"正在返回..." = "Returning...";
+"放弃更改？" = "Discard Changes?";
+"放弃" = "Discard";
+"继续编辑" = "Continue Editing";
+"您有未保存的更改，确定要放弃吗？" = "You have unsaved changes. Are you sure you want to discard them?";
+"松开结束" = "Release to Stop";
+"按住说话" = "Hold to Speak";
+"日记已删除" = "Entry Deleted";
+"English (US)" = "English (US)";
+"Tap to Stop" = "Tap to Stop";
+"Hold to Speak" = "Hold to Speak";
+"返回" = "Back";
+"在此粘贴日记内容…" = "Paste diaries here...";
+"粘贴" = "Paste";
+"完成" = "Done";
+"将你的日记粘贴到下面，支持多篇日记连贴。" = "Paste your diary entries below. Multiple entries supported.";
+"删除日记" = "Delete Entry";
+"确定要删除这篇日记吗？此操作无法撤销。" = "Are you sure you want to delete this entry? This action cannot be undone.";
+"生成报告时遇到网络问题，请稍后再试。" = "Network error while generating report. Please try again later.";
+"内容" = "Content"; 

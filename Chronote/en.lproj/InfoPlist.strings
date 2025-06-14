@@ -1,0 +1,9 @@
+/* 
+   InfoPlist.strings
+   Lumory - Personal Journal & Voice Diary
+
+   English localization for Info.plist strings
+*/
+
+/* Microphone Usage Description */
+"NSMicrophoneUsageDescription" = "Lumory uses your microphone to record voice diary entries that you can transcribe into text. For example, you can record your thoughts, daily experiences, or personal reflections, which will then be converted to written text and saved as part of your journal entries. Your voice recordings are processed locally on your device and are never shared with third parties."; 

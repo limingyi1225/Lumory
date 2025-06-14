@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// 连续心情光谱滑块：紫色(0) -> 红色(1) - Apple风格设计
 struct MoodSpectrumSlider: View {
@@ -9,6 +12,17 @@ struct MoodSpectrumSlider: View {
     @State private var dragOffset: CGFloat = 0
     @State private var animatedProgress: Double = 0.0
     @State private var updateTask: Task<Void, Never>? = nil
+    @State private var cachedGradient: LinearGradient? = nil
+    @State private var lastGradientValue: Double = -1
+    
+    // Platform-specific color
+    private var systemGray5Color: Color {
+        #if canImport(UIKit)
+        return Color(UIColor.systemGray5)
+        #else
+        return Color(NSColor.unemphasizedSelectedContentBackgroundColor)
+        #endif
+    }
     
     var body: some View {
         GeometryReader { geo in
@@ -19,19 +33,13 @@ struct MoodSpectrumSlider: View {
             ZStack(alignment: .leading) {
                 // 背景轨道（始终显示灰色）
                 Capsule()
-                    .fill(Color(.systemGray5))
+                    .fill(systemGray5Color)
                     .frame(height: trackHeight)
                 
                 // 心情光谱进度条（从左侧填充，只显示到当前心情值的颜色）
                 if showKnob && animatedProgress > 0 {
                     Capsule()
-                        .fill(
-                            LinearGradient(
-                                gradient: Gradient(colors: generateProgressColors()),
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
+                        .fill(currentGradient)
                         .frame(width: progressWidth, height: trackHeight)
                         .animation(AnimationConfig.bouncySpring, value: animatedProgress)
                 }
@@ -42,10 +50,17 @@ struct MoodSpectrumSlider: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard showKnob else { return }
+                        isDragging = true
                         let raw = value.location.x
                         let newValue = Double(raw / width)
-                        moodValue = min(max(0, newValue), 1)
-                        animatedProgress = moodValue
+                        let clamped = min(max(0, newValue), 1)
+                        moodValue = clamped
+                        // Direct update during drag for immediate feedback
+                        animatedProgress = clamped
+                        updateGradientIfNeeded()
+                    }
+                    .onEnded { _ in
+                        isDragging = false
                     }
             )
             .onTapGesture { location in
@@ -75,34 +90,56 @@ struct MoodSpectrumSlider: View {
         }
         .onChange(of: moodValue) { oldValue, newValue in
             guard showKnob else { return }
-            // 取消之前的更新任务，避免冲突
-            updateTask?.cancel()
-            updateTask = Task {
-                // 延迟0.5秒后再进行更新
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                if Task.isCancelled { return }
-                // 只有变化大于0.2（100分制里的20）才执行更新
-                if abs(newValue - oldValue) > 0.1 {
-                    await MainActor.run {
-                        withAnimation(AnimationConfig.bouncySpring) {
-                            animatedProgress = newValue
-                        }
-                    }
+            // Only animate if the change is significant and not from dragging
+            if !isDragging && abs(newValue - oldValue) > 0.01 {
+                withAnimation(AnimationConfig.bouncySpring) {
+                    animatedProgress = newValue
                 }
+                updateGradientIfNeeded()
             }
         }
         .onAppear {
             if showKnob {
                 animatedProgress = moodValue
+                updateGradientIfNeeded()
             }
+        }
+        .onDisappear {
+            updateTask?.cancel()
+            updateTask = nil
+        }
+    }
+    
+    /// 获取当前渐变，使用缓存避免重复计算
+    private var currentGradient: LinearGradient {
+        if let cached = cachedGradient, abs(lastGradientValue - animatedProgress) < 0.05 {
+            return cached
+        }
+        return LinearGradient(
+            gradient: Gradient(colors: generateProgressColors()),
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+    
+    /// 更新渐变缓存
+    private func updateGradientIfNeeded() {
+        if abs(lastGradientValue - animatedProgress) >= 0.05 {
+            lastGradientValue = animatedProgress
+            cachedGradient = LinearGradient(
+                gradient: Gradient(colors: generateProgressColors()),
+                startPoint: .leading,
+                endPoint: .trailing
+            )
         }
     }
     
     /// 生成从0到当前心情值的颜色渐变
     private func generateProgressColors() -> [Color] {
         // Optimize by reducing color steps for better performance
-        let steps = max(2, min(10, Int(animatedProgress * 10))) // Limit to 10 color points max
+        let steps = max(2, min(8, Int(animatedProgress * 8))) // Reduced to 8 color points max
         var colors: [Color] = []
+        colors.reserveCapacity(steps) // Pre-allocate array capacity
         
         for i in 0..<steps {
             let value = Double(i) / Double(steps - 1) * animatedProgress

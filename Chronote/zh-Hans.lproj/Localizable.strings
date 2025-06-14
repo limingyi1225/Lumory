@@ -78,4 +78,177 @@
 "删除日记" = "删除日记";
 "确定要删除这篇日记吗？此操作无法撤销。" = "确定要删除这篇日记吗？此操作无法撤销。";
 "生成报告时遇到网络问题，请稍后再试。" = "生成报告时遇到网络问题，请稍后再试。";
-"内容" = "内容"; 
+"内容" = "内容";
+
+/* Mood descriptions */
+"非常低落" = "非常低落";
+"有些低落" = "有些低落";
+"一般般" = "一般般";
+"还不错" = "还不错";
+"非常开心" = "非常开心";
+
+/* Mood short descriptions */
+"很差" = "很差";
+"较差" = "较差";
+"一般" = "一般";
+"不错" = "不错";
+"很好" = "很好";
+
+/* Settings UI */
+"同步诊断" = "同步诊断";
+"数据库修复" = "数据库修复";
+"如果您遇到数据库错误，可以尝试执行修复。这将重建本地数据库并从iCloud重新同步数据。" = "如果您遇到数据库错误，可以尝试执行修复。这将重建本地数据库并从iCloud重新同步数据。";
+"修复数据库" = "修复数据库";
+"确认修复数据库？" = "确认修复数据库？";
+"修复" = "修复";
+"此操作将重建本地数据库并从iCloud重新同步数据。" = "此操作将重建本地数据库并从iCloud重新同步数据。";
+
+/* Photo count */
+"%d张照片" = "%d张照片";
+"1张照片" = "1张照片";
+"图片加载失败" = "图片加载失败";
+
+/* Backend status */
+"AI后端状态" = "AI后端状态";
+"后端URL:" = "后端URL:";
+"测试后端连接" = "测试后端连接";
+"测试成功" = "测试成功";
+"测试失败" = "测试失败";
+"测试中..." = "测试中...";
+
+/* Import/Export */
+"导入日记" = "导入日记";
+"导入" = "导入";
+
+/* General UI */
+"Settings" = "设置";
+"General" = "通用";
+"Data Management" = "数据管理";
+"Follows system appearance" = "跟随系统外观";
+"Total Entries:" = "日记总数:";
+"Delete all diary entries" = "删除所有日记";
+"Export All Entries" = "导出所有日记";
+"Import from Clipboard" = "从剪贴板导入";
+
+/* Mac-specific UI strings */
+"主页" = "主页";
+"日历" = "日历";
+"心情分析" = "心情分析";
+"设置" = "设置";
+"搜索日记..." = "搜索日记...";
+"导航" = "导航";
+"今天" = "今天";
+"昨天" = "昨天";
+"新建" = "新建";
+
+/* Mac Home View */
+"保存日记" = "保存日记";
+"心情记录" = "心情记录";
+"照片" = "照片";
+"拖拽图片到此处" = "拖拽图片到此处";
+"开始录音" = "开始录音";
+"停止录音" = "停止录音";
+"已暂停" = "已暂停";
+"清空" = "清空";
+"记录今天发生的事情..." = "记录今天发生的事情...";
+
+/* Mac Settings View */
+"Appearance" = "外观";
+"Language" = "语言";
+"Import Entries..." = "导入日记...";
+"Force Sync" = "强制同步";
+"Run Diagnostic" = "运行诊断";
+"About" = "关于";
+"调试报告生成" = "调试报告生成";
+"完整诊断" = "完整诊断";
+"UI测试" = "UI测试";
+
+/* Mac Mood Report */
+"Mood Report" = "心情报告";
+"Total Entries" = "总日记数";
+"Average Mood" = "平均心情";
+"Most Common" = "最常见";
+"Streak" = "连续天数";
+"Mood Trend" = "心情趋势";
+"Mood Distribution" = "心情分布";
+"AI Analysis" = "AI分析";
+"Generate Report" = "生成报告";
+
+/* Mood values for Mac */
+"平静" = "平静";
+"愉快" = "愉快";
+
+/* Additional Mac strings */
+"All Entries" = "全部日记";
+"Language:" = "语言:";
+"Data Storage" = "数据存储";
+"Storage Location" = "存储位置";
+"iCloud Documents" = "iCloud文档";
+"Local Only" = "仅本地";
+
+/* Inspirational prompts */
+"今天有什么特别的事情发生吗？" = "今天有什么特别的事情发生吗？";
+"此刻你的心情是怎样的？" = "此刻你的心情是怎样的？";
+"有什么想要记录的瞬间吗？" = "有什么想要记录的瞬间吗？";
+"今天最让你开心的是什么？" = "今天最让你开心的是什么？";
+"现在最想和谁分享你的感受？" = "现在最想和谁分享你的感受？";
+
+/* Mood Report Period Types */
+"Week" = "周";
+"Month" = "月";
+"Year" = "年";
+"All Time" = "全部";
+"Past Week" = "过去一周";
+"Past Month" = "过去一月";
+"Past 3 Months" = "过去三月";
+"Past Year" = "过去一年";
+
+/* Mood Report UI */
+"Period" = "时间段";
+"days" = "天";
+"No data available for the selected period" = "所选时间段内无数据";
+"Entries with Mood %d" = "心情等级%d的日记";
+"Generating..." = "生成中...";
+"Analyzing your mood patterns..." = "分析您的心情模式中...";
+"Mood %d" = "心情%d";
+"N/A" = "无";
+
+/* Mood Analysis UI */
+"Mood Analysis" = "心情分析";
+"Track your emotional journey over time" = "追踪您的情感历程";
+"entries" = "条日记";
+"Consistency" = "连续性";
+"Improving" = "改善中";
+"Declining" = "下降中";
+"Stable" = "稳定";
+"Mood Patterns" = "心情模式";
+"Recent entries with %@" = "最近%@心情的日记";
+"Clear Filter" = "清除筛选";
+"Mood Analysis Report" = "心情分析报告";
+"Regenerate" = "重新生成";
+"Generate an AI-powered analysis of your mood patterns" = "生成AI心情模式分析";
+
+/* Mood Level Names */
+"Very Low" = "非常低落";
+"Low" = "有些低落";
+"Neutral" = "一般般";
+"Good" = "还不错";
+"Excellent" = "非常开心";
+"Unknown" = "未知";
+
+/* Empty State Messages */
+"No diary entries found" = "未找到日记条目";
+"Start writing diary entries to see your mood analysis" = "开始写日记来查看心情分析";
+"No entries in %@" = "%@内无日记";
+"You have %d total entries, but none in the selected time period." = "您共有%d条日记，但所选时间段内没有。";
+"Try selecting a longer time period or write new entries." = "请尝试选择更长的时间段或写新日记。";
+
+/* Error Messages */
+"No diary entries available for analysis." = "无可用于分析的日记条目。";
+"API configuration error. Please check your API key settings." = "API配置错误。请检查您的API密钥设置。";
+"API configuration error. Please check your settings." = "API配置错误。请检查您的设置。";
+"Unable to generate analysis at this time. Please try again." = "目前无法生成分析。请稍后重试。";
+"分析完成但没有生成洞察报告。这可能是由于内容不足或暂时的服务问题。请尝试重新生成或检查网络连接。" = "分析完成但没有生成洞察报告。这可能是由于内容不足或暂时的服务问题。请尝试重新生成或检查网络连接。";
+"Authentication failed. Please check your API key and account balance." = "身份验证失败。请检查您的API密钥和账户余额。";
+"Report generation was cancelled. Please try again." = "报告生成已取消。请重试。";
+"Unable to generate report: %@. Please try again later." = "无法生成报告：%@。请稍后重试。"; 

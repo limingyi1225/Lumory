@@ -14,14 +14,22 @@ struct MacMoodReportView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @State private var selectedPeriod: Period = .week
     @State private var selectedMoodLevel: Int? = nil
+    @State private var aiReport: String = ""
+    @State private var isGeneratingReport = false
     @FetchRequest(sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)])
     private var entries: FetchedResults<DiaryEntry>
+    
+    private let aiService = AppleRecognitionService(openAIApiKey: AppSecrets.openAIKey)
     
     enum Period: String, CaseIterable {
         case week = "Week"
         case month = "Month"
         case year = "Year"
         case all = "All Time"
+        
+        var localizedName: String {
+            return NSLocalizedString(self.rawValue, comment: "")
+        }
         
         var days: Int {
             switch self {
@@ -33,16 +41,17 @@ struct MacMoodReportView: View {
         }
     }
     
-    var filteredEntries: [DiaryEntry] {
+    // Memoized filtered entries for better performance
+    private var filteredEntries: [DiaryEntry] {
         let cutoffDate = Calendar.current.date(byAdding: .day, value: -selectedPeriod.days, to: Date()) ?? Date()
         return entries.filter { entry in
-            return selectedPeriod == .all || entry.date >= cutoffDate
+            return selectedPeriod == .all || (entry.date ?? Date.distantPast) >= cutoffDate
         }
     }
     
     var moodData: [(date: Date, mood: Double)] {
         Dictionary(grouping: filteredEntries) { entry in
-            Calendar.current.startOfDay(for: entry.date)
+            Calendar.current.startOfDay(for: entry.date ?? Date())
         }
         .compactMap { date, entries in
             let avgMood = entries.reduce(0.0) { $0 + $1.moodValue } / Double(entries.count)
@@ -70,15 +79,15 @@ struct MacMoodReportView: View {
             VStack(spacing: 24) {
                 // Header with period selector
                 HStack {
-                    Text("Mood Report")
+                    Text(NSLocalizedString("Mood Report", comment: ""))
                         .font(.largeTitle)
                         .fontWeight(.bold)
                     
                     Spacer()
                     
-                    Picker("Period", selection: $selectedPeriod) {
+                    Picker(NSLocalizedString("Period", comment: ""), selection: $selectedPeriod) {
                         ForEach(Period.allCases, id: \.self) { period in
-                            Text(period.rawValue).tag(period)
+                            Text(period.localizedName).tag(period)
                         }
                     }
                     .pickerStyle(SegmentedPickerStyle())
@@ -112,7 +121,7 @@ struct MacMoodReportView: View {
                     
                     SummaryCard(
                         title: "Streak",
-                        value: "\(currentStreak) days",
+                        value: "\(currentStreak) \(NSLocalizedString("days", comment: ""))",
                         icon: "flame.fill",
                         color: .red
                     )
@@ -121,13 +130,13 @@ struct MacMoodReportView: View {
                 
                 // Mood trend chart
                 VStack(alignment: .leading) {
-                    Text("Mood Trend")
+                    Text(NSLocalizedString("Mood Trend", comment: ""))
                         .font(.title2)
                         .fontWeight(.semibold)
                         .padding(.horizontal)
                     
                     if moodData.isEmpty {
-                        Text("No data available for the selected period")
+                        Text(NSLocalizedString("No data available for the selected period", comment: ""))
                             .foregroundColor(.secondary)
                             .frame(maxWidth: .infinity, minHeight: 300)
                     } else {
@@ -175,7 +184,7 @@ struct MacMoodReportView: View {
                 
                 // Mood distribution
                 VStack(alignment: .leading) {
-                    Text("Mood Distribution")
+                    Text(NSLocalizedString("Mood Distribution", comment: ""))
                         .font(.title2)
                         .fontWeight(.semibold)
                         .padding(.horizontal)
@@ -201,7 +210,7 @@ struct MacMoodReportView: View {
                 // Recent entries with selected mood
                 if let selectedMood = selectedMoodLevel {
                     VStack(alignment: .leading) {
-                        Text("Entries with Mood \(selectedMood)")
+                        Text(String(format: NSLocalizedString("Entries with Mood %d", comment: ""), selectedMood))
                             .font(.title2)
                             .fontWeight(.semibold)
                             .padding(.horizontal)
@@ -221,14 +230,63 @@ struct MacMoodReportView: View {
                     }
                 }
                 
+                // AI Generated Report Section
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Text(NSLocalizedString("AI Analysis", comment: ""))
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                        
+                        Spacer()
+                        
+                        Button(action: generateAIReport) {
+                            Label(isGeneratingReport ? NSLocalizedString("Generating...", comment: "") : NSLocalizedString("Generate Report", comment: ""), 
+                                  systemImage: "sparkles")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isGeneratingReport || filteredEntries.isEmpty)
+                    }
+                    .padding(.horizontal)
+                    
+                    if !aiReport.isEmpty {
+                        ScrollView {
+                            Text(aiReport)
+                                .font(.system(size: 14))
+                                .padding()
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 300)
+                        .background(Color(UIColor.secondarySystemBackground))
+                        .cornerRadius(12)
+                        .padding(.horizontal)
+                    } else if isGeneratingReport {
+                        VStack {
+                            ProgressView()
+                                .scaleEffect(1.2)
+                            Text(NSLocalizedString("Analyzing your mood patterns...", comment: ""))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.top, 8)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 200)
+                        .background(Color(UIColor.secondarySystemBackground))
+                        .cornerRadius(12)
+                        .padding(.horizontal)
+                    }
+                }
+                
                 Spacer(minLength: 40)
             }
+        }
+        .onChange(of: selectedPeriod) { _, _ in
+            aiReport = ""
+            selectedMoodLevel = nil
         }
     }
     
     private var mostCommonMoodText: String {
-        guard let mostCommon = moodDistribution.max(by: { $0.value < $1.value }) else { return "N/A" }
-        return "Mood \(mostCommon.key)"
+        guard let mostCommon = moodDistribution.max(by: { $0.value < $1.value }) else { return NSLocalizedString("N/A", comment: "") }
+        return String(format: NSLocalizedString("Mood %d", comment: ""), mostCommon.key)
     }
     
     private var currentStreak: Int {
@@ -238,7 +296,7 @@ struct MacMoodReportView: View {
         
         for _ in 0..<365 {
             let hasEntry = filteredEntries.contains { entry in
-                return calendar.isDate(entry.date, inSameDayAs: currentDate)
+                return calendar.isDate(entry.date ?? Date(), inSameDayAs: currentDate)
             }
             
             if hasEntry {
@@ -260,6 +318,88 @@ struct MacMoodReportView: View {
         case 4: return "face.happy"
         case 5: return "face.grinning"
         default: return "face.smiling"
+        }
+    }
+    
+    private func generateAIReport() {
+        guard !filteredEntries.isEmpty else { 
+            aiReport = NSLocalizedString("No diary entries available for analysis.", comment: "")
+            return 
+        }
+        
+        // Check API key validity first
+        guard AppSecrets.isValidKey else {
+            aiReport = NSLocalizedString("API configuration error. Please check your API key settings.", comment: "")
+            return
+        }
+        
+        isGeneratingReport = true
+        aiReport = ""
+        
+        Task {
+            let entriesToAnalyze = Array(filteredEntries.prefix(30)) // Analyze up to 30 entries
+            
+            do {
+                print("[MacMoodReportView] 开始使用完全独立的报告生成服务")
+                
+                // 构建日期范围用于过滤
+                let dateRange = Date.distantPast...Date.distantFuture
+                
+                // 使用完全独立的报告生成服务，避免任何CloudKit干扰
+                try await withTimeout(seconds: 60) {
+                    await ReportGenerationService.generateReport(from: entriesToAnalyze, dateRange: dateRange) { chunk in
+                        print("[MacMoodReportView] 收到内容块: '\(chunk.prefix(50))...'")
+                        DispatchQueue.main.async {
+                            self.aiReport += chunk
+                            print("[MacMoodReportView] 当前报告总长度: \(self.aiReport.count)")
+                        }
+                    }
+                }
+                
+                await MainActor.run {
+                    print("[MacMoodReportView] 报告生成完成，最终长度: \(aiReport.count)")
+                    isGeneratingReport = false
+                    // If report is still empty, show a default message
+                    if aiReport.isEmpty {
+                        print("[MacMoodReportView] 报告为空，显示默认消息")
+                        aiReport = NSLocalizedString("分析完成但没有生成洞察报告。这可能是由于内容不足或暂时的服务问题。请尝试重新生成或检查网络连接。", comment: "")
+                    } else {
+                        print("[MacMoodReportView] 报告生成成功")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    isGeneratingReport = false
+                    if error.localizedDescription.contains("401") {
+                        aiReport = NSLocalizedString("Authentication failed. Please check your API key and account balance.", comment: "")
+                    } else if error.localizedDescription.contains("cancelled") {
+                        aiReport = NSLocalizedString("Report generation was cancelled. Please try again.", comment: "")
+                    } else {
+                        aiReport = String(format: NSLocalizedString("Unable to generate report: %@. Please try again later.", comment: ""), error.localizedDescription)
+                    }
+                }
+            }
+        }
+    }
+    
+    // Helper function to add timeout
+    private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw NSError(domain: "Timeout", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation timed out"])
+            }
+            
+            guard let result = try await group.next() else {
+                throw NSError(domain: "TaskGroup", code: -1, userInfo: [NSLocalizedDescriptionKey: "No result"])
+            }
+            
+            group.cancelAll()
+            return result
         }
     }
 }

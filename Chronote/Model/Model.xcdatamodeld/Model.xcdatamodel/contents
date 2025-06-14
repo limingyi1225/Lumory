@@ -4,6 +4,8 @@
         <attribute name="audioFileName" optional="YES" attributeType="String"/>
         <attribute name="date" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="imageFileNames" optional="YES" attributeType="String"/>
+        <attribute name="imagesData" optional="YES" attributeType="Binary" allowsExternalBinaryDataStorage="YES"/>
         <attribute name="moodValue" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
         <attribute name="summary" optional="YES" attributeType="String"/>
         <attribute name="text" optional="YES" attributeType="String"/>

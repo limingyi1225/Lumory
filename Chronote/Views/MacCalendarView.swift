@@ -75,11 +75,6 @@ struct MacCalendarView: View {
                         .fontWeight(.medium)
                     
                     Spacer()
-                    
-                    Button(action: { /* New entry for this date */ }) {
-                        Label("New Entry", systemImage: "plus")
-                    }
-                    .buttonStyle(.bordered)
                 }
                 .padding()
                 
@@ -134,7 +129,8 @@ struct MacCalendarView: View {
     
     private func entriesForDate(_ date: Date) -> [DiaryEntry] {
         entries.filter { entry in
-            return calendar.isDate(entry.date, inSameDayAs: date)
+            guard let entryDate = entry.date else { return false }
+            return calendar.isDate(entryDate, inSameDayAs: date)
         }
     }
     
@@ -212,7 +208,8 @@ struct CalendarGrid: View {
     
     private func entriesForDate(_ date: Date) -> [DiaryEntry] {
         entries.filter { entry in
-            return calendar.isDate(entry.date, inSameDayAs: date)
+            guard let entryDate = entry.date else { return false }
+            return calendar.isDate(entryDate, inSameDayAs: date)
         }
     }
 }

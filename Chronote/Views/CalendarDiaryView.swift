@@ -39,7 +39,7 @@ struct CalendarDiaryView: View {
         fetchRequest.fetchLimit = 1
         do {
             if let firstEntry = try context.fetch(fetchRequest).first {
-                _reportStartDate = State(initialValue: firstEntry.date)
+                _reportStartDate = State(initialValue: firstEntry.date ?? Date())
             } else {
                 _reportStartDate = State(initialValue: Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date())
             }

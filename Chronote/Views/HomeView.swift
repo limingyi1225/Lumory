@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import Combine
 import CoreData
+import PhotosUI
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -23,6 +24,9 @@ func formattedDuration(currentTime: TimeInterval, totalDuration: TimeInterval) -
 }
 
 // MARK: - Corner Rounding Helper
+#if canImport(UIKit)
+import UIKit
+
 struct RoundedCorner: Shape {
     var radius: CGFloat
     var corners: UIRectCorner
@@ -39,6 +43,96 @@ extension View {
         clipShape(RoundedCorner(radius: radius, corners: corners))
     }
 }
+#else
+// macOS version using NSBezierPath
+struct RoundedCorner: Shape {
+    var radius: CGFloat
+    var corners: RectCorner
+    
+    struct RectCorner: OptionSet {
+        let rawValue: Int
+        static let topLeft = RectCorner(rawValue: 1 << 0)
+        static let topRight = RectCorner(rawValue: 1 << 1)
+        static let bottomLeft = RectCorner(rawValue: 1 << 2)
+        static let bottomRight = RectCorner(rawValue: 1 << 3)
+        static let allCorners: RectCorner = [.topLeft, .topRight, .bottomLeft, .bottomRight]
+    }
+    
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        
+        let width = rect.size.width
+        let height = rect.size.height
+        
+        // Start from top-left
+        if corners.contains(.topLeft) {
+            path.move(to: CGPoint(x: radius, y: 0))
+        } else {
+            path.move(to: CGPoint(x: 0, y: 0))
+        }
+        
+        // Top edge and top-right corner
+        if corners.contains(.topRight) {
+            path.addLine(to: CGPoint(x: width - radius, y: 0))
+            path.addArc(center: CGPoint(x: width - radius, y: radius),
+                       radius: radius,
+                       startAngle: .degrees(-90),
+                       endAngle: .degrees(0),
+                       clockwise: false)
+        } else {
+            path.addLine(to: CGPoint(x: width, y: 0))
+        }
+        
+        // Right edge and bottom-right corner
+        if corners.contains(.bottomRight) {
+            path.addLine(to: CGPoint(x: width, y: height - radius))
+            path.addArc(center: CGPoint(x: width - radius, y: height - radius),
+                       radius: radius,
+                       startAngle: .degrees(0),
+                       endAngle: .degrees(90),
+                       clockwise: false)
+        } else {
+            path.addLine(to: CGPoint(x: width, y: height))
+        }
+        
+        // Bottom edge and bottom-left corner
+        if corners.contains(.bottomLeft) {
+            path.addLine(to: CGPoint(x: radius, y: height))
+            path.addArc(center: CGPoint(x: radius, y: height - radius),
+                       radius: radius,
+                       startAngle: .degrees(90),
+                       endAngle: .degrees(180),
+                       clockwise: false)
+        } else {
+            path.addLine(to: CGPoint(x: 0, y: height))
+        }
+        
+        // Left edge and top-left corner
+        if corners.contains(.topLeft) {
+            path.addLine(to: CGPoint(x: 0, y: radius))
+            path.addArc(center: CGPoint(x: radius, y: radius),
+                       radius: radius,
+                       startAngle: .degrees(180),
+                       endAngle: .degrees(270),
+                       clockwise: false)
+        } else {
+            path.addLine(to: CGPoint(x: 0, y: 0))
+        }
+        
+        path.closeSubpath()
+        return path
+    }
+}
+
+extension View {
+    func cornerRadius(_ radius: CGFloat, corners: RoundedCorner.RectCorner) -> some View {
+        clipShape(RoundedCorner(radius: radius, corners: corners))
+    }
+}
+
+// Compatibility typealias
+typealias UIRectCorner = RoundedCorner.RectCorner
+#endif
 
 // 新的音频播放控制器
 class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, ObservableObject {
@@ -49,7 +143,11 @@ class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, ObservableObject
     @Published private(set) var currentPlayingFileName: String? // 用于确保只操作当前音频. private(set) 外部只读
 
     private var audioPlayer: AVAudioPlayer?
+#if canImport(UIKit)
     private var displayLink: CADisplayLink?
+#else
+    private var progressTimer: Timer?
+#endif
 
     var onFinishPlaying: (() -> Void)?
     var onPlayError: ((Error) -> Void)?
@@ -72,8 +170,10 @@ class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, ObservableObject
 
         currentPlayingFileName = fileName // 在这里设置当前播放文件名
         do {
+#if canImport(UIKit)
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
             try AVAudioSession.sharedInstance().setActive(true)
+#endif
 
             audioPlayer = try AVAudioPlayer(contentsOf: url)
             audioPlayer?.delegate = self
@@ -106,7 +206,9 @@ class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, ObservableObject
         stopDisplayLink()
         if audioPlayer != nil {
             do {
+#if canImport(UIKit)
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+#endif
             } catch {
                 print("[AudioPlaybackController] Could not deactivate audio session: \\(error)")
             }
@@ -119,7 +221,9 @@ class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, ObservableObject
         stopDisplayLink()
         if audioPlayer != nil {
             do {
+#if canImport(UIKit)
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+#endif
             } catch {
                 print("[AudioPlaybackController] Could not deactivate audio session on cleanup: \\(error)")
             }
@@ -151,6 +255,7 @@ class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, ObservableObject
     }
 
     private func startDisplayLink() {
+#if canImport(UIKit)
         if displayLink == nil {
             displayLink = CADisplayLink(target: self, selector: #selector(updateProgress))
             // 限制刷新率到 30fps，平衡 UI 流畅度和 CPU 占用
@@ -162,14 +267,28 @@ class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, ObservableObject
             displayLink?.add(to: .main, forMode: .common)
         }
         displayLink?.isPaused = false
+#else
+        progressTimer?.invalidate()
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { _ in
+            self.updateProgress()
+        }
+#endif
     }
 
     private func stopDisplayLink() {
+#if canImport(UIKit)
         displayLink?.isPaused = true
+#else
+        progressTimer?.invalidate()
+        progressTimer = nil
+#endif
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         print("[AudioPlaybackController] Audio finished playing. Success: \\(flag)")
+        // Set progress to 1.0 when playback completes
+        progress = 1.0
+        currentTime = duration
         stopPlaybackCleanup()
     }
 
@@ -182,8 +301,13 @@ class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, ObservableObject
     }
     
     deinit {
+#if canImport(UIKit)
         displayLink?.invalidate()
         displayLink = nil
+#else
+        progressTimer?.invalidate()
+        progressTimer = nil
+#endif
         audioPlayer?.stop()
         print("[AudioPlaybackController] deinit")
     }
@@ -248,16 +372,23 @@ struct HomeView: View {
     @State private var isSending: Bool = false
     @State private var showingSettingsSheet: Bool = false
     @State private var selectedEntry: DiaryEntry? = nil
+    @State private var selectedPhotos: [PhotosPickerItem] = []
+    @State private var selectedImages: [Data] = []
     private let cal = Calendar.current
     @Environment(\.colorScheme) private var colorScheme
-    @AppStorage("appLanguage") private var appLanguage: String = {
+    
+    // 简化的语言检测
+    private static var defaultAppLanguage: String {
         let currentLocale = Locale.current.identifier
         if currentLocale.hasPrefix("zh") {
             return "zh-Hans"
         } else {
             return "en"
         }
-    }()
+    }
+    
+    @AppStorage("appLanguage") private var appLanguage: String = HomeView.defaultAppLanguage
+    
     @State private var audioRecordings: [Recording] = []
     @State private var deleteTarget: String? = nil
     @State private var isSettingsOpen: Bool = false
@@ -269,6 +400,9 @@ struct HomeView: View {
     
     // Mac toolbar action listeners
     @State private var macToolbarListeners: [Any] = []
+    
+    // Database recreation observer
+    @State private var databaseRecreationObserver: NSObjectProtocol?
 
     var body: some View {
         #if targetEnvironment(macCatalyst)
@@ -278,6 +412,13 @@ struct HomeView: View {
             .environmentObject(importService)
         #else
         // Original iOS interface
+        iOSHomeView
+        #endif
+    }
+    
+    // 将 iOS 界面提取为单独的计算属性
+    @ViewBuilder
+    private var iOSHomeView: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
                 // 计算设置面板相关变量 - Mac优化
@@ -287,431 +428,20 @@ struct HomeView: View {
                 let maskAlpha = UIDevice.isMac ? 0 : normalizedOpen * 0.3
 
                 // 主界面 - Mac自适应布局
-                MacAdaptiveLayout {
-                    NavigationStack {
-                        VStack(spacing: 0) {
-                            // 导航栏 - Mac版本隐藏或简化
-                            if !UIDevice.isMac {
-                                HStack {
-                                    Button {
-                                        #if canImport(UIKit)
-                                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                        #endif
-                                        withAnimation(AnimationConfig.smoothTransition) { 
-                                            isSettingsOpen = true
-                                            dragOffsetX = 0
-                                        }
-                                    } label: {
-                                        TwoLineIcon()
-                                            .padding(8) // 扩大触摸区域
-                                    }
-                                    .contentShape(Rectangle())
-                                    .buttonStyle(SettingsIconButtonStyle())
-                                    .foregroundColor(Color.primary.opacity(0.75))
-                                    
-                                    Spacer()
-                                    
-                                    Button {
-                                        #if canImport(UIKit)
-                                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                        #endif
-                                        isCalendarActive = true
-                                    } label: {
-                                        Image(systemName: "calendar")
-                                            .font(.system(size: 20, weight: .regular))
-                                            .frame(width: 24, height: 24, alignment: .trailing)
-                                    }
-                                    .buttonStyle(PressableScaleButtonStyle())
-                                    .foregroundColor(Color.primary.opacity(0.75))
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                            }
-
-                            // FIRST_EDIT: 用呼吸点替换导入进度条
-                            if importService.isImporting {
-                                HStack(spacing: 8) {
-                                    BreathingDots()
-                                    Text(NSLocalizedString("导入中", comment: "Importing"))
-                                        .font(.subheadline)
-                                        .foregroundColor(.accentColor)
-                                }
-                                .padding(.horizontal, 16)
-                            }
-
-                            List {
-                                // 心情光谱滑块 - Mac优化布局
-                                VStack(alignment: .leading, spacing: 4) {
-                                    MoodSpectrumSlider(
-                                        moodValue: $detectedMoodValue,
-                                        showKnob: hasMoodAnalysis
-                                    )
-                                    .frame(height: UIDevice.isMac ? 12 : 8)
-                                    .frame(maxWidth: UIDevice.isMac ? 600 : .infinity)
-                                    .animationIfChanged(AnimationConfig.standardResponse, value: detectedMoodValue)
-                                }
-                                .padding(.horizontal, UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 14)
-                                .padding(.top, UIDevice.isMac ? 20 : 12)
-                                .padding(.bottom, UIDevice.isMac ? -40 : -50)
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(Color.clear)
-
-                                // 输入框和录音功能容器 - Mac优化
-                                VStack(alignment: .leading, spacing: UIDevice.isMac ? 16 : 12) {
-                                    // 文本输入区域
-                                    ZStack(alignment: .topLeading) {
-                                        TextEditor(text: $inputText)
-                                            .frame(height: UIDevice.isMac ? 180 : 140)
-                                            .frame(maxWidth: UIDevice.isMac ? 700 : .infinity)
-                                            .padding(UIDevice.isMac ? 8 : 4)
-                                            .background(Color.clear)
-                                            .scrollContentBackground(.hidden)
-                                            .font(.system(size: UIDevice.isMac ? 16 : 14))
-                                            .onChange(of: inputText) { oldValue, newValue in
-                                                print("[HomeView inputText.onChange START] SFCFN: \\(currentAudioFileName ?? \"nil\"), Input: '\\(newValue)'")
-                                                analyzeTask?.cancel()
-
-                                                let trimmedNewValue = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-
-                                                if trimmedNewValue.isEmpty {
-                                                    hasMoodAnalysis = false
-                                                    print("[HomeView inputText.onChange END - empty text] SFCFN: \\(currentAudioFileName ?? \"nil\")")
-                                                    return
-                                                }
-
-                                                analyzeTask = Task {
-                                                    do {
-                                                        try await Task.sleep(nanoseconds: 300_000_000)
-                                                        
-                                                        if Task.isCancelled {
-                                                            print("[HomeView inputText.onChange Task CANCELLED pre-mood] SFCFN: \\(currentAudioFileName ?? \"nil\")")
-                                                            return
-                                                        }
-
-                                                        let mood = await aiService.analyzeMood(text: trimmedNewValue)
-                                                        
-                                                        if Task.isCancelled {
-                                                            print("[HomeView inputText.onChange Task CANCELLED post-mood] SFCFN: \\(currentAudioFileName ?? \"nil\")")
-                                                            return
-                                                        }
-                                                        print("[HomeView inputText.onChange Task - before mood update] SFCFN: \\(currentAudioFileName ?? \"nil\"), detectedMood: \\(mood)")
-                                                        detectedMoodValue = mood
-                                                        hasMoodAnalysis = true
-                                                        print("[HomeView inputText.onChange Task - after mood update] SFCFN: \\(currentAudioFileName ?? \"nil\"), hasMoodAnalysis: \\(hasMoodAnalysis)")
-
-                                                    } catch {
-                                                        if !(error is CancellationError) {
-                                                            print("[HomeView inputText.onChange Task Error]: \\(error), SFCFN: \\(currentAudioFileName ?? \"nil\")")
-                                                        }
-                                                    }
-                                                }
-                                                print("[HomeView inputText.onChange END - task started] SFCFN: \\(currentAudioFileName ?? \"nil\")")
-                                            }
-                                        if inputText.isEmpty {
-                                            Text(NSLocalizedString("今天是怎样的一天呢？", comment: "Daily prompt"))
-                                                .foregroundColor(.secondary.opacity(0.6))
-                                                .padding(8)
-                                        }
-                                    }
-                                    .frame(maxWidth: .infinity)
-
-                                    // 录音文件显示区域（预留固定高度，多条录音支持）
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        ForEach(audioRecordings) { rec in
-                                            RecordingRow(
-                                                recording: rec,
-                                                controller: audioPlaybackController,
-                                                isTranscribing: isTranscribing,
-                                                onPlay: { playAudio(fileName: rec.fileName) },
-                                                onDelete: {
-                                                    deleteTarget = rec.fileName
-                                                    showingDeleteAlert = true
-                                                }
-                                            )
-                                        }
-                                    }
-                                    .frame(height: audioRecordings.isEmpty ? 0 : nil)
-                                    .alert(NSLocalizedString("删除录音？", comment: "Delete recording confirmation"), isPresented: $showingDeleteAlert) {
-                                        Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
-                                            if let target = deleteTarget {
-                                                if audioPlaybackController.currentPlayingFileName == target {
-                                                    audioPlaybackController.stopPlayback(clearCurrentFile: true)
-                                                }
-                                                let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                                                let audioURL = documentsURL.appendingPathComponent(target)
-                                                do {
-                                                    try FileManager.default.removeItem(at: audioURL)
-                                                } catch {
-                                                    print("[HomeView deleteCurrentAudio] 删除音频文件出错: \(error.localizedDescription)")
-                                                }
-                                                // 删除录音时使用动画
-                                                withAnimation(AnimationConfig.stiffSpring) {
-                                                    audioRecordings.removeAll { $0.fileName == target }
-                                                }
-                                                deleteTarget = nil
-                                            }
-                                        }
-                                        Button(NSLocalizedString("取消", comment: "Cancel button"), role: .cancel) {
-                                            deleteTarget = nil
-                                        }
-                                    }
-
-                                    // 底部按钮区域：录音按钮和发送按钮 - Mac优化
-                                    HStack(spacing: UIDevice.isMac ? 16 : 12) {
-                                        // 录音按钮（占主要位置）
-                                        AppleStyleRecordButton(
-                                            recorder: recorder,
-                                            onStop: { await handleStopRecording() }
-                                        )
-                                        .disabled(audioRecordings.count >= 3)
-                                        .frame(height: UIDevice.isMac ? 52 : 48)
-                                        
-                                        // 发送按钮
-                                        AppleStyleSendButton(
-                                            isSending: $isSending,
-                                            isEnabled: (!inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !audioRecordings.isEmpty) && !isTranscribing
-                                        ) {
-        #if canImport(UIKit)
-                                            HapticManager.shared.click()
-        #endif
-                                            Task {
-                                                await MainActor.run {
-                                                    print("[HomeView SendButton] Setting isSending=true. Old SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
-                                                    withAnimation(AnimationConfig.standardResponse) {
-                                                        isSending = true
-                                                    }
-                                                }
-
-                                                let textToAnalyze = inputText
-                                                var finalMoodValue = self.detectedMoodValue
-                                                print("[HomeView SendButton] Before mood check. SFCFN: \\(self.currentAudioFileName ?? \"nil\"), textToAnalyze: '\\(textToAnalyze)', hasMoodAnalysis: \\(hasMoodAnalysis)")
-
-                                                if !textToAnalyze.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                                    if let currentAnalysis = analyzeTask, !currentAnalysis.isCancelled {
-                                                        _ = await currentAnalysis.result
-                                                        finalMoodValue = self.detectedMoodValue
-                                                    } else if !hasMoodAnalysis {
-                                                        print("[HomeView] Send action: Forcing mood analysis as hasMoodAnalysis is false.")
-                                                        let mood = await aiService.analyzeMood(text: textToAnalyze.trimmingCharacters(in: .whitespacesAndNewlines))
-                                                        finalMoodValue = mood
-                                                        await MainActor.run {
-                                                            self.detectedMoodValue = mood
-                                                            self.hasMoodAnalysis = true
-                                                        }
-                                                    } else {
-                                                        finalMoodValue = self.detectedMoodValue
-                                                    }
-                                                } else if currentAudioFileName != nil && textToAnalyze.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                                    finalMoodValue = self.detectedMoodValue
-                                                }
-
-                                                let textToSend = inputText
-                                                let audioToSend = currentAudioFileName
-                                                let moodToSend = finalMoodValue
-                                                
-                                                await MainActor.run {
-                                                    print("[HomeView SendButton] Clearing inputs. Old SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
-                                                    withAnimation(AnimationConfig.fastResponse) {
-                                                        inputText = ""
-                                                        currentAudioFileName = nil // SET NIL in SendButton
-                                                        audioRecordings.removeAll()
-                                                        hasMoodAnalysis = false
-                                                    }
-                                                    print("[HomeView SendButton] Did clear inputs. New SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
-                                                    hideKeyboard()
-                                                }
-                                                
-                                                print("[HomeView SendButton] Calling store.addEntry. SFCFN: \\(self.currentAudioFileName ?? \"nil\") (should be nil here)")
-                                                await addEntry(text: textToSend, audioFileName: audioToSend, moodValue: moodToSend)
-                                                
-                                                await MainActor.run {
-                                                    print("[HomeView SendButton] Restoring isSending=false. SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
-                                                    withAnimation(AnimationConfig.standardResponse) {
-                                                        isSending = false
-                                                        // 确保在发送完成后，如果之前没有在清除输入时清除，这里也清除录音列表
-                                                        if !audioRecordings.isEmpty {
-                                                            audioRecordings.removeAll()
-                                                        }
-                                                    }
-                                                }
-                                                print("[HomeView SendButton END TASK] SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
-                                            }
-                                        }
-                                    }
-                                }
-                                .padding(UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 16)
-                                .background(
-                                    RoundedRectangle(cornerRadius: UIDevice.isMac ? 16 : 12, style: .continuous)
-                                        .fill(Color(.secondarySystemBackground))
-                                        .shadow(color: Color.primary.opacity(UIDevice.isMac ? 0.1 : 0.2), radius: UIDevice.isMac ? 8 : 4, x: 0, y: UIDevice.isMac ? 4 : 2)
-                                )
-                                .listRowInsets(EdgeInsets(
-                                    top: 0, 
-                                    leading: UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 16, 
-                                    bottom: UIDevice.isMac ? 16 : 12, 
-                                    trailing: UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 16
-                                ))
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(Color.clear)
-                                .macHoverEffect()
-
-                                // 日记条目内容 Sections
-                                diaryContentSections
-                            }
-                            .optimizedList()
-                            .scrollDismissesKeyboard(.interactively)
-                        }
-                        .navigationDestination(item: $selectedEntry) { entry in
-                            DiaryDetailView(entry: entry, startInEditMode: shouldStartEditing)
-                                .onDisappear {
-                                    shouldStartEditing = false
-                                }
-                        }
-                        .navigationDestination(isPresented: $isCalendarActive) {
-                            CalendarDiaryView()
-                        }
-                        .navigationBarHidden(true)
+                mainContentView
+                    .disabled(isSettingsOpen && !UIDevice.isMac)
+                    .overlay(alignment: .leading) {
+                        leadingSwipeGesture(panelWidth: panelWidth)
                     }
-                }
-                .disabled(isSettingsOpen && !UIDevice.isMac)
-
-                // 仅在主页且非日历界面时，启用左边缘滑动手势 - iOS only
-                .overlay(alignment: .leading) {
-                    if !UIDevice.isMac && selectedEntry == nil && !isCalendarActive && !isSettingsOpen {
-                        Color.clear
-                            .frame(width: 20)
-                            .contentShape(Rectangle())
-                            .gesture(
-                                DragGesture(minimumDistance: 10)
-                                    .onChanged { value in
-                                        let dx = value.translation.width
-                                        let dy = value.translation.height
-                                        // 水平滑动大于垂直，且起始点在左边缘
-                                        if abs(dx) > abs(dy) && dx > 0 {
-                                            dragOffsetX = min(dx, panelWidth)
-                                        }
-                                    }
-                                    .onEnded { value in
-                                        let dx = value.translation.width
-                                        if dx > panelWidth * 0.2 {
-                                            #if canImport(UIKit)
-                                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                            #endif
-                                            withAnimation(AnimationConfig.smoothTransition) {
-                                                isSettingsOpen = true
-                                                dragOffsetX = 0
-                                            }
-                                        } else {
-                                            withAnimation(AnimationConfig.standardResponse) {
-                                                dragOffsetX = 0
-                                            }
-                                        }
-                                    }
-                            )
+                    .overlay(alignment: .trailing) {
+                        trailingSwipeGesture(panelWidth: panelWidth)
                     }
-                }
-                // 右边缘滑动打开 Calendar - iOS only
-                .overlay(alignment: .trailing) {
-                    if !UIDevice.isMac && selectedEntry == nil && !isCalendarActive && !isSettingsOpen {
-                        Color.clear
-                            .frame(width: 20)
-                            .contentShape(Rectangle())
-                            .gesture(
-                                DragGesture(minimumDistance: 10)
-                                    .onEnded { value in
-                                        let dx = value.translation.width
-                                        let dy = value.translation.height
-                                        if abs(dx) > abs(dy) && dx < 0 {
-                                            if dx < -panelWidth * 0.1 {
-                                                #if canImport(UIKit)
-                                                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                                #endif
-                                                isCalendarActive = true
-                                            }
-                                        }
-                                    }
-                            )
-                    }
-                }
 
                 // 遮罩层 - iOS only
-                if !UIDevice.isMac {
-                    Color.black
-                        .opacity(maskAlpha)
-                        .animation(AnimationConfig.smoothTransition, value: maskAlpha)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(normalizedOpen > 0.01)
-                        .onTapGesture {
-                            #if canImport(UIKit)
-                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                            #endif
-                            withAnimation(AnimationConfig.smoothTransition) {
-                                isSettingsOpen = false
-                                dragOffsetX = 0
-                            }
-                        }
-                        .gesture(
-                            DragGesture().onEnded { value in
-                                let dx = value.translation.width
-                                let dy = value.translation.height
-                                if dx < -panelWidth * 0.1 && abs(dx) > abs(dy) {
-                                    #if canImport(UIKit)
-                                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                    #endif
-                                    withAnimation(AnimationConfig.smoothTransition) {
-                                        isSettingsOpen = false
-                                        dragOffsetX = 0
-                                    }
-                                }
-                            }
-                        )
-                }
+                maskLayer(maskAlpha: maskAlpha, panelWidth: panelWidth)
 
                 // 设置面板 - Mac优化为侧边栏
-                if UIDevice.isMac {
-                    MacSidebar(isVisible: $isSettingsOpen) {
-                        SettingsView(isSettingsOpen: $isSettingsOpen)
-                            .environmentObject(importService)
-                            .environment(\.managedObjectContext, viewContext)
-                    }
-                } else {
-                    SettingsView(isSettingsOpen: $isSettingsOpen)
-                        .environmentObject(importService)
-                        .environment(\.managedObjectContext, viewContext)
-                        .frame(width: panelWidth)
-                        .background(Color(.systemBackground))
-                        .offset(x: panelOffsetX)
-                        .animationIfChanged(AnimationConfig.smoothTransition, value: panelOffsetX)
-                        .gesture(
-                            DragGesture()
-                                .onChanged { value in
-                                    let dx = value.translation.width
-                                    let dy = value.translation.height
-                                    if isSettingsOpen && abs(dx) > abs(dy) {
-                                        dragOffsetX = min(max(dx, -panelWidth), 0)
-                                    }
-                                }
-                                .onEnded { value in
-                                    let dx = value.translation.width
-                                    let dy = value.translation.height
-                                    if isSettingsOpen && abs(dx) > abs(dy) {
-                                        if dragOffsetX < -panelWidth * 0.2 {
-                                            #if canImport(UIKit)
-                                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                            #endif
-                                            withAnimation(AnimationConfig.smoothTransition) {
-                                                isSettingsOpen = false
-                                                dragOffsetX = 0
-                                            }
-                                        } else {
-                                            withAnimation(AnimationConfig.standardResponse) {
-                                                dragOffsetX = 0
-                                            }
-                                        }
-                                    }
-                                }
-                        )
-                }
+                settingsPanel(panelWidth: panelWidth, panelOffsetX: panelOffsetX)
             }
         }
         .onChange(of: importService.isImporting) { _, isImporting in
@@ -735,9 +465,11 @@ struct HomeView: View {
         }
         .onAppear {
             setupMacToolbarListeners()
+            setupDatabaseRecreationObserver()
         }
         .onDisappear {
             removeMacToolbarListeners()
+            removeDatabaseRecreationObserver()
         }
         .macKeyboardShortcuts()
         .alert(NSLocalizedString("删除日记", comment: "Delete entry"), isPresented: $showDeleteConfirmation) {
@@ -752,9 +484,636 @@ struct HomeView: View {
         } message: {
             Text(NSLocalizedString("确定要删除这篇日记吗？此操作无法撤销。", comment: "Delete confirmation"))
         }
-        #endif // Close the #else block for iOS
+    }
+    
+    @ViewBuilder
+    private var mainContentView: some View {
+        MacAdaptiveLayout {
+            NavigationStack {
+                VStack(spacing: 0) {
+                    // 导航栏 - Mac版本隐藏或简化
+                    customNavigationBar
+
+                    // 导入进度条
+                    importProgressView
+
+                    // 主列表内容
+                    mainListContent
+                }
+                .navigationDestination(item: $selectedEntry) { entry in
+                    DiaryDetailView(entry: entry, startInEditMode: shouldStartEditing)
+                        .onDisappear {
+                            shouldStartEditing = false
+                        }
+                }
+                .navigationDestination(isPresented: $isCalendarActive) {
+                    CalendarDiaryView()
+                }
+#if canImport(UIKit)
+                .navigationBarHidden(true)
+#endif
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var customNavigationBar: some View {
+        if !UIDevice.isMac {
+            HStack {
+                Button {
+                    #if canImport(UIKit)
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    #endif
+                    withAnimation(AnimationConfig.smoothTransition) { 
+                        isSettingsOpen = true
+                        dragOffsetX = 0
+                    }
+                } label: {
+                    TwoLineIcon()
+                        .padding(8) // 扩大触摸区域
+                }
+                .contentShape(Rectangle())
+                .buttonStyle(SettingsIconButtonStyle())
+                .foregroundColor(Color.primary.opacity(0.75))
+                
+                Spacer()
+                
+                Button {
+                    #if canImport(UIKit)
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    #endif
+                    isCalendarActive = true
+                } label: {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 20, weight: .regular))
+                        .frame(width: 24, height: 24, alignment: .trailing)
+                }
+                .buttonStyle(PressableScaleButtonStyle())
+                .foregroundColor(Color.primary.opacity(0.75))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+    }
+    
+    @ViewBuilder
+    private var importProgressView: some View {
+        if importService.isImporting {
+            HStack(spacing: 8) {
+                BreathingDots()
+                Text(NSLocalizedString("导入中", comment: "Importing"))
+                    .font(.subheadline)
+                    .foregroundColor(.accentColor)
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+    
+    @ViewBuilder
+    private var mainListContent: some View {
+        List {
+            // 心情光谱滑块 - Mac优化布局
+            moodSliderSection
+
+            // 输入框和录音功能容器 - Mac优化
+            inputSection
+
+            // 日记条目内容 Sections
+            diaryContentSections
+        }
+        .optimizedList()
+        .scrollDismissesKeyboard(.interactively)
+    }
+    
+    @ViewBuilder
+    private var moodSliderSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            MoodSpectrumSlider(
+                moodValue: $detectedMoodValue,
+                showKnob: hasMoodAnalysis
+            )
+            .frame(height: UIDevice.isMac ? 12 : 8)
+            .frame(maxWidth: UIDevice.isMac ? 600 : .infinity)
+            .animationIfChanged(AnimationConfig.standardResponse, value: detectedMoodValue)
+        }
+        .padding(.horizontal, UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 14)
+        .padding(.top, UIDevice.isMac ? 20 : 12)
+        .padding(.bottom, UIDevice.isMac ? -40 : -50)
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
+    
+    @ViewBuilder
+    private var inputSection: some View {
+        VStack(alignment: .leading, spacing: UIDevice.isMac ? 16 : 12) {
+            // 文本输入区域
+            textInputArea
+
+            // 录音文件显示区域
+            recordingsSection
+            
+            // 图片显示区域
+            if !selectedImages.isEmpty {
+                photosSection
+            }
+
+            // 底部按钮区域
+            actionButtonsSection
+        }
+        .padding(UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 16)
+        .background(
+            RoundedRectangle(cornerRadius: UIDevice.isMac ? 16 : 12, style: .continuous)
+                #if canImport(UIKit)
+                .fill(Color(UIColor.secondarySystemBackground))
+                #else
+                .fill(Color(NSColor.controlBackgroundColor))
+                #endif
+                .shadow(color: Color.primary.opacity(UIDevice.isMac ? 0.1 : 0.2), radius: UIDevice.isMac ? 8 : 4, x: 0, y: UIDevice.isMac ? 4 : 2)
+        )
+        .listRowInsets(EdgeInsets(
+            top: 0, 
+            leading: UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 16, 
+            bottom: UIDevice.isMac ? 16 : 12, 
+            trailing: UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 16
+        ))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+        .macHoverEffect()
+    }
+    
+    @ViewBuilder
+    private var textInputArea: some View {
+        ZStack(alignment: .topLeading) {
+            TextEditor(text: $inputText)
+                .frame(height: UIDevice.isMac ? 180 : 140)
+                .frame(maxWidth: UIDevice.isMac ? 700 : .infinity)
+                // 设置移动端上下内边距4，左右8，Mac保持8
+                .padding(.horizontal, 8)
+                .padding(.vertical, UIDevice.isMac ? 8 : 4)
+                .background(Color.clear)
+                .scrollContentBackground(.hidden)
+                .font(.system(size: UIDevice.isMac ? 16 : 17)) // 移动端文字大小为17pt
+                .onChange(of: inputText) { oldValue, newValue in
+                    handleInputTextChange(newValue)
+                }
+            if inputText.isEmpty {
+                Text(NSLocalizedString("今天是怎样的一天呢？", comment: "Daily prompt"))
+                    .font(.system(size: UIDevice.isMac ? 16 : 17)) // 同步占位文本大小
+                    .foregroundColor(.secondary.opacity(0.6))
+                    // 设置移动端上下内边距10，左右10，Mac保持8
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, UIDevice.isMac ? 8 : 12)
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+    
+    private func handleInputTextChange(_ newValue: String) {
+        #if !os(macOS)
+        print("[HomeView inputText.onChange START] SFCFN: \\(currentAudioFileName ?? \"nil\"), Input: '\\(newValue)'")
+        analyzeTask?.cancel()
+
+        let trimmedNewValue = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmedNewValue.isEmpty {
+            hasMoodAnalysis = false
+            print("[HomeView inputText.onChange END - empty text] SFCFN: \\(currentAudioFileName ?? \"nil\")")
+            return
+        }
+
+        analyzeTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: 300_000_000)
+                
+                if Task.isCancelled {
+                    print("[HomeView inputText.onChange Task CANCELLED pre-mood] SFCFN: \\(currentAudioFileName ?? \"nil\")")
+                    return
+                }
+
+                let mood = await aiService.analyzeMood(text: trimmedNewValue)
+                
+                if Task.isCancelled {
+                    print("[HomeView inputText.onChange Task CANCELLED post-mood] SFCFN: \\(currentAudioFileName ?? \"nil\")")
+                    return
+                }
+                print("[HomeView inputText.onChange Task - before mood update] SFCFN: \\(currentAudioFileName ?? \"nil\"), detectedMood: \\(mood)")
+                detectedMoodValue = mood
+                hasMoodAnalysis = true
+                print("[HomeView inputText.onChange Task - after mood update] SFCFN: \\(currentAudioFileName ?? \"nil\"), hasMoodAnalysis: \\(hasMoodAnalysis)")
+
+            } catch {
+                if !(error is CancellationError) {
+                    print("[HomeView inputText.onChange Task Error]: \\(error), SFCFN: \\(currentAudioFileName ?? \"nil\")")
+                }
+            }
+        }
+        print("[HomeView inputText.onChange END - task started] SFCFN: \\(currentAudioFileName ?? \"nil\")")
+        #endif
+    }
+    
+    @ViewBuilder
+    private var recordingsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(audioRecordings) { rec in
+                RecordingRow(
+                    recording: rec,
+                    controller: audioPlaybackController,
+                    isTranscribing: isTranscribing,
+                    onPlay: { playAudio(fileName: rec.fileName) },
+                    onDelete: {
+                        deleteTarget = rec.fileName
+                        showingDeleteAlert = true
+                    }
+                )
+            }
+        }
+        .frame(height: audioRecordings.isEmpty ? 0 : nil)
+        .alert(NSLocalizedString("删除录音？", comment: "Delete recording confirmation"), isPresented: $showingDeleteAlert) {
+            Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
+                if let target = deleteTarget {
+                    deleteRecording(target)
+                }
+            }
+            Button(NSLocalizedString("取消", comment: "Cancel button"), role: .cancel) {
+                deleteTarget = nil
+            }
+        }
+    }
+    
+    private func deleteRecording(_ target: String) {
+        if audioPlaybackController.currentPlayingFileName == target {
+            audioPlaybackController.stopPlayback(clearCurrentFile: true)
+        }
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let audioURL = documentsURL.appendingPathComponent(target)
+        do {
+            try FileManager.default.removeItem(at: audioURL)
+        } catch {
+            print("[HomeView deleteCurrentAudio] 删除音频文件出错: \(error.localizedDescription)")
+        }
+        // 删除录音时使用动画
+        withAnimation(AnimationConfig.stiffSpring) {
+            audioRecordings.removeAll { $0.fileName == target }
+        }
+        deleteTarget = nil
+    }
+    
+    @ViewBuilder
+    private var actionButtonsSection: some View {
+        HStack(spacing: UIDevice.isMac ? 16 : 12) {
+            // 录音按钮（占主要位置）
+            AppleStyleRecordButton(
+                recorder: recorder,
+                onStop: { await handleStopRecording() }
+            )
+            .disabled(audioRecordings.count >= 3)
+            .frame(maxWidth: .infinity, minHeight: UIDevice.isMac ? 52 : 48)
+            
+            // 添加照片按钮
+            PhotosPicker(
+                selection: $selectedPhotos,
+                maxSelectionCount: 9,
+                matching: .images
+            ) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.secondary.opacity(0.15))
+                        .frame(width: 48, height: 48)
+                    
+                    Image(systemName: "photo.badge.plus")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .disabled(selectedImages.count >= 9)
+            
+            // 发送按钮
+            AppleStyleSendButton(
+                isSending: $isSending,
+                isEnabled: (!inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !audioRecordings.isEmpty || !selectedImages.isEmpty) && !isTranscribing
+            ) {
+                handleSendAction()
+            }
+        }
+        .onChange(of: selectedPhotos) { _, newValue in
+            Task {
+                selectedImages = []
+                for item in newValue {
+                    if let data = try? await item.loadTransferable(type: Data.self) {
+                        selectedImages.append(data)
+                        print("[HomeView] Loaded image data, size: \(data.count) bytes")
+                    } else {
+                        print("[HomeView] Failed to load image data from PhotosPicker")
+                    }
+                }
+                print("[HomeView] Total selected images: \(selectedImages.count)")
+            }
+        }
+    }
+    
+    private func handleSendAction() {
+#if canImport(UIKit)
+        HapticManager.shared.click()
+#endif
+        Task {
+            await MainActor.run {
+                print("[HomeView SendButton] Setting isSending=true. Old SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
+                withAnimation(AnimationConfig.standardResponse) {
+                    isSending = true
+                }
+            }
+
+            let textToAnalyze = inputText
+            var finalMoodValue = self.detectedMoodValue
+            print("[HomeView SendButton] Before mood check. SFCFN: \\(self.currentAudioFileName ?? \"nil\"), textToAnalyze: '\\(textToAnalyze)', hasMoodAnalysis: \\(hasMoodAnalysis)")
+
+            if !textToAnalyze.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if let currentAnalysis = analyzeTask, !currentAnalysis.isCancelled {
+                    _ = await currentAnalysis.result
+                    finalMoodValue = self.detectedMoodValue
+                } else if !hasMoodAnalysis {
+                    print("[HomeView] Send action: Forcing mood analysis as hasMoodAnalysis is false.")
+                    let mood = await aiService.analyzeMood(text: textToAnalyze.trimmingCharacters(in: .whitespacesAndNewlines))
+                    finalMoodValue = mood
+                    await MainActor.run {
+                        self.detectedMoodValue = mood
+                        self.hasMoodAnalysis = true
+                    }
+                } else {
+                    finalMoodValue = self.detectedMoodValue
+                }
+            } else if currentAudioFileName != nil && textToAnalyze.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                finalMoodValue = self.detectedMoodValue
+            }
+
+            let textToSend = inputText
+            let audioToSend = currentAudioFileName
+            let moodToSend = finalMoodValue
+            let imagesToSend = selectedImages
+            print("[HomeView SendButton] Images to send: \(imagesToSend.count)")
+            
+            await MainActor.run {
+                print("[HomeView SendButton] Clearing inputs. Old SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
+                withAnimation(AnimationConfig.fastResponse) {
+                    inputText = ""
+                    currentAudioFileName = nil // SET NIL in SendButton
+                    audioRecordings.removeAll()
+                    selectedImages.removeAll()
+                    selectedPhotos.removeAll()
+                    hasMoodAnalysis = false
+                }
+                print("[HomeView SendButton] Did clear inputs. New SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
+                hideKeyboard()
+            }
+            
+            print("[HomeView SendButton] Calling store.addEntry. SFCFN: \\(self.currentAudioFileName ?? \"nil\") (should be nil here)")
+            await addEntry(text: textToSend, audioFileName: audioToSend, moodValue: moodToSend, images: imagesToSend)
+            
+            await MainActor.run {
+                print("[HomeView SendButton] Restoring isSending=false. SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
+                withAnimation(AnimationConfig.standardResponse) {
+                    isSending = false
+                    // 确保在发送完成后，如果之前没有在清除输入时清除，这里也清除录音列表
+                    if !audioRecordings.isEmpty {
+                        audioRecordings.removeAll()
+                    }
+                }
+            }
+            print("[HomeView SendButton END TASK] SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
+        }
+    }
+    
+    @ViewBuilder
+    private func leadingSwipeGesture(panelWidth: CGFloat) -> some View {
+        if !UIDevice.isMac && selectedEntry == nil && !isCalendarActive && !isSettingsOpen {
+            Color.clear
+                .frame(width: 20)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 10)
+                        .onChanged { value in
+                            let dx = value.translation.width
+                            let dy = value.translation.height
+                            // 水平滑动大于垂直，且起始点在左边缘
+                            if abs(dx) > abs(dy) && dx > 0 {
+                                dragOffsetX = min(dx, panelWidth)
+                            }
+                        }
+                        .onEnded { value in
+                            let dx = value.translation.width
+                            if dx > panelWidth * 0.2 {
+                                #if canImport(UIKit)
+                                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                                #endif
+                                withAnimation(AnimationConfig.smoothTransition) {
+                                    isSettingsOpen = true
+                                    dragOffsetX = 0
+                                }
+                            } else {
+                                withAnimation(AnimationConfig.standardResponse) {
+                                    dragOffsetX = 0
+                                }
+                            }
+                        }
+                )
+        }
+    }
+    
+    @ViewBuilder
+    private func trailingSwipeGesture(panelWidth: CGFloat) -> some View {
+        if !UIDevice.isMac && selectedEntry == nil && !isCalendarActive && !isSettingsOpen {
+            Color.clear
+                .frame(width: 20)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 10)
+                        .onEnded { value in
+                            let dx = value.translation.width
+                            let dy = value.translation.height
+                            if abs(dx) > abs(dy) && dx < 0 {
+                                if dx < -panelWidth * 0.1 {
+                                    #if canImport(UIKit)
+                                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                                    #endif
+                                    isCalendarActive = true
+                                }
+                            }
+                        }
+                )
+        }
+    }
+    
+    @ViewBuilder
+    private func maskLayer(maskAlpha: Double, panelWidth: CGFloat) -> some View {
+        if !UIDevice.isMac {
+            Color.black
+                .opacity(maskAlpha)
+                .animation(AnimationConfig.smoothTransition, value: maskAlpha)
+                .ignoresSafeArea()
+                .allowsHitTesting(maskAlpha > 0.01)
+                .onTapGesture {
+                    #if canImport(UIKit)
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    #endif
+                    withAnimation(AnimationConfig.smoothTransition) {
+                        isSettingsOpen = false
+                        dragOffsetX = 0
+                    }
+                }
+                .gesture(
+                    DragGesture().onEnded { value in
+                        let dx = value.translation.width
+                        let dy = value.translation.height
+                        if dx < -panelWidth * 0.1 && abs(dx) > abs(dy) {
+                            #if canImport(UIKit)
+                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                            #endif
+                            withAnimation(AnimationConfig.smoothTransition) {
+                                isSettingsOpen = false
+                                dragOffsetX = 0
+                            }
+                        }
+                    }
+                )
+        }
+    }
+    
+    @ViewBuilder
+    private func settingsPanel(panelWidth: CGFloat, panelOffsetX: CGFloat) -> some View {
+        if UIDevice.isMac {
+            MacSidebar(isVisible: $isSettingsOpen) {
+                SettingsView(isSettingsOpen: $isSettingsOpen)
+                    .environmentObject(importService)
+                    .environment(\.managedObjectContext, viewContext)
+            }
+        } else {
+            SettingsView(isSettingsOpen: $isSettingsOpen)
+                .environmentObject(importService)
+                .environment(\.managedObjectContext, viewContext)
+                .frame(width: panelWidth)
+                #if canImport(UIKit)
+                .background(Color(UIColor.systemBackground))
+                #else
+                .background(Color(NSColor.windowBackgroundColor))
+                #endif
+                .offset(x: panelOffsetX)
+                .animationIfChanged(AnimationConfig.smoothTransition, value: panelOffsetX)
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            let dx = value.translation.width
+                            let dy = value.translation.height
+                            if isSettingsOpen && abs(dx) > abs(dy) {
+                                dragOffsetX = min(max(dx, -panelWidth), 0)
+                            }
+                        }
+                        .onEnded { value in
+                            let dx = value.translation.width
+                            let dy = value.translation.height
+                            if isSettingsOpen && abs(dx) > abs(dy) {
+                                if dragOffsetX < -panelWidth * 0.2 {
+                                    #if canImport(UIKit)
+                                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                                    #endif
+                                    withAnimation(AnimationConfig.smoothTransition) {
+                                        isSettingsOpen = false
+                                        dragOffsetX = 0
+                                    }
+                                } else {
+                                    withAnimation(AnimationConfig.standardResponse) {
+                                        dragOffsetX = 0
+                                    }
+                                }
+                            }
+                        }
+                )
+        }
     }
 
+    @ViewBuilder
+    private var photosSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "photo.stack")
+                    .foregroundColor(.blue)
+                Text(selectedImages.count == 1 ? NSLocalizedString("1张照片", comment: "") : String(format: NSLocalizedString("%d张照片", comment: ""), selectedImages.count))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(selectedImages.indices, id: \.self) { index in
+                        Group {
+                            #if os(iOS)
+                            if let uiImage = UIImage(data: selectedImages[index]) {
+                                ZStack(alignment: .topTrailing) {
+                                    Image(uiImage: uiImage)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 80, height: 80)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    
+                                    Button(action: {
+                                        withAnimation(AnimationConfig.stiffSpring) {
+                                            selectedImages.remove(at: index)
+                                            if index < selectedPhotos.count {
+                                                selectedPhotos.remove(at: index)
+                                            }
+                                        }
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 20))
+                                            .foregroundColor(.white)
+                                            .background(
+                                                Circle()
+                                                    .fill(Color.black.opacity(0.6))
+                                            )
+                                    }
+                                    .buttonStyle(PlainButtonStyle())
+                                    .padding(4)
+                                }
+                            }
+                            #else
+                            if let nsImage = NSImage(data: selectedImages[index]) {
+                                ZStack(alignment: .topTrailing) {
+                                    Image(nsImage: nsImage)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 80, height: 80)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    
+                                    Button(action: {
+                                        withAnimation(AnimationConfig.stiffSpring) {
+                                            selectedImages.remove(at: index)
+                                            if index < selectedPhotos.count {
+                                                selectedPhotos.remove(at: index)
+                                            }
+                                        }
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 20))
+                                            .foregroundColor(.white)
+                                            .background(
+                                                Circle()
+                                                    .fill(Color.black.opacity(0.6))
+                                            )
+                                    }
+                                    .buttonStyle(PlainButtonStyle())
+                                    .padding(4)
+                                }
+                            }
+                            #endif
+                        }
+                    }
+                }
+                .padding(.horizontal, 4)
+            }
+            .frame(height: 88)
+        }
+    }
+    
     // MARK: - Helper Functions
     
     private func formatDate(_ date: Date) -> String {
@@ -767,7 +1126,7 @@ struct HomeView: View {
     
     // MARK: - Core Data 操作
     
-    private func addEntry(text: String, audioFileName: String?, moodValue: Double? = nil) async {
+    private func addEntry(text: String, audioFileName: String?, moodValue: Double? = nil, images: [Data] = []) async {
         // 并行调用摘要与情绪（如果未提供）以提升性能
         let finalMoodValue: Double
         let summary: String?
@@ -783,14 +1142,58 @@ struct HomeView: View {
         
         // 在主线程创建 Core Data 实体
         await MainActor.run {
-            let newEntry = NSEntityDescription.insertNewObject(forEntityName: "DiaryEntry", into: viewContext)
-            newEntry.setValue(UUID(), forKey: "id")
-            newEntry.setValue(Date(), forKey: "date")
-            newEntry.setValue(text, forKey: "text")
-            newEntry.setValue(finalMoodValue, forKey: "moodValue")
-            newEntry.setValue(summary, forKey: "summary")
+            let newEntry = DiaryEntry(context: viewContext)
+            newEntry.id = UUID()
+            newEntry.date = Date()
+            newEntry.text = text
+            newEntry.moodValue = finalMoodValue
+            newEntry.summary = summary
+            // Copy audio file to iCloud if needed
             if let audioFileName = audioFileName {
-                newEntry.setValue(audioFileName, forKey: "audioFileName")
+                let localURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                    .appendingPathComponent(audioFileName)
+                
+                if FileManager.default.fileExists(atPath: localURL.path),
+                   let audioData = try? Data(contentsOf: localURL) {
+                    
+                    // Save to iCloud location
+                    if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
+                        let audioDir = iCloudURL.appendingPathComponent("Documents/LumoryAudio")
+                        if !FileManager.default.fileExists(atPath: audioDir.path) {
+                            try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
+                        }
+                        
+                        let iCloudAudioURL = audioDir.appendingPathComponent(audioFileName)
+                        try? audioData.write(to: iCloudAudioURL)
+                        print("[HomeView] Saved audio to iCloud: \(audioFileName)")
+                        
+                        // Delete from local after successful copy
+                        try? FileManager.default.removeItem(at: localURL)
+                    }
+                }
+                
+                newEntry.audioFileName = audioFileName
+            }
+            
+            // 保存图片
+            print("[HomeView addEntry] Saving \(images.count) images")
+            var imageFileNames: [String] = []
+            for (index, imageData) in images.enumerated() {
+                let fileName = "img_\(newEntry.id?.uuidString ?? UUID().uuidString)_\(index).jpg"
+                do {
+                    let savedFileName = try DiaryEntry.saveImageToDocuments(imageData, fileName: fileName)
+                    imageFileNames.append(savedFileName)
+                    print("[HomeView addEntry] Saved image \(index + 1)/\(images.count): \(savedFileName)")
+                } catch {
+                    print("[HomeView] 保存图片失败: \(error)")
+                }
+            }
+            if !imageFileNames.isEmpty {
+                newEntry.imageFileNames = imageFileNames.joined(separator: ",")
+                print("[HomeView addEntry] Set imageFileNames: \(newEntry.imageFileNames ?? "")")
+                
+                // Also save images data for sync
+                newEntry.saveImagesForSync(images)
             }
             
             do {
@@ -805,23 +1208,37 @@ struct HomeView: View {
     @ViewBuilder
     private var diaryContentSections: some View {
         if entries.isEmpty {
-            Section {
-                Text(NSLocalizedString("暂无日记，快去记录吧～", comment: "No entries message"))
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding()
-            }
-            .listRowSeparator(.hidden)
-            .listSectionSeparator(.hidden)
-            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
-            .listRowBackground(Color.clear)
+            emptyStateSection
         } else {
-            let sortedEntries = entries.sorted(by: { $0.date > $1.date })
-            let grouped = Dictionary(grouping: sortedEntries) { cal.startOfDay(for: $0.date) }
-            let sortedDates = grouped.keys.sorted(by: >)
-            ForEach(sortedDates, id: \.self) { date in
-                // 日期标题作为常规列表行，取消悬停
-                let entriesForDate = grouped[date]!  
+            entriesListSection
+        }
+    }
+    
+    @ViewBuilder
+    private var emptyStateSection: some View {
+        Section {
+            Text(NSLocalizedString("暂无日记，快去记录吧～", comment: "No entries message"))
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding()
+        }
+        .listRowSeparator(.hidden)
+        .listSectionSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+        .listRowBackground(Color.clear)
+    }
+    
+    @ViewBuilder
+    private var entriesListSection: some View {
+        let sortedEntries = entries.sorted(by: { ($0.date ?? Date.distantPast) > ($1.date ?? Date.distantPast) })
+        let grouped = Dictionary(grouping: sortedEntries) { cal.startOfDay(for: $0.date ?? Date()) }
+        let sortedDates = grouped.keys.sorted(by: >)
+        ForEach(sortedDates, id: \.self) { date in
+            Section {
+                ForEach(grouped[date]!, id: \.id) { entry in
+                    diaryEntryRow(entry: entry)
+                }
+            } header: {
                 Text(formatDate(date))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
@@ -830,44 +1247,57 @@ struct HomeView: View {
                     .padding(.top, 8)
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
-                ForEach(entriesForDate, id: \.id) { entry in
-                    Button {
-                        selectedEntry = entry
-                    } label: {
-                        DiaryRow(entry: entry, hasContainerBackground: true)
-                            .padding(UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 16)
-                            .background(
-                                RoundedRectangle(cornerRadius: UIDevice.isMac ? 16 : 12, style: .continuous)
-                                    .fill(Color(.secondarySystemBackground))
-                                    .shadow(color: Color.primary.opacity(UIDevice.isMac ? 0.1 : 0.2), radius: UIDevice.isMac ? 8 : 4, x: 0, y: UIDevice.isMac ? 4 : 2)
-                            )
-                            .macHoverEffect()
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .contextMenu {
-                        Button {
-                            shouldStartEditing = true
-                            selectedEntry = entry
-                        } label: {
-                            Label(NSLocalizedString("编辑", comment: "Edit"), systemImage: "pencil")
-                        }
-                        Button(role: .destructive) {
-                            entryToDelete = entry
-                            showDeleteConfirmation = true
-                        } label: {
-                            Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
-                        }
-                    } preview: {
-                        DiaryPreviewView(entry: entry, appLanguage: appLanguage) {
-                            selectedEntry = entry
-                        }
-                    }
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 8, trailing: 16))
-                }
             }
         }
+    }
+    
+    @ViewBuilder
+    private func diaryEntryRow(entry: DiaryEntry) -> some View {
+        Button {
+            selectedEntry = entry
+        } label: {
+            DiaryRow(entry: entry, hasContainerBackground: true)
+                .padding(UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 16)
+                .background(entryRowBackground)
+                .macHoverEffect()
+        }
+        .buttonStyle(PlainButtonStyle())
+        .contextMenu {
+            Button {
+                shouldStartEditing = true
+                selectedEntry = entry
+            } label: {
+                Label(NSLocalizedString("编辑", comment: "Edit"), systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                entryToDelete = entry
+                showDeleteConfirmation = true
+            } label: {
+                Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
+            }
+        } preview: {
+            DiaryPreviewView(entry: entry, appLanguage: appLanguage) {
+                selectedEntry = entry
+            }
+        }
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 8, trailing: 16))
+    }
+    
+    private var entryRowBackground: some View {
+        RoundedRectangle(cornerRadius: UIDevice.isMac ? 16 : 12, style: .continuous)
+            #if canImport(UIKit)
+            .fill(Color(UIColor.secondarySystemBackground))
+            #else
+            .fill(Color(NSColor.controlBackgroundColor))
+            #endif
+            .shadow(
+                color: Color.primary.opacity(UIDevice.isMac ? 0.1 : 0.2),
+                radius: UIDevice.isMac ? 8 : 4,
+                x: 0,
+                y: UIDevice.isMac ? 4 : 2
+            )
     }
 
     func handleStopRecording() async {
@@ -904,6 +1334,7 @@ struct HomeView: View {
         // 开始异步转录任务
         transcriptionTask = Task {
             print("[HomeView handleStopRecording Task START] SFCFN: \(currentAudioFileName ?? "nil")")
+            print("[HomeView] Using language for transcription: \(appLanguage)")
             let transcribedTextOpt = await aiService.transcribeAudio(fileURL: audioURL, localeIdentifier: appLanguage)
             // 转录完成，更新状态
             await MainActor.run {
@@ -1039,6 +1470,9 @@ struct HomeView: View {
         
         // Perform deletion within a withAnimation block for smoother UI updates
         withAnimation {
+            // Delete associated images
+            entry.deleteAllImages()
+            
             viewContext.delete(entry)
             
             do {
@@ -1064,7 +1498,7 @@ struct HomeView: View {
     #if targetEnvironment(macCatalyst)
     private func setupMacToolbarListeners() {
         let newEntryListener = NotificationCenter.default.addObserver(
-            forName: .macNewEntry,
+            forName: .navigateToHome,
             object: nil,
             queue: .main
         ) { _ in
@@ -1073,7 +1507,7 @@ struct HomeView: View {
         }
         
         let calendarListener = NotificationCenter.default.addObserver(
-            forName: .macShowCalendar,
+            forName: .navigateToCalendar,
             object: nil,
             queue: .main
         ) { _ in
@@ -1081,7 +1515,7 @@ struct HomeView: View {
         }
         
         let settingsListener = NotificationCenter.default.addObserver(
-            forName: .macShowSettings,
+            forName: .showSettings,
             object: nil,
             queue: .main
         ) { _ in
@@ -1103,6 +1537,58 @@ struct HomeView: View {
     private func setupMacToolbarListeners() {}
     private func removeMacToolbarListeners() {}
     #endif
+    
+    // MARK: - Database Recreation Observer
+    
+    private func setupDatabaseRecreationObserver() {
+        databaseRecreationObserver = NotificationCenter.default.addObserver(
+            forName: .databaseRecreated,
+            object: nil,
+            queue: .main
+        ) { _ in
+            print("[HomeView] Database recreated notification received")
+            handleDatabaseRecreation()
+        }
+    }
+    
+    private func removeDatabaseRecreationObserver() {
+        if let observer = databaseRecreationObserver {
+            NotificationCenter.default.removeObserver(observer)
+            databaseRecreationObserver = nil
+        }
+    }
+    
+    private func handleDatabaseRecreation() {
+        // Clear any local state that might reference deleted objects
+        selectedEntry = nil
+        entryToDelete = nil
+        
+        // Stop any ongoing audio playback
+        audioPlaybackController.stopPlayback(clearCurrentFile: true)
+        
+        // Clear input state
+        inputText = ""
+        currentAudioFileName = nil
+        audioRecordings.removeAll()
+        selectedImages.removeAll()
+        selectedPhotos.removeAll()
+        hasMoodAnalysis = false
+        detectedMoodValue = 0.5
+        
+        // Cancel any ongoing tasks
+        analyzeTask?.cancel()
+        transcriptionTask?.cancel()
+        
+        // Force Core Data to refresh
+        viewContext.refreshAllObjects()
+        
+        // Haptic feedback to indicate refresh
+        #if canImport(UIKit)
+        HapticManager.shared.click()
+        #endif
+        
+        print("[HomeView] Database recreation handled - state cleared and context refreshed")
+    }
     
     // MARK: - Helpers
     var shouldShowMoodControls: Bool {
@@ -1129,7 +1615,7 @@ struct DiaryRow: View {
                 VStack(alignment: .leading) {
                     Text(displayText)
                         .lineLimit(1)
-                    Text(entry.date, style: .time)
+                    Text(entry.date ?? Date(), style: .time)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -1148,7 +1634,7 @@ struct DiaryRow: View {
         guard !entry.isDeleted, entry.managedObjectContext != nil else {
             return NSLocalizedString("日记已删除", comment: "Entry deleted") // Or an empty string: ""
         }
-        let raw = entry.summary ?? String(entry.text.prefix(30)) + "..."
+        let raw = entry.summary ?? String((entry.text ?? "").prefix(30)) + "..."
         // 过滤掉句号、星号和引号
         let filtered = raw
             .replacingOccurrences(of: ".", with: "")
@@ -1169,7 +1655,14 @@ struct AppleStyleRecordButton: View {
     @State private var isPressing: Bool = false
     @State private var pulseOpacity: Double = 0.0
     @Environment(\.colorScheme) private var colorScheme
-    @AppStorage("appLanguage") private var appLanguage: String = Locale.current.identifier
+    
+    // 使用静态函数确保默认值类型正确
+    private static var defaultAppLanguage: String {
+        let currentLocale = Locale.current.identifier
+        return currentLocale.hasPrefix("zh") ? "zh-Hans" : "en"
+    }
+    
+    @AppStorage("appLanguage") private var appLanguage: String = AppleStyleRecordButton.defaultAppLanguage
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1270,7 +1763,11 @@ struct AppleStyleRecordButton: View {
         if recorder.isRecording {
             return Color.red
         } else {
+#if canImport(UIKit)
             return Color(.systemGray5)  // 更明显的灰色，与发送按钮风格统一
+#else
+            return Color(NSColor.controlBackgroundColor)
+#endif
         }
     }
     
@@ -1278,7 +1775,11 @@ struct AppleStyleRecordButton: View {
         if recorder.isRecording {
             return .white
         } else {
+#if canImport(UIKit)
             return Color(.systemGray2)  // 更深的灰色图标，增强对比度
+#else
+            return Color(NSColor.secondaryLabelColor)
+#endif
         }
     }
     
@@ -1334,9 +1835,17 @@ struct AppleStyleSendButton: View {
     
     private var buttonBackgroundColor: Color {
         if !isEnabled {
+#if canImport(UIKit)
             return Color(.systemGray4)
+#else
+            return Color(NSColor.disabledControlTextColor)
+#endif
         } else if isSending {
+#if canImport(UIKit)
             return Color(.systemGray3)
+#else
+            return Color(NSColor.tertiaryLabelColor)
+#endif
         } else {
             return Color(red: 114/255, green: 192/255, blue: 254/255)
         }
@@ -1371,7 +1880,7 @@ struct RecordButton: View {
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { _ in
-                    if !recorder.isRecording {
+                    if !recorder.isRecording && !isPressing {
                         isPressing = true
 #if canImport(UIKit)
                         HapticManager.shared.click()
@@ -1432,7 +1941,11 @@ struct RecordingRow: View {
         .background(
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: UIDevice.isMac ? 10 : 8, style: .continuous)
+#if canImport(UIKit)
                     .fill(Color(.systemGray6))
+#else
+                    .fill(Color(NSColor.controlBackgroundColor))
+#endif
                 if controller.currentPlayingFileName == recording.fileName && recording.duration > 0 {
                     GeometryReader { geo in
                         RoundedRectangle(cornerRadius: UIDevice.isMac ? 10 : 8, style: .continuous)
@@ -1447,29 +1960,6 @@ struct RecordingRow: View {
     }
 }
 
-// THIRD_EDIT: 在文件末尾添加呼吸点加载动画组件
-struct BreathingDots: View {
-    @State private var animate = false
-    var body: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .frame(width: 8, height: 8)
-                .scaleEffect(animate ? 1 : 0.5)
-                .animation(AnimationConfig.breathingAnimation, value: animate)
-            Circle()
-                .frame(width: 8, height: 8)
-                .scaleEffect(animate ? 1 : 0.5)
-                .animation(AnimationConfig.breathingAnimation.delay(0.2), value: animate)
-            Circle()
-                .frame(width: 8, height: 8)
-                .scaleEffect(animate ? 1 : 0.5)
-                .animation(AnimationConfig.breathingAnimation.delay(0.4), value: animate)
-        }
-        .onAppear {
-            animate = true
-        }
-    }
-}
 
 // 日记预览视图
 struct DiaryPreviewView: View {
@@ -1532,7 +2022,11 @@ struct DiaryPreviewView: View {
             }
             .padding()
             .frame(width: 300, height: 400)
+#if canImport(UIKit)
             .background(Color(.systemBackground))
+#else
+            .background(Color(NSColor.windowBackgroundColor))
+#endif
             .contentShape(Rectangle())
             .onTapGesture {
                 onTap()

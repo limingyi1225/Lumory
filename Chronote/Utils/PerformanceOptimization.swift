@@ -10,6 +10,8 @@ struct FetchRequestOptimizer {
         request.fetchBatchSize = batchSize
         request.returnsObjectsAsFaults = true
         request.includesPendingChanges = false
+        request.shouldRefreshRefetchedObjects = false
+        request.relationshipKeyPathsForPrefetching = []
         return request
     }
 }
@@ -36,27 +38,38 @@ extension View {
     }
 }
 
-// MARK: - Debounced State Updates
+// MARK: - Optimized Debounced State Updates
 
 @MainActor
-class DebouncedState<Value>: ObservableObject {
+class DebouncedState<Value: Equatable & Sendable>: ObservableObject {
     @Published private(set) var value: Value
     private var task: Task<Void, Never>?
     private let duration: TimeInterval
-    
+
     init(initialValue: Value, debounceFor duration: TimeInterval = 0.3) {
         self.value = initialValue
         self.duration = duration
     }
-    
+
     func update(_ newValue: Value) {
+        // Skip update if value hasn't changed to reduce unnecessary work
+        guard newValue != value else { return }
+
         task?.cancel()
-        task = Task {
-            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
-            if !Task.isCancelled {
-                self.value = newValue
+        task = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+                if !Task.isCancelled {
+                    self.value = newValue
+                }
+            } catch {
+                // Handle cancellation gracefully
             }
         }
+    }
+
+    deinit {
+        task?.cancel()
     }
 }
 
@@ -95,7 +108,7 @@ struct OptimizedImage: View {
 struct LazyLoadView<Content: View>: View {
     let content: () -> Content
     @State private var hasAppeared = false
-    
+
     var body: some View {
         Group {
             if hasAppeared {
@@ -107,5 +120,46 @@ struct LazyLoadView<Content: View>: View {
                     }
             }
         }
+    }
+}
+
+// MARK: - Mac Catalyst Specific Optimizations
+
+struct MacCatalystOptimizedView<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        #if targetEnvironment(macCatalyst)
+        content
+            .preferredColorScheme(nil) // Let system handle color scheme
+            .dynamicTypeSize(.medium...(.accessibility1)) // Limit dynamic type range for better layout
+        #else
+        content
+        #endif
+    }
+}
+
+// MARK: - Optimized List Performance
+
+extension View {
+    /// Apply Mac Catalyst specific optimizations
+    func macCatalystOptimized() -> some View {
+        #if targetEnvironment(macCatalyst)
+        return self
+            .listRowSeparator(.hidden)
+            .listSectionSeparator(.hidden)
+            .scrollContentBackground(.hidden)
+        #else
+        return self
+        #endif
+    }
+
+    /// Optimize for reduced redraws
+    func reduceRedraws<T: Equatable & Hashable>(_ value: T) -> some View {
+        self.id(value)
     }
 }

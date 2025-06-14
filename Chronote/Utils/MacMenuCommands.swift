@@ -16,140 +16,16 @@ struct MacMenuCommands: Commands {
     @FocusedBinding(\.selectedDate) var selectedDate
     
     var body: some Commands {
-        // File Menu
+        // File Menu - New Window
         CommandGroup(replacing: .newItem) {
-            Button("New Entry") {
-                isShowingNewEntry = true
+            Button("New Window") {
+                UIApplication.shared.requestSceneSessionActivation(nil, userActivity: nil, options: nil, errorHandler: nil)
             }
             .keyboardShortcut("n", modifiers: .command)
-            
-            Divider()
-            
-            Button("Import Entries...") {
-                NotificationCenter.default.post(name: .showImportView, object: nil)
-            }
-            .keyboardShortcut("i", modifiers: [.command, .shift])
-            
-            Button("Export Entry...") {
-                if let entry = selectedEntry {
-                    NotificationCenter.default.post(name: .exportEntry, object: entry)
-                }
-            }
-            .keyboardShortcut("e", modifiers: [.command, .shift])
-            .disabled(selectedEntry == nil)
         }
-        
-        // Edit Menu
-        CommandGroup(after: .pasteboard) {
-            Divider()
-            
-            Button(isEditMode == true ? "Done Editing" : "Edit Entry") {
-                isEditMode?.toggle()
-            }
-            .keyboardShortcut("e", modifiers: .command)
-            .disabled(selectedEntry == nil)
-            
-            Button("Delete Entry") {
-                if let entry = selectedEntry {
-                    NotificationCenter.default.post(name: .deleteEntry, object: entry)
-                }
-            }
-            .keyboardShortcut(.delete, modifiers: .command)
-            .disabled(selectedEntry == nil)
-        }
-        
-        // View Menu
-        CommandMenu("View") {
-            Button("Home") {
-                NotificationCenter.default.post(name: .navigateToHome, object: nil)
-            }
-            .keyboardShortcut("1", modifiers: .command)
-            
-            Button("Calendar") {
-                NotificationCenter.default.post(name: .navigateToCalendar, object: nil)
-            }
-            .keyboardShortcut("2", modifiers: .command)
-            
-            Button("Mood Report") {
-                NotificationCenter.default.post(name: .navigateToMoodReport, object: nil)
-            }
-            .keyboardShortcut("3", modifiers: .command)
-            
-            Divider()
-            
-            Button("Today") {
-                selectedDate = Date()
-                NotificationCenter.default.post(name: .navigateToToday, object: nil)
-            }
-            .keyboardShortcut("t", modifiers: .command)
-            
-            Button("Previous Day") {
-                if let date = selectedDate {
-                    selectedDate = Calendar.current.date(byAdding: .day, value: -1, to: date)
-                }
-            }
-            .keyboardShortcut(.leftArrow, modifiers: .command)
-            
-            Button("Next Day") {
-                if let date = selectedDate {
-                    selectedDate = Calendar.current.date(byAdding: .day, value: 1, to: date)
-                }
-            }
-            .keyboardShortcut(.rightArrow, modifiers: .command)
-            
-            Divider()
-            
-            Button("Search") {
-                NotificationCenter.default.post(name: .focusSearch, object: nil)
-            }
-            .keyboardShortcut("f", modifiers: .command)
-        }
-        
-        // Entry Menu
-        CommandMenu("Entry") {
-            Button("Start Recording") {
-                NotificationCenter.default.post(name: .startRecording, object: nil)
-            }
-            .keyboardShortcut("r", modifiers: .command)
-            
-            Button("Stop Recording") {
-                NotificationCenter.default.post(name: .stopRecording, object: nil)
-            }
-            .keyboardShortcut("r", modifiers: [.command, .shift])
-            
-            Divider()
-            
-            Menu("Set Mood") {
-                ForEach(1...5, id: \.self) { mood in
-                    Button {
-                        NotificationCenter.default.post(name: .setMood, object: mood)
-                    } label: {
-                        HStack {
-                            Circle()
-                                .fill(Color.moodSpectrum(for: mood))
-                                .frame(width: 12, height: 12)
-                            Text("\(mood) - \(moodDescription(for: mood))")
-                        }
-                    }
-                    .keyboardShortcut(KeyEquivalent(Character("\(mood)")), modifiers: .command)
-                }
-            }
-            
-            Divider()
-            
-            Button("Add Photo...") {
-                NotificationCenter.default.post(name: .addPhoto, object: nil)
-            }
-            .keyboardShortcut("p", modifiers: [.command, .shift])
-        }
-        
-        // Window Menu
-        CommandGroup(after: .windowSize) {
-            Button("Minimize All") {
-                NotificationCenter.default.post(name: .minimizeAll, object: nil)
-            }
-            .keyboardShortcut("m", modifiers: [.command, .option])
-        }
+        CommandGroup(replacing: .saveItem) { }
+        CommandGroup(replacing: .importExport) { }
+        CommandGroup(replacing: .printItem) { }
         
         // App Menu - Settings
         CommandGroup(after: .appSettings) {
@@ -234,6 +110,7 @@ extension Notification.Name {
     static let stopRecording = Notification.Name("stopRecording")
     static let setMood = Notification.Name("setMood")
     static let addPhoto = Notification.Name("addPhoto")
+    static let diaryEntryDeleted = Notification.Name("diaryEntryDeleted")
     static let minimizeAll = Notification.Name("minimizeAll")
     static let showSettings = Notification.Name("showSettings")
 }

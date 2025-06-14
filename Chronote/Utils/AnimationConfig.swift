@@ -6,23 +6,32 @@ import SwiftUI
 struct AnimationConfig {
     // MARK: - Standard Animations
     
-    /// Fast response for immediate feedback (0.15s)
-    static let fastResponse = Animation.easeOut(duration: 0.15)
+    /// Fast response for immediate feedback - optimized for Mac Catalyst
+    static let fastResponse = Animation.easeOut(duration: 0.1)
+
+    /// Standard response for most interactions - optimized for Mac Catalyst
+    static let standardResponse = Animation.easeInOut(duration: 0.15)
+
+    /// Smooth transitions for larger UI changes - optimized for Mac Catalyst
+    static let smoothTransition = Animation.easeInOut(duration: 0.2)
     
-    /// Standard response for most interactions (0.25s)
-    static let standardResponse = Animation.easeInOut(duration: 0.25)
-    
-    /// Smooth transitions for larger UI changes (0.3s)
-    static let smoothTransition = Animation.easeInOut(duration: 0.3)
-    
-    /// Gentle spring for button presses and small interactions
-    static let gentleSpring = Animation.spring(response: 0.3, dampingFraction: 0.75)
-    
-    /// Bouncy spring for playful interactions
-    static let bouncySpring = Animation.spring(response: 0.4, dampingFraction: 0.65)
-    
-    /// Stiff spring for quick, snappy animations
-    static let stiffSpring = Animation.interpolatingSpring(stiffness: 200, damping: 20)
+    /// Gentle spring for button presses and small interactions - Mac optimized
+    static let gentleSpring = Animation.spring(
+        response: 0.2,
+        dampingFraction: 0.85
+    )
+
+    /// Bouncy spring for playful interactions - reduced bounce on Mac
+    static let bouncySpring = Animation.spring(
+        response: 0.3,
+        dampingFraction: 0.75
+    )
+
+    /// Stiff spring for quick, snappy animations - Mac optimized
+    static let stiffSpring = Animation.interpolatingSpring(
+        stiffness: 300,
+        damping: 30
+    )
     
     // MARK: - Optimized Replacements
     

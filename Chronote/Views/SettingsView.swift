@@ -1,5 +1,8 @@
 import SwiftUI
 import CoreData
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct SettingsView: View {
     @Binding var isSettingsOpen: Bool
@@ -15,8 +18,30 @@ struct SettingsView: View {
     @State private var showDeleteCompleteAlert = false
     @State private var isSyncing = false
     @State private var syncMessage: String? = nil
+    @State private var showDiagnosticSheet = false
+    @State private var diagnosticResult: SyncDiagnosticResult? = nil
+    @State private var isRunningDiagnostic = false
+    @State private var showDatabaseRecoveryAlert = false
+    @State private var isRecoveringDatabase = false
     
     @EnvironmentObject var importService: CoreDataImportService
+    
+    // Platform-specific colors
+    private var systemBackgroundColor: Color {
+        #if canImport(UIKit)
+        return Color(UIColor.systemBackground)
+        #else
+        return Color(NSColor.windowBackgroundColor)
+        #endif
+    }
+    
+    private var secondarySystemBackgroundColor: Color {
+        #if canImport(UIKit)
+        return Color(UIColor.secondarySystemBackground)
+        #else
+        return Color(NSColor.controlBackgroundColor)
+        #endif
+    }
 
     var body: some View {
         #if targetEnvironment(macCatalyst)
@@ -80,6 +105,43 @@ struct SettingsView: View {
                         }
                     }
                     .disabled(isSyncing)
+
+                    Button {
+                        runSyncDiagnostic()
+                    } label: {
+                        HStack {
+                            Label {
+                                Text(NSLocalizedString("同步诊断", comment: ""))
+                            } icon: {
+                                Image(systemName: "stethoscope")
+                                    .imageScale(.large)
+                            }
+                            Spacer()
+                            if isRunningDiagnostic {
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(isRunningDiagnostic)
+                    
+                    Button {
+                        showDatabaseRecoveryAlert = true
+                    } label: {
+                        HStack {
+                            Label {
+                                Text(NSLocalizedString("数据库修复", comment: ""))
+                            } icon: {
+                                Image(systemName: "wrench.and.screwdriver")
+                                    .imageScale(.large)
+                                    .foregroundColor(.orange)
+                            }
+                            Spacer()
+                            if isRecoveringDatabase {
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(isRecoveringDatabase)
                 }
 
                 Section(header: Text(NSLocalizedString("关于", comment: "About")).textCase(nil)) {
@@ -88,27 +150,31 @@ struct SettingsView: View {
                     }
                 }
             }
+            #if os(macOS)
+            .listStyle(.plain)
+            #else
             .listStyle(.insetGrouped)
+            #endif
             .scrollContentBackground(.hidden)
-            .background(Color(.systemBackground))
+            .background(systemBackgroundColor)
             .listRowBackground(
                 RoundedRectangle(cornerRadius: UIDevice.isMac ? 8 : 12, style: .continuous)
-                    .fill(Color(.secondarySystemBackground))
+                    .fill(secondarySystemBackgroundColor)
                     .shadow(color: Color.primary.opacity(UIDevice.isMac ? 0.05 : 0.2), radius: UIDevice.isMac ? 4 : 4, x: 0, y: UIDevice.isMac ? 2 : 2)
             )
             .navigationTitle(NSLocalizedString("设置", comment: "Settings"))
-            .navigationBarTitleDisplayMode(UIDevice.isMac ? .large : .inline)
+            #if !os(macOS)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if !UIDevice.isMac {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button {
-                            isSettingsOpen = false
-                        } label: {
-                            Text(NSLocalizedString("返回", comment: "Back"))
-                        }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        isSettingsOpen = false
+                    } label: {
+                        Text(NSLocalizedString("返回", comment: "Back"))
                     }
                 }
             }
+            #endif
             .sheet(isPresented: $showImportSheet) {
                 DiaryImportView()
                     .environmentObject(importService)
@@ -119,12 +185,26 @@ struct SettingsView: View {
             } message: {
                 Text(NSLocalizedString("已删除所有日记", comment: "All entries deleted"))
             }
+            .alert("数据库修复", isPresented: $showDatabaseRecoveryAlert) {
+                Button("取消", role: .cancel) { }
+                Button("修复", role: .destructive) {
+                    performDatabaseRecovery()
+                }
+            } message: {
+                Text("如果您遇到数据库错误，此操作将尝试修复数据库。您的数据将从 iCloud 恢复。是否继续？")
+            }
+        }
+        .sheet(isPresented: $showDiagnosticSheet) {
+            SyncDiagnosticView(result: diagnosticResult)
         }
         #endif
     }
 
     private func deleteAllEntries() {
         for entry in entries {
+            // Delete associated images
+            entry.deleteAllImages()
+            
             viewContext.delete(entry)
         }
         
@@ -168,6 +248,40 @@ struct SettingsView: View {
                     isSyncing = false
                     syncMessage = NSLocalizedString("同步失败", comment: "Sync failed")
                     print("[SettingsView] 手动同步失败: \(error)")
+                }
+            }
+        }
+    }
+
+    private func runSyncDiagnostic() {
+        isRunningDiagnostic = true
+        Task {
+            let result = await SyncDiagnosticService.performDiagnostic()
+            await MainActor.run {
+                diagnosticResult = result
+                isRunningDiagnostic = false
+                showDiagnosticSheet = true
+            }
+        }
+    }
+    
+    private func performDatabaseRecovery() {
+        isRecoveringDatabase = true
+        
+        Task {
+            await MainActor.run {
+                DatabaseRecoveryService.shared.performRecovery(for: PersistenceController.shared.container) { result in
+                    DispatchQueue.main.async {
+                        self.isRecoveringDatabase = false
+                        
+                        switch result {
+                        case .success:
+                            // Close settings and let the app reload
+                            self.isSettingsOpen = false
+                        case .failure(let error):
+                            print("[SettingsView] Database recovery failed: \(error)")
+                        }
+                    }
                 }
             }
         }

@@ -2,17 +2,46 @@ import SwiftUI
 #if targetEnvironment(macCatalyst)
 import AppKit
 #endif
+#if canImport(UIKit)
+import UIKit
+#endif
 
-// MARK: - Platform Detection
-extension UIDevice {
-    static var isMac: Bool {
+// MARK: - Optimized Platform Detection
+struct PlatformInfo {
+    // Cache the platform check result to avoid repeated conditional compilation checks
+    static let isMacCatalyst: Bool = {
         #if targetEnvironment(macCatalyst)
         return true
         #else
         return false
         #endif
+    }()
+
+    // Optimized device type checking
+    static let deviceType: DeviceType = {
+        #if targetEnvironment(macCatalyst)
+        return .macCatalyst
+        #elseif os(iOS)
+        return .iOS
+        #else
+        return .macOS
+        #endif
+    }()
+}
+
+enum DeviceType {
+    case iOS
+    case macCatalyst
+    case macOS
+}
+
+#if canImport(UIKit)
+extension UIDevice {
+    static var isMac: Bool {
+        PlatformInfo.isMacCatalyst
     }
 }
+#endif
 
 // MARK: - Mac-specific UI Helpers
 struct MacOptimizedSpacing {
@@ -28,121 +57,34 @@ struct MacOptimizedSpacing {
 extension UIApplication {
     func configureForMac() {
         // Configure window properties for better Mac experience
-        if let windowScene = connectedScenes.first as? UIWindowScene {
-            windowScene.sizeRestrictions?.minimumSize = CGSize(width: 800, height: 600)
-            windowScene.sizeRestrictions?.maximumSize = CGSize(width: 1400, height: 1000)
-        }
+        guard let windowScene = connectedScenes.first as? UIWindowScene else { return }
+        windowScene.sizeRestrictions?.minimumSize = CGSize(width: 1200, height: 700)
+        windowScene.sizeRestrictions?.maximumSize = CGSize(width: 2000, height: 1400)
     }
 }
 
-// Helper for accessing NSToolbar from UIKit
+// Simplified toolbar helper to avoid startup issues and NSToolbarItemGroup warnings
 class MacToolbarHelper {
     static func addToolbarItems(to scene: UIWindowScene) {
-        #if targetEnvironment(macCatalyst)
-        if let titlebar = scene.titlebar {
-            let toolbar = NSToolbar(identifier: "MainToolbar")
-            toolbar.delegate = MacToolbarDelegate.shared
-            toolbar.allowsUserCustomization = false
-            toolbar.displayMode = .iconOnly
-            titlebar.toolbar = toolbar
-        }
-        #endif
+        // Toolbar configuration is now disabled to avoid NSToolbarItemGroup selection mode warnings
+        // NavigationSplitView handles toolbar management automatically
+        print("[MacToolbarHelper] Toolbar configuration disabled - using NavigationSplitView built-in toolbar")
     }
-}
-
-class MacToolbarDelegate: NSObject, NSToolbarDelegate {
-    static let shared = MacToolbarDelegate()
-    
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        return [
-            .toggleSidebar,
-            .flexibleSpace,
-            NSToolbarItem.Identifier("new-entry"),
-            NSToolbarItem.Identifier("calendar"),
-            .flexibleSpace,
-            NSToolbarItem.Identifier("settings")
-        ]
-    }
-    
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        return toolbarDefaultItemIdentifiers(toolbar)
-    }
-    
-    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        switch itemIdentifier {
-        case NSToolbarItem.Identifier("new-entry"):
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = NSLocalizedString("新日记", comment: "New Entry")
-            if let image = UIImage(systemName: "plus") {
-                item.image = image
-            }
-            item.target = self
-            item.action = #selector(newEntryAction)
-            return item
-            
-        case NSToolbarItem.Identifier("calendar"):
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = NSLocalizedString("日历", comment: "Calendar")
-            if let image = UIImage(systemName: "calendar") {
-                item.image = image
-            }
-            item.target = self
-            item.action = #selector(calendarAction)
-            return item
-            
-        case NSToolbarItem.Identifier("settings"):
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = NSLocalizedString("设置", comment: "Settings")
-            if let image = UIImage(systemName: "gearshape") {
-                item.image = image
-            }
-            item.target = self
-            item.action = #selector(settingsAction)
-            return item
-            
-        default:
-            return nil
-        }
-    }
-    
-    @objc private func newEntryAction() {
-        NotificationCenter.default.post(name: .macNewEntry, object: nil)
-    }
-    
-    @objc private func calendarAction() {
-        NotificationCenter.default.post(name: .macShowCalendar, object: nil)
-    }
-    
-    @objc private func settingsAction() {
-        NotificationCenter.default.post(name: .macShowSettings, object: nil)
-    }
-}
-
-// Notification names for Mac toolbar actions
-extension Notification.Name {
-    static let macNewEntry = Notification.Name("macNewEntry")
-    static let macShowCalendar = Notification.Name("macShowCalendar")
-    static let macShowSettings = Notification.Name("macShowSettings")
 }
 #endif
 
-// MARK: - Mac-optimized UI Components
+// MARK: - Mac-optimized UI Components with Performance Improvements
 struct MacAdaptiveLayout<Content: View>: View {
     let content: Content
-    
+    private let isMacCatalyst = PlatformInfo.isMacCatalyst
+
     init(@ViewBuilder content: () -> Content) {
         self.content = content()
     }
-    
+
     var body: some View {
-        if UIDevice.isMac {
-            HStack(spacing: 0) {
-                content
-            }
+        content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            content
-        }
     }
 }
 
@@ -168,59 +110,69 @@ struct MacKeyboardShortcuts: ViewModifier {
 
 extension View {
     func macKeyboardShortcuts() -> some View {
-        if UIDevice.isMac {
-            return AnyView(self.modifier(MacKeyboardShortcuts()))
-        } else {
-            return AnyView(self)
-        }
+        #if targetEnvironment(macCatalyst)
+        self.modifier(MacKeyboardShortcuts())
+        #else
+        self
+        #endif
     }
 }
 
-// Mac-optimized sidebar
+// Mac-optimized sidebar with performance improvements
 struct MacSidebar<Content: View>: View {
     let content: Content
     @Binding var isVisible: Bool
-    
+    #if canImport(UIKit)
+    private let backgroundColor = Color(UIColor.systemBackground)
+    #else
+    private let backgroundColor = Color.clear
+    #endif
+
     init(isVisible: Binding<Bool>, @ViewBuilder content: () -> Content) {
         self._isVisible = isVisible
         self.content = content()
     }
-    
+
     var body: some View {
-        if UIDevice.isMac {
-            HStack(spacing: 0) {
-                if isVisible {
-                    content
-                        .frame(width: MacOptimizedSpacing.sidebarWidth)
-                        .background(Color(.systemBackground))
-                        .transition(.move(edge: .leading))
-                }
+        #if targetEnvironment(macCatalyst)
+        HStack(spacing: 0) {
+            if isVisible {
+                content
+                    .frame(width: MacOptimizedSpacing.sidebarWidth)
+                    .background(backgroundColor)
+                    .transition(.move(edge: .leading))
             }
-            .animation(.easeInOut(duration: 0.25), value: isVisible)
-        } else {
-            content
         }
+        .animation(.easeInOut(duration: 0.2), value: isVisible)
+        #else
+        content
+        #endif
     }
 }
 
-// Mac-optimized content area
+// Mac-optimized content area with performance improvements
 struct MacContentArea<Content: View>: View {
     let content: Content
-    
+    #if canImport(UIKit)
+    private let backgroundColor = Color(UIColor.systemBackground)
+    #else
+    private let backgroundColor = Color.clear
+    #endif
+
     init(@ViewBuilder content: () -> Content) {
         self.content = content()
     }
-    
+
     var body: some View {
-        if UIDevice.isMac {
-            content
-                .padding(.horizontal, MacOptimizedSpacing.mainContentPadding)
-                .padding(.top, MacOptimizedSpacing.toolbarHeight)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(.systemBackground))
-        } else {
-            content
-        }
+        #if targetEnvironment(macCatalyst)
+        content
+            .padding(.horizontal, MacOptimizedSpacing.mainContentPadding)
+            .padding(.top, MacOptimizedSpacing.toolbarHeight)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(backgroundColor)
+        #else
+        content
+        #endif
     }
 }
 
@@ -229,21 +181,21 @@ struct MacHoverEffect: ViewModifier {
     @State private var isHovered = false
     
     func body(content: Content) -> some View {
-        if UIDevice.isMac {
-            content
-                .scaleEffect(isHovered ? 1.02 : 1.0)
-                .animation(.easeInOut(duration: 0.2), value: isHovered)
-                .onHover { hovering in
-                    isHovered = hovering
-                }
-        } else {
-            content
-        }
+        #if targetEnvironment(macCatalyst)
+        content
+            .scaleEffect(isHovered ? 1.02 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isHovered)
+            .onHover { hovering in
+                isHovered = hovering
+            }
+        #else
+        content
+        #endif
     }
 }
 
 extension View {
     func macHoverEffect() -> some View {
-        self.modifier(MacHoverEffect())
+        modifier(MacHoverEffect())
     }
 }

@@ -33,9 +33,24 @@ struct NetworkRetryHelper {
         throw lastError ?? NSError(domain: "NetworkRetryHelper", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unknown error after retries"])
     }
     
-    /// Check if an error is retryable (SSL, timeout, network issues)
+    /// Check if an error is retryable (SSL, timeout, network issues, server errors)
     private static func isRetryableError(_ error: Error) -> Bool {
         let nsError = error as NSError
+        
+        // Check HTTP status codes for retryable server errors
+        if nsError.domain == "OpenAIService" {
+            switch nsError.code {
+            case 502, 503, 504: // Bad Gateway, Service Unavailable, Gateway Timeout
+                print("[NetworkRetryHelper] 检测到可重试的服务器错误: \(nsError.code)")
+                return true
+            case 500...599: // Other 5xx server errors (but be more conservative)
+                let shouldRetry = nsError.code != 501 // Not Implemented is not retryable
+                print("[NetworkRetryHelper] 服务器错误 \(nsError.code)，可重试: \(shouldRetry)")
+                return shouldRetry
+            default:
+                break
+            }
+        }
         
         // SSL errors
         if nsError.domain == NSURLErrorDomain {
@@ -84,8 +99,11 @@ extension URLSession {
         configuration.allowsCellularAccess = true
         
         // Increase tolerance for poor network conditions
+        #if !os(macOS)
         configuration.multipathServiceType = .handover
+        #endif
         
         return URLSession(configuration: configuration)
     }
 }
+

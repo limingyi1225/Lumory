@@ -3,8 +3,13 @@ import SwiftUI
 struct SplashView: View {
     var body: some View {
         ZStack {
-            Color(.systemBackground)
+            #if canImport(UIKit)
+            Color(UIColor.systemBackground)
                 .ignoresSafeArea()
+            #else
+            Color(NSColor.windowBackgroundColor)
+                .ignoresSafeArea()
+            #endif
             VStack(spacing: 20) {
                 Image("LumoryIcon")
                     .resizable()

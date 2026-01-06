@@ -7,6 +7,14 @@ import PhotosUI
 import UIKit
 #endif
 
+// MARK: - Send Button State Machine
+enum SendButtonState {
+    case idle           // 蓝色（默认状态）
+    case sending        // 灰色loading（AI分析中）
+    case moodRevealing  // 情绪颜色+脉冲动画（1.2秒）
+    case completed      // 淡出回到蓝色
+}
+
 // 全局辅助函数：格式化时长
 func formattedDuration(currentTime: TimeInterval, totalDuration: TimeInterval) -> String {
     let currentIntSec = Int(max(0, currentTime))
@@ -368,6 +376,8 @@ struct HomeView: View {
     @State private var moodValue: Double = 0.5
     @State private var transcriptionTask: Task<Void, Never>? = nil
     @State private var isSending: Bool = false
+    @State private var sendButtonState: SendButtonState = .idle
+    @State private var revealedMood: Double? = nil
     @State private var showingSettingsSheet: Bool = false
     @State private var selectedEntry: DiaryEntry? = nil
     @State private var selectedPhotos: [PhotosPickerItem] = []
@@ -740,7 +750,8 @@ struct HomeView: View {
             
             // 发送按钮
             AppleStyleSendButton(
-                isSending: $isSending,
+                buttonState: $sendButtonState,
+                revealedMood: $revealedMood,
                 isEnabled: (!inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !audioRecordings.isEmpty || !selectedImages.isEmpty) && !isTranscribing
             ) {
                 handleSendAction()
@@ -767,19 +778,21 @@ struct HomeView: View {
         HapticManager.shared.click()
 #endif
         Task {
+            // 1. 发送开始 → sending状态
             await MainActor.run {
-                print("[HomeView SendButton] Setting isSending=true. Old SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
+                print("[HomeView SendButton] Starting send action")
                 withAnimation(AnimationConfig.standardResponse) {
+                    sendButtonState = .sending
                     isSending = true
                 }
             }
 
-            // 简化：仅在发送时执行一次AI情绪分析
+            // 2. 执行AI情绪分析（只调用一次）
             let textToAnalyze = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
             var finalMoodValue = self.moodValue
 
             if !textToAnalyze.isEmpty {
-                print("[HomeView SendButton] Analyzing mood for text: '\(textToAnalyze)'")
+                print("[HomeView SendButton] Analyzing mood for text")
                 let mood = await aiService.analyzeMood(text: textToAnalyze)
                 finalMoodValue = mood
                 await MainActor.run {
@@ -787,39 +800,59 @@ struct HomeView: View {
                 }
             }
 
+            // 3. 显示情绪反馈 → moodRevealing状态
+            await MainActor.run {
+                withAnimation(AnimationConfig.smoothTransition) {
+                    revealedMood = finalMoodValue
+                    sendButtonState = .moodRevealing
+                }
+                #if canImport(UIKit)
+                HapticManager.shared.notification(.success)
+                #endif
+                print("[HomeView SendButton] Mood revealed: \(finalMoodValue)")
+            }
+
+            // 4. 等待脉冲动画完成（1.2秒）
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+
+            // 5. 清除输入并保存日记
             let textToSend = inputText
             let audioToSend = currentAudioFileName
             let moodToSend = finalMoodValue
             let imagesToSend = selectedImages
-            print("[HomeView SendButton] Images to send: \(imagesToSend.count)")
-            
+
             await MainActor.run {
-                print("[HomeView SendButton] Clearing inputs. Old SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
                 withAnimation(AnimationConfig.fastResponse) {
                     inputText = ""
-                    currentAudioFileName = nil // SET NIL in SendButton
+                    currentAudioFileName = nil
                     audioRecordings.removeAll()
                     selectedImages.removeAll()
                     selectedPhotos.removeAll()
                 }
-                print("[HomeView SendButton] Did clear inputs. New SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
                 hideKeyboard()
             }
-            
-            print("[HomeView SendButton] Calling store.addEntry. SFCFN: \\(self.currentAudioFileName ?? \"nil\") (should be nil here)")
+
+            // 6. 保存日记
             await addEntry(text: textToSend, audioFileName: audioToSend, moodValue: moodToSend, images: imagesToSend)
-            
+
+            // 7. 完成动画 → completed → idle
             await MainActor.run {
-                print("[HomeView SendButton] Restoring isSending=false. SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
-                withAnimation(AnimationConfig.standardResponse) {
+                withAnimation(AnimationConfig.smoothTransition) {
+                    sendButtonState = .completed
                     isSending = false
-                    // 确保在发送完成后，如果之前没有在清除输入时清除，这里也清除录音列表
-                    if !audioRecordings.isEmpty {
-                        audioRecordings.removeAll()
-                    }
                 }
             }
-            print("[HomeView SendButton END TASK] SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
+
+            try? await Task.sleep(nanoseconds: 300_000_000)
+
+            await MainActor.run {
+                withAnimation(AnimationConfig.smoothTransition) {
+                    sendButtonState = .idle
+                    revealedMood = nil
+                }
+            }
+
+            print("[HomeView SendButton] Send action completed")
         }
     }
     
@@ -1731,10 +1764,11 @@ struct PressableScaleButtonStyle: ButtonStyle {
 
 /// Apple风格发送按钮
 struct AppleStyleSendButton: View {
-    @Binding var isSending: Bool
+    @Binding var buttonState: SendButtonState
+    @Binding var revealedMood: Double?
     let isEnabled: Bool
     let action: () -> Void
-    
+
     var body: some View {
         Button(action: action) {
             ZStack {
@@ -1742,9 +1776,9 @@ struct AppleStyleSendButton: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(buttonBackgroundColor)
                     .frame(width: 48, height: 48)
-                
+
                 // 内容
-                if isSending {
+                if buttonState == .sending {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .white))
                         .scaleEffect(0.8)
@@ -1756,25 +1790,38 @@ struct AppleStyleSendButton: View {
             }
         }
         .buttonStyle(PressableScaleButtonStyle())
-        .disabled(!isEnabled || isSending)
-        .animation(AnimationConfig.bouncySpring, value: isSending)
+        .disabled(!isEnabled || buttonState != .idle)
+        .scaleEffect(buttonState == .moodRevealing ? 1.1 : 1.0)
+        .animation(
+            buttonState == .moodRevealing
+            ? Animation.easeInOut(duration: 0.6).repeatCount(2, autoreverses: true)
+            : AnimationConfig.smoothTransition,
+            value: buttonState
+        )
     }
-    
+
     private var buttonBackgroundColor: Color {
-        if !isEnabled {
-#if canImport(UIKit)
-            return Color(.systemGray4)
-#else
-            return Color(NSColor.disabledControlTextColor)
-#endif
-        } else if isSending {
-#if canImport(UIKit)
+        switch buttonState {
+        case .idle, .completed:
+            if !isEnabled {
+                #if canImport(UIKit)
+                return Color(.systemGray4)
+                #else
+                return Color(NSColor.disabledControlTextColor)
+                #endif
+            } else {
+                return Color(red: 114/255, green: 192/255, blue: 254/255)
+            }
+
+        case .sending:
+            #if canImport(UIKit)
             return Color(.systemGray3)
-#else
+            #else
             return Color(NSColor.tertiaryLabelColor)
-#endif
-        } else {
-            return Color(red: 114/255, green: 192/255, blue: 254/255)
+            #endif
+
+        case .moodRevealing:
+            return Color.moodSpectrum(value: revealedMood ?? 0.5)
         }
     }
 }

@@ -270,14 +270,14 @@ class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, ObservableObject
             if #available(iOS 15.0, macOS 12.0, *) {
                 displayLink?.preferredFrameRateRange = CAFrameRateRange.uiUpdates
             } else {
-                displayLink?.preferredFramesPerSecond = 30
+                displayLink?.preferredFramesPerSecond = 15  // 优化：从30fps降至15fps
             }
             displayLink?.add(to: .main, forMode: .common)
         }
         displayLink?.isPaused = false
 #else
         progressTimer?.invalidate()
-        progressTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { _ in
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 1.0/15.0, repeats: true) { _ in  // 优化：从30fps降至15fps
             self.updateProgress()
         }
 #endif
@@ -378,6 +378,7 @@ struct HomeView: View {
     @State private var isSending: Bool = false
     @State private var sendButtonState: SendButtonState = .idle
     @State private var revealedMood: Double? = nil
+    @State private var textEditorHeight: CGFloat = 140
     @State private var showingSettingsSheet: Bool = false
     @State private var selectedEntry: DiaryEntry? = nil
     @State private var selectedPhotos: [PhotosPickerItem] = []
@@ -651,7 +652,8 @@ struct HomeView: View {
     private var textInputArea: some View {
         ZStack(alignment: .topLeading) {
             TextEditor(text: $inputText)
-                .frame(height: UIDevice.isMac ? 180 : 140)
+                .frame(minHeight: 140, maxHeight: 400)
+                .frame(height: textEditorHeight)
                 .frame(maxWidth: UIDevice.isMac ? 700 : .infinity)
                 // 设置移动端上下内边距4，左右8，Mac保持8
                 .padding(.horizontal, 8)
@@ -659,6 +661,9 @@ struct HomeView: View {
                 .background(Color.clear)
                 .scrollContentBackground(.hidden)
                 .font(.system(size: UIDevice.isMac ? 16 : 17)) // 移动端文字大小为17pt
+                .onChange(of: inputText) { _, newValue in
+                    calculateTextHeight(for: newValue)
+                }
             if inputText.isEmpty {
                 Text(NSLocalizedString("今天是怎样的一天呢？", comment: "Daily prompt"))
                     .font(.system(size: UIDevice.isMac ? 16 : 17)) // 同步占位文本大小
@@ -759,20 +764,51 @@ struct HomeView: View {
         }
         .onChange(of: selectedPhotos) { _, newValue in
             Task {
-                selectedImages = []
-                for item in newValue {
-                    if let data = try? await item.loadTransferable(type: Data.self) {
-                        selectedImages.append(data)
-                        print("[HomeView] Loaded image data, size: \(data.count) bytes")
-                    } else {
-                        print("[HomeView] Failed to load image data from PhotosPicker")
-                    }
-                }
-                print("[HomeView] Total selected images: \(selectedImages.count)")
+                await loadPhotosWithCompression(newValue)
             }
         }
     }
     
+    private func loadPhotosWithCompression(_ items: [PhotosPickerItem]) async {
+        var compressedImages: [Data] = []
+
+        await withTaskGroup(of: Data?.self) { group in
+            for item in items {
+                group.addTask {
+                    if let data = try? await item.loadTransferable(type: Data.self) {
+                        let originalSize = data.count
+                        if let compressed = await data.compressImage(maxSizeKB: 500, maxDimension: 1024) {
+                            let compressedSize = compressed.count
+                            print("[HomeView] Image compressed: \(originalSize/1024)KB → \(compressedSize/1024)KB")
+                            return compressed
+                        }
+                    }
+                    return nil
+                }
+            }
+
+            for await compressedData in group {
+                if let data = compressedData {
+                    compressedImages.append(data)
+                }
+            }
+        }
+
+        await MainActor.run {
+            selectedImages = compressedImages
+            print("[HomeView] Total compressed images: \(selectedImages.count)")
+        }
+    }
+
+    private func calculateTextHeight(for text: String) {
+        let lineCount = text.components(separatedBy: "\n").count
+        let estimatedHeight = max(140, min(400, CGFloat(lineCount) * 22 + 40))
+
+        withAnimation(AnimationConfig.smoothTransition) {
+            textEditorHeight = estimatedHeight
+        }
+    }
+
     private func handleSendAction() {
 #if canImport(UIKit)
         HapticManager.shared.click()
@@ -1662,13 +1698,10 @@ struct AppleStyleRecordButton: View {
             }
         )
         .scaleEffect(isPressing ? 0.96 : 1.0)
-        .animation(AnimationConfig.gentleSpring, value: isPressing)
-        .animation(AnimationConfig.bouncySpring, value: recorder.isRecording)
-        .onReceive(Timer.publish(every: 0.8, on: .main, in: .common).autoconnect()) { _ in
-            if recorder.isRecording {
-                withAnimation(AnimationConfig.breathingAnimation.delay(0)) {
-                    pulseOpacity = pulseOpacity == 0.0 ? 1.0 : 0.0
-                }
+        .animation(AnimationConfig.bouncySpring, value: recorder.isRecording || isPressing)
+        .onChange(of: recorder.isRecording) { _, isRecording in
+            if isRecording {
+                startPulseAnimation()
             } else {
                 pulseOpacity = 0.0
             }
@@ -1716,7 +1749,15 @@ struct AppleStyleRecordButton: View {
                 }
         )
     }
-    
+
+    private func startPulseAnimation() {
+        guard recorder.isRecording else { return }
+
+        withAnimation(Animation.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+            pulseOpacity = 1.0
+        }
+    }
+
     // MARK: - 计算属性
     
     private var backgroundColor: Color {

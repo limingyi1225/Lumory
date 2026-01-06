@@ -43,10 +43,9 @@ class BackendHealthCheck {
     static func testOpenAIProxy() async -> (isWorking: Bool, message: String) {
         // Test with a simple prompt
         let testRequest = OpenAITestRequest(
-            model: "gpt-4.1-mini",
+            model: "gpt-5.2",
             messages: [Message(role: "user", content: "测试")],
-            max_tokens: 10,
-            temperature: 0.0
+            reasoning_effort: "none"
         )
         
         let url = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions")!
@@ -109,8 +108,7 @@ class BackendHealthCheck {
     private struct OpenAITestRequest: Codable {
         let model: String
         let messages: [Message]
-        let max_tokens: Int
-        let temperature: Double
+        let reasoning_effort: String?
     }
     
     private struct Message: Codable {

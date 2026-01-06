@@ -33,7 +33,7 @@ final class OpenAIService: AIServiceProtocol {
             } else {
                 prompt = "Summarize the following diary entry, focusing on the key points, in no more than 10 words, using only commas and semicolons.\n# Steps\n1. Read and understand the diary entry.\n2. Identify the key information and theme.\n3. Summarize using concise and precise language.\n4. Ensure the summary does not exceed 10 words.\n5. Use only commas and semicolons as punctuation.\n# Output Format\n- A short summary, no more than 10 words.\n- Only commas and semicolons used.\nDiary:\n\n\(text)"
             }
-            return await self.chat(prompt: prompt, model: "gpt-4.1-nano")
+            return await self.chat(prompt: prompt, model: "gpt-5.2", reasoningEffort: "none")
         }
     }
 
@@ -63,7 +63,7 @@ final class OpenAIService: AIServiceProtocol {
                 "
                 """
 
-            if let resultStr = await self.chat(prompt: prompt, model: "gpt-4.1-nano", maxTokens: 32, forceJSON: true)?
+            if let resultStr = await self.chat(prompt: prompt, model: "gpt-5.2", maxTokens: 32, forceJSON: true, reasoningEffort: "low")?
                     .trimmingCharacters(in: .whitespacesAndNewlines) {
                 // 解析 JSON 或字符串中的 mood_score
                 if let data = resultStr.data(using: .utf8) {
@@ -135,12 +135,13 @@ final class OpenAIService: AIServiceProtocol {
 Diary Entries:
 \(textBlock)
 """
-        // 使用 gpt-4o 写情绪报告
+        // 使用 gpt-5.2 写情绪报告
         print("[OpenAIService] 开始调用chat方法生成报告")
         let result = await chat(prompt: prompt,
-                          model: "gpt-4o",
+                          model: "gpt-5.2",
                           maxTokens: 4096,
-                          stream: false)
+                          stream: false,
+                          reasoningEffort: "low")
         print("[OpenAIService] chat方法返回结果: \(result != nil ? "成功，长度 \(result!.count)" : "失败，返回nil")")
         return result
     }
@@ -175,12 +176,13 @@ Diary Entries:
 Diary Entries:
 \(textBlock)
 """
-        // 使用 gpt-4o 写情绪报告
+        // 使用 gpt-5.2 写情绪报告
         print("[OpenAIService] 开始调用chat方法生成安全数据报告")
         let result = await chat(prompt: prompt,
-                          model: "gpt-4o",
+                          model: "gpt-5.2",
                           maxTokens: 4096,
-                          stream: false)
+                          stream: false,
+                          reasoningEffort: "low")
         print("[OpenAIService] 安全数据chat方法返回结果: \(result != nil ? "成功，长度 \(result!.count)" : "失败，返回nil")")
         return result
     }
@@ -217,18 +219,16 @@ Diary Entries:
         struct RequestBody: Codable {
             let model: String
             let messages: [Message]
-            let max_tokens: Int
-            let temperature: Double
             let stream: Bool
+            let reasoning_effort: String?
 
-            enum CodingKeys: String, CodingKey { case model, messages, max_tokens, temperature, stream }
+            enum CodingKeys: String, CodingKey { case model, messages, stream, reasoning_effort }
         }
         let requestBody = RequestBody(
-            model: "gpt-4o",
+            model: "gpt-5.2",
             messages: [Message(role: "user", content: prompt)],
-            max_tokens: 4096,
-            temperature: 0.7,
-            stream: true
+            stream: true,
+            reasoning_effort: "low"
         )
         
         let url = backendURL
@@ -365,18 +365,16 @@ Diary Entries:
         struct RequestBody: Codable {
             let model: String
             let messages: [Message]
-            let max_tokens: Int
-            let temperature: Double
             let stream: Bool
+            let reasoning_effort: String?
 
-            enum CodingKeys: String, CodingKey { case model, messages, max_tokens, temperature, stream }
+            enum CodingKeys: String, CodingKey { case model, messages, stream, reasoning_effort }
         }
         let requestBody = RequestBody(
-            model: "gpt-4o",
+            model: "gpt-5.2",
             messages: [Message(role: "user", content: prompt)],
-            max_tokens: 4096,
-            temperature: 0.7, // 较高温度，加快首token输出
-            stream: true
+            stream: true,
+            reasoning_effort: "low"
         )
         // 改为走本地后端代理，不在客户端暴露 Key
         let url = backendURL
@@ -457,19 +455,19 @@ Diary Entries:
                       model: String? = nil,
                       maxTokens: Int = 128,
                       forceJSON: Bool = false,
-                      stream: Bool = false) async -> String? {
+                      stream: Bool = false,
+                      reasoningEffort: String? = nil) async -> String? {
         struct Message: Codable { let role: String; let content: String }
         struct RequestBody: Codable {
             let model: String
             let messages: [Message]
-            let max_tokens: Int
-            let temperature: Double
             let response_format: ResponseFormat?
             let stream: Bool?
+            let reasoning_effort: String?
 
             struct ResponseFormat: Codable { let type: String }
             enum CodingKeys: String, CodingKey {
-                case model, messages, max_tokens, temperature, response_format, stream
+                case model, messages, response_format, stream, reasoning_effort
             }
         }
         struct ResponseBody: Codable {
@@ -477,15 +475,12 @@ Diary Entries:
             let choices: [Choice]
         }
 
-        // 根据是否流式设置温度：提高流式生成速度
-        let temp = stream ? 0.7 : 0.3
         let requestBody = RequestBody(
-            model: model ?? "gpt-4.1-nano",
+            model: model ?? "gpt-5.2",
             messages: [Message(role: "user", content: prompt)],
-            max_tokens: maxTokens,
-            temperature: temp, // 流式模式使用较高温度
             response_format: forceJSON ? RequestBody.ResponseFormat(type: "json_object") : nil,
-            stream: stream ? true : nil
+            stream: stream ? true : nil,
+            reasoning_effort: reasoningEffort
         )
 
         // 改为走本地后端代理，不在客户端暴露 Key

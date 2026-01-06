@@ -9,11 +9,7 @@ final class HomeViewModel: ObservableObject {
     @Published var inputText = ""
     @Published var inputMoodScore: Double? = nil
     @Published var showEmptyPrompt = false
-    @Published var moodProgress: Double = 0.5
-    @Published var hasMoodValue = false
     @Published var isCreatingEntry = false
-    @Published var isAnalyzing = false
-    @Published var lastGeneratedMood: Double = 0.5
     @Published var showSettings = false
     @Published var selectedImages: [Data] = []
     @Published var showImagePicker = false
@@ -27,7 +23,6 @@ final class HomeViewModel: ObservableObject {
     private let hapticManager = HapticManager.shared
     
     // MARK: - Private Properties
-    private var moodAnalysisTask: Task<Void, Never>?
     private let aiService: AIServiceProtocol
     private let recognitionService: AppleRecognitionService
     private var cancellables = Set<AnyCancellable>()
@@ -51,20 +46,6 @@ final class HomeViewModel: ObservableObject {
     init() {
         self.aiService = OpenAIService(apiKey: AppSecrets.openAIKey)
         self.recognitionService = AppleRecognitionService(openAIApiKey: AppSecrets.openAIKey)
-        setupSubscriptions()
-    }
-    
-    private func setupSubscriptions() {
-        // Monitor text changes for mood analysis
-        $inputText
-            .debounce(for: .seconds(1), scheduler: RunLoop.main)
-            .removeDuplicates()
-            .sink { [weak self] text in
-                if !text.isEmpty {
-                    self?.analyzeMood(for: text)
-                }
-            }
-            .store(in: &cancellables)
     }
     
     // MARK: - Recording Methods
@@ -127,39 +108,6 @@ final class HomeViewModel: ObservableObject {
         }
     }
     
-    // MARK: - Mood Analysis
-    private func analyzeMood(for text: String) {
-        moodAnalysisTask?.cancel()
-        
-        guard !text.isEmpty else {
-            withAnimation(.easeInOut(duration: 0.5)) {
-                hasMoodValue = false
-            }
-            return
-        }
-        
-        isAnalyzing = true
-        
-        moodAnalysisTask = Task { [weak self] in
-            guard let self = self else { return }
-            
-            let mood = await self.aiService.analyzeMood(text: text)
-            
-            guard !Task.isCancelled else { return }
-            
-            await MainActor.run {
-                self.lastGeneratedMood = mood
-                self.inputMoodScore = mood
-                
-                withAnimation(AnimationConfig.bouncySpring) {
-                    self.moodProgress = mood
-                    self.hasMoodValue = true
-                }
-                
-                self.isAnalyzing = false
-            }
-        }
-    }
     
     // MARK: - Entry Creation
     func createEntry(context: NSManagedObjectContext) async -> Bool {
@@ -232,8 +180,6 @@ final class HomeViewModel: ObservableObject {
     func clearInputState() {
         inputText = ""
         inputMoodScore = nil
-        moodProgress = 0.5
-        hasMoodValue = false
         selectedImages = []
         recordings = []
         showEmptyPrompt = false
@@ -257,13 +203,11 @@ final class HomeViewModel: ObservableObject {
     // MARK: - Cleanup
     func cleanup() {
         audioRecorder.cleanup()
-        moodAnalysisTask?.cancel()
         cancellables.removeAll()
     }
-    
+
     deinit {
         // Cancel all tasks immediately
-        moodAnalysisTask?.cancel()
         cancellables.removeAll()
         // Note: audioRecorder and audioPlaybackController will clean up in their own deinits
     }

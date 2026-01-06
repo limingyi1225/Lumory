@@ -365,9 +365,7 @@ struct HomeView: View {
     @State private var isTranscribing = false
     @State private var currentAudioFileName: String? = nil
     @State private var showingDeleteAlert: Bool = false
-    @State private var detectedMoodValue: Double = 0.5
-    @State private var hasMoodAnalysis: Bool = false
-    @State private var analyzeTask: Task<Void, Never>? = nil
+    @State private var moodValue: Double = 0.5
     @State private var transcriptionTask: Task<Void, Never>? = nil
     @State private var isSending: Bool = false
     @State private var showingSettingsSheet: Bool = false
@@ -587,14 +585,12 @@ struct HomeView: View {
     
     @ViewBuilder
     private var moodSliderSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            MoodSpectrumSlider(
-                moodValue: $detectedMoodValue,
-                showKnob: hasMoodAnalysis
+        VStack(alignment: .center, spacing: 4) {
+            SimplifiedMoodPicker(
+                moodValue: $moodValue,
+                isEnabled: !isSending && !isTranscribing
             )
-            .frame(height: UIDevice.isMac ? 12 : 8)
             .frame(maxWidth: UIDevice.isMac ? 600 : .infinity)
-            .animationIfChanged(AnimationConfig.standardResponse, value: detectedMoodValue)
         }
         .padding(.horizontal, UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 14)
         .padding(.top, UIDevice.isMac ? 20 : 12)
@@ -653,9 +649,6 @@ struct HomeView: View {
                 .background(Color.clear)
                 .scrollContentBackground(.hidden)
                 .font(.system(size: UIDevice.isMac ? 16 : 17)) // 移动端文字大小为17pt
-                .onChange(of: inputText) { oldValue, newValue in
-                    handleInputTextChange(newValue)
-                }
             if inputText.isEmpty {
                 Text(NSLocalizedString("今天是怎样的一天呢？", comment: "Daily prompt"))
                     .font(.system(size: UIDevice.isMac ? 16 : 17)) // 同步占位文本大小
@@ -668,48 +661,6 @@ struct HomeView: View {
         .frame(maxWidth: .infinity)
     }
     
-    private func handleInputTextChange(_ newValue: String) {
-        #if !os(macOS)
-        print("[HomeView inputText.onChange START] SFCFN: \\(currentAudioFileName ?? \"nil\"), Input: '\\(newValue)'")
-        analyzeTask?.cancel()
-
-        let trimmedNewValue = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if trimmedNewValue.isEmpty {
-            hasMoodAnalysis = false
-            print("[HomeView inputText.onChange END - empty text] SFCFN: \\(currentAudioFileName ?? \"nil\")")
-            return
-        }
-
-        analyzeTask = Task {
-            do {
-                try await Task.sleep(nanoseconds: 300_000_000)
-                
-                if Task.isCancelled {
-                    print("[HomeView inputText.onChange Task CANCELLED pre-mood] SFCFN: \\(currentAudioFileName ?? \"nil\")")
-                    return
-                }
-
-                let mood = await aiService.analyzeMood(text: trimmedNewValue)
-                
-                if Task.isCancelled {
-                    print("[HomeView inputText.onChange Task CANCELLED post-mood] SFCFN: \\(currentAudioFileName ?? \"nil\")")
-                    return
-                }
-                print("[HomeView inputText.onChange Task - before mood update] SFCFN: \\(currentAudioFileName ?? \"nil\"), detectedMood: \\(mood)")
-                detectedMoodValue = mood
-                hasMoodAnalysis = true
-                print("[HomeView inputText.onChange Task - after mood update] SFCFN: \\(currentAudioFileName ?? \"nil\"), hasMoodAnalysis: \\(hasMoodAnalysis)")
-
-            } catch {
-                if !(error is CancellationError) {
-                    print("[HomeView inputText.onChange Task Error]: \\(error), SFCFN: \\(currentAudioFileName ?? \"nil\")")
-                }
-            }
-        }
-        print("[HomeView inputText.onChange END - task started] SFCFN: \\(currentAudioFileName ?? \"nil\")")
-        #endif
-    }
     
     @ViewBuilder
     private var recordingsSection: some View {
@@ -823,27 +774,17 @@ struct HomeView: View {
                 }
             }
 
-            let textToAnalyze = inputText
-            var finalMoodValue = self.detectedMoodValue
-            print("[HomeView SendButton] Before mood check. SFCFN: \\(self.currentAudioFileName ?? \"nil\"), textToAnalyze: '\\(textToAnalyze)', hasMoodAnalysis: \\(hasMoodAnalysis)")
+            // 简化：仅在发送时执行一次AI情绪分析
+            let textToAnalyze = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+            var finalMoodValue = self.moodValue
 
-            if !textToAnalyze.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if let currentAnalysis = analyzeTask, !currentAnalysis.isCancelled {
-                    _ = await currentAnalysis.result
-                    finalMoodValue = self.detectedMoodValue
-                } else if !hasMoodAnalysis {
-                    print("[HomeView] Send action: Forcing mood analysis as hasMoodAnalysis is false.")
-                    let mood = await aiService.analyzeMood(text: textToAnalyze.trimmingCharacters(in: .whitespacesAndNewlines))
-                    finalMoodValue = mood
-                    await MainActor.run {
-                        self.detectedMoodValue = mood
-                        self.hasMoodAnalysis = true
-                    }
-                } else {
-                    finalMoodValue = self.detectedMoodValue
+            if !textToAnalyze.isEmpty {
+                print("[HomeView SendButton] Analyzing mood for text: '\(textToAnalyze)'")
+                let mood = await aiService.analyzeMood(text: textToAnalyze)
+                finalMoodValue = mood
+                await MainActor.run {
+                    self.moodValue = mood
                 }
-            } else if currentAudioFileName != nil && textToAnalyze.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                finalMoodValue = self.detectedMoodValue
             }
 
             let textToSend = inputText
@@ -860,7 +801,6 @@ struct HomeView: View {
                     audioRecordings.removeAll()
                     selectedImages.removeAll()
                     selectedPhotos.removeAll()
-                    hasMoodAnalysis = false
                 }
                 print("[HomeView SendButton] Did clear inputs. New SFCFN: \\(self.currentAudioFileName ?? \"nil\")")
                 hideKeyboard()
@@ -1357,14 +1297,8 @@ struct HomeView: View {
                         inputText += transcribedText + punctuation
                     }
                 }
-                // 取消延迟分析任务，并执行情绪分析
-                analyzeTask?.cancel()
-                let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-                let mood = await aiService.analyzeMood(text: trimmed)
-                await MainActor.run {
-                    detectedMoodValue = mood
-                    hasMoodAnalysis = true
-                }
+                // 转录后不再自动分析情绪，等待发送时统一分析
+                print("[HomeView transcriptionTask] Transcription completed, mood analysis will happen on send.")
             } else {
                 print("[HomeView transcriptionTask] 转录失败或返回nil")
             }
@@ -1572,11 +1506,9 @@ struct HomeView: View {
         audioRecordings.removeAll()
         selectedImages.removeAll()
         selectedPhotos.removeAll()
-        hasMoodAnalysis = false
-        detectedMoodValue = 0.5
-        
+        moodValue = 0.5
+
         // Cancel any ongoing tasks
-        analyzeTask?.cancel()
         transcriptionTask?.cancel()
         
         // Force Core Data to refresh
@@ -1588,11 +1520,6 @@ struct HomeView: View {
         #endif
         
         print("[HomeView] Database recreation handled - state cleared and context refreshed")
-    }
-    
-    // MARK: - Helpers
-    var shouldShowMoodControls: Bool {
-        hasMoodAnalysis
     }
 }
 

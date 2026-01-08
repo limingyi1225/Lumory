@@ -86,10 +86,14 @@ struct DiaryImportService {
         request.httpMethod = "POST"
         request.setValue("Bearer \(AppSecrets.openAIKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 60.0 // 60 second timeout for large imports
         request.httpBody = bodyData
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            // Use sslTolerantSession with retry for better reliability
+            let (data, response) = try await NetworkRetryHelper.performWithRetry(maxRetries: 2, retryDelay: 1.0) {
+                try await URLSession.sslTolerantSession.data(for: request)
+            }
             guard let http = response as? HTTPURLResponse else {
                 print("[DiaryImportService] Non-HTTP response: \(response)")
                 return []
@@ -111,13 +115,16 @@ struct DiaryImportService {
             print("[DiaryImportService] raw content: \(content)")
             guard let startIndex = content.firstIndex(of: "["), let endIndex = content.lastIndex(of: "]") else { return [] }
             let jsonString = String(content[startIndex...endIndex])
-            guard let jsonData2 = jsonString.data(using: .utf8), let entries = try? JSONDecoder().decode([ParsedEntry].self, from: jsonData2) else { return [] }
+            guard let jsonData2 = jsonString.data(using: String.Encoding.utf8), let entries = try? JSONDecoder().decode([ParsedEntry].self, from: jsonData2) else { return [] }
             let df = ISO8601DateFormatter()
             df.formatOptions = [.withFullDate]
-            return entries.compactMap { entry in
-                if let d = df.date(from: entry.date) { return (d, entry.text) }
-                return nil
+            var results: [(Date, String)] = []
+            for entry in entries {
+                if let d = df.date(from: entry.date) {
+                    results.append((d, entry.text))
+                }
             }
+            return results
         } catch {
             print("[DiaryImportService] Error: \(error)")
             return []

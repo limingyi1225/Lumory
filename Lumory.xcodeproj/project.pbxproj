@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		6A4EA3F32DF83D54007CBCEC /* LumoryIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 6A4EA3F22DF83D54007CBCEC /* LumoryIcon.icon */; };
+		6A4D7E0D2F0E8BA400F8E6B1 /* Lumory.icon in Resources */ = {isa = PBXBuildFile; fileRef = 6A4D7E0C2F0E8BA400F8E6B1 /* Lumory.icon */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -28,7 +28,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		6A4EA3F22DF83D54007CBCEC /* LumoryIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = LumoryIcon.icon; sourceTree = "<group>"; };
+		6A4D7E0C2F0E8BA400F8E6B1 /* Lumory.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = Lumory.icon; sourceTree = "<group>"; };
 		6A77D1022DEAA14B00CEDDE5 /* Lumory.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Lumory.entitlements; sourceTree = "<group>"; };
 		6A77D1032DEAA14B00CEDDE5 /* Lumory.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Lumory.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6A77D1042DEAA16200CEDDE5 /* ChronoteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChronoteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -82,9 +82,9 @@
 		6A2378222DE1CA9400544A70 = {
 			isa = PBXGroup;
 			children = (
-				6A4EA3F22DF83D54007CBCEC /* LumoryIcon.icon */,
 				6A77D1172DEB27AA00CEDDE5 /* Lumory-Info.plist */,
 				6A77D1022DEAA14B00CEDDE5 /* Lumory.entitlements */,
+				6A4D7E0C2F0E8BA400F8E6B1 /* Lumory.icon */,
 				6A23782D2DE1CA9400544A70 /* Chronote */,
 				6A23783B2DE1CA9500544A70 /* ChronoteTests */,
 				6A2378452DE1CA9500544A70 /* ChronoteUITests */,
@@ -215,7 +215,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				6A4EA3F32DF83D54007CBCEC /* LumoryIcon.icon in Resources */,
+				6A4D7E0D2F0E8BA400F8E6B1 /* Lumory.icon in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -408,12 +408,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
-				ASSETCATALOG_COMPILER_APPICON_NAME = LumoryIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = Lumory;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Lumory.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 16;
+				CURRENT_PROJECT_VERSION = 23;
 				DEVELOPMENT_TEAM = 9W3S5586KN;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_FILE_ACCESS_PICTURE_FOLDER = readwrite;
@@ -438,7 +437,7 @@
 					"@executable_path/Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
-				MARKETING_VERSION = 2.5;
+				MARKETING_VERSION = 3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = Mingyi.Lumory;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator xros xrsimulator";
@@ -455,12 +454,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
-				ASSETCATALOG_COMPILER_APPICON_NAME = LumoryIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = Lumory;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = Lumory.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 16;
+				CURRENT_PROJECT_VERSION = 23;
 				DEVELOPMENT_TEAM = 9W3S5586KN;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_FILE_ACCESS_PICTURE_FOLDER = readwrite;
@@ -485,7 +483,7 @@
 					"@executable_path/Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
-				MARKETING_VERSION = 2.5;
+				MARKETING_VERSION = 3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = Mingyi.Lumory;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator xros xrsimulator";

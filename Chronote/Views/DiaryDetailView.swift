@@ -139,10 +139,13 @@ struct DiaryDetailView: View {
                         .padding(.vertical, 8)
                     }
                     
-                    // 心情选择器（编辑模式）
+                    // 心情光谱（编辑模式）
                     if isEditing {
-                        SimplifiedMoodPicker(moodValue: $editedMoodValue, isEnabled: true)
-                            .padding(.vertical, 8)
+                        EditableMoodSpectrumBar(
+                            moodValue: $editedMoodValue,
+                            isEnabled: true
+                        )
+                        .padding(.vertical, 12)
                     }
                     
                     // 摘要部分

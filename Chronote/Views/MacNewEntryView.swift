@@ -29,6 +29,7 @@ struct MacNewEntryView: View {
     @State private var currentAudioFileName: String? = nil
     @State private var hasMoodAnalysis = false
     @State private var analyzeTask: Task<Void, Never>? = nil
+    @State private var showSendAnimation = false
     private let aiService = AppleRecognitionService(openAIApiKey: AppSecrets.openAIKey)
     @AppStorage("appLanguage") private var appLanguage: String = "en"
     
@@ -226,8 +227,8 @@ struct MacNewEntryView: View {
                                 
                                 // Enhanced slider section
                                 VStack(spacing: 16) {
-                                    MoodSpectrumSlider(moodValue: $moodValue, showKnob: hasMoodAnalysis)
-                                        .frame(height: 24)
+                                    EditableMoodSpectrumBar(moodValue: $moodValue, isEnabled: true)
+                                        .frame(height: 28)
                                         .padding(.horizontal, 8)
                                     
                                     HStack {
@@ -663,66 +664,74 @@ struct MacNewEntryView: View {
     
     
     private func saveEntry() {
-        let newEntry = DiaryEntry(context: viewContext)
-        newEntry.id = UUID()
-        newEntry.text = content
-        newEntry.moodValue = moodValue
-        newEntry.date = date
-        // Copy audio file to iCloud if needed
-        if let audioFileName = currentAudioFileName {
-            let localURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent(audioFileName)
-            
-            if FileManager.default.fileExists(atPath: localURL.path),
-               let audioData = try? Data(contentsOf: localURL) {
+        // 1. 触发发送动画
+        withAnimation {
+            showSendAnimation = true
+        }
+        
+        // 2. 延迟保存和关闭，让动画播放一会儿
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            let newEntry = DiaryEntry(context: viewContext)
+            newEntry.id = UUID()
+            newEntry.text = content
+            newEntry.moodValue = moodValue
+            newEntry.date = date
+            // Copy audio file to iCloud if needed
+            if let audioFileName = currentAudioFileName {
+                let localURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                    .appendingPathComponent(audioFileName)
                 
-                // Save to iCloud location
-                if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-                    let audioDir = iCloudURL.appendingPathComponent("Documents/LumoryAudio")
-                    if !FileManager.default.fileExists(atPath: audioDir.path) {
-                        try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
+                if FileManager.default.fileExists(atPath: localURL.path),
+                   let audioData = try? Data(contentsOf: localURL) {
+                    
+                    // Save to iCloud location
+                    if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
+                        let audioDir = iCloudURL.appendingPathComponent("Documents/LumoryAudio")
+                        if !FileManager.default.fileExists(atPath: audioDir.path) {
+                            try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
+                        }
+                        
+                        let iCloudAudioURL = audioDir.appendingPathComponent(audioFileName)
+                        try? audioData.write(to: iCloudAudioURL)
+                        print("[MacNewEntryView] Saved audio to iCloud: \(audioFileName)")
+                        
+                        // Delete from local after successful copy
+                        try? FileManager.default.removeItem(at: localURL)
                     }
-                    
-                    let iCloudAudioURL = audioDir.appendingPathComponent(audioFileName)
-                    try? audioData.write(to: iCloudAudioURL)
-                    print("[MacNewEntryView] Saved audio to iCloud: \(audioFileName)")
-                    
-                    // Delete from local after successful copy
-                    try? FileManager.default.removeItem(at: localURL)
+                }
+                
+                newEntry.audioFileName = audioFileName
+            }
+            
+            // 保存图片
+            var imageFileNames: [String] = []
+            for (index, imageData) in selectedImages.enumerated() {
+                let fileName = "img_\(newEntry.id?.uuidString ?? UUID().uuidString)_\(index).jpg"
+                do {
+                    let savedFileName = try DiaryEntry.saveImageToDocuments(imageData, fileName: fileName)
+                    imageFileNames.append(savedFileName)
+                } catch {
+                    print("[MacNewEntryView] 保存图片失败: \(error)")
                 }
             }
+            if !imageFileNames.isEmpty {
+                newEntry.imageFileNames = imageFileNames.joined(separator: ",")
+                
+                // Also save images data for sync
+                newEntry.saveImagesForSync(selectedImages)
+            }
             
-            newEntry.audioFileName = audioFileName
-        }
-        
-        // 保存图片
-        var imageFileNames: [String] = []
-        for (index, imageData) in selectedImages.enumerated() {
-            let fileName = "img_\(newEntry.id?.uuidString ?? UUID().uuidString)_\(index).jpg"
             do {
-                let savedFileName = try DiaryEntry.saveImageToDocuments(imageData, fileName: fileName)
-                imageFileNames.append(savedFileName)
+                try viewContext.save()
+                withAnimation(.easeOut(duration: 0.2)) {
+                    animateIn = false
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    isPresented = false
+                }
             } catch {
-                print("[MacNewEntryView] 保存图片失败: \(error)")
+                print("Error saving entry: \(error)")
             }
-        }
-        if !imageFileNames.isEmpty {
-            newEntry.imageFileNames = imageFileNames.joined(separator: ",")
-            
-            // Also save images data for sync
-            newEntry.saveImagesForSync(selectedImages)
-        }
-        
-        do {
-            try viewContext.save()
-            withAnimation(.easeOut(duration: 0.2)) {
-                animateIn = false
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                isPresented = false
-            }
-        } catch {
-            print("Error saving entry: \(error)")
         }
     }
 }

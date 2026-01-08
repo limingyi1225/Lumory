@@ -9,25 +9,28 @@ class BackendHealthCheck {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 10.0
-        
+
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            
-            if let httpResponse = response as? HTTPURLResponse {
-                switch httpResponse.statusCode {
-                case 200:
-                    if let responseString = String(data: data, encoding: .utf8) {
-                        return (true, "Backend is healthy: \(responseString)")
-                    } else {
-                        return (true, "Backend is healthy (status 200)")
+            // Use NetworkRetryHelper for automatic retry with exponential backoff
+            return try await NetworkRetryHelper.performWithRetry(maxRetries: 2, retryDelay: 0.5) {
+                let (data, response) = try await URLSession.sslTolerantSession.data(for: request)
+
+                if let httpResponse = response as? HTTPURLResponse {
+                    switch httpResponse.statusCode {
+                    case 200:
+                        if let responseString = String(data: data, encoding: .utf8) {
+                            return (true, "Backend is healthy: \(responseString)")
+                        } else {
+                            return (true, "Backend is healthy (status 200)")
+                        }
+                    case 404:
+                        return (false, "Backend is running but health endpoint not found. Status: 404")
+                    default:
+                        return (false, "Backend returned status: \(httpResponse.statusCode)")
                     }
-                case 404:
-                    return (false, "Backend is running but health endpoint not found. Status: 404")
-                default:
-                    return (false, "Backend returned status: \(httpResponse.statusCode)")
+                } else {
+                    return (false, "Invalid response type")
                 }
-            } else {
-                return (false, "Invalid response type")
             }
         } catch {
             if error.localizedDescription.contains("Could not connect to the server") {
@@ -47,20 +50,23 @@ class BackendHealthCheck {
             messages: [Message(role: "user", content: "测试")],
             reasoning_effort: "none"
         )
-        
+
         let url = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30.0
-        
+
         print("[BackendHealthCheck] Testing proxy with URL: \(url)")
-        
+
         do {
             let encoder = JSONEncoder()
             request.httpBody = try encoder.encode(testRequest)
-            
-            let (data, response) = try await URLSession.shared.data(for: request)
+
+            // Use NetworkRetryHelper for automatic retry
+            let (data, response) = try await NetworkRetryHelper.performWithRetry(maxRetries: 2, retryDelay: 1.0) {
+                try await URLSession.sslTolerantSession.data(for: request)
+            }
             
             if let httpResponse = response as? HTTPURLResponse {
                 print("[BackendHealthCheck] Proxy test response:")

@@ -123,6 +123,13 @@
 /* Import/Export */
 "导入日记" = "Import Diaries";
 "导入" = "Import";
+"导出日记" = "Export Diary";
+"导出" = "Export";
+"导出后将生成一个文本文件，包含所有日记的日期、心情和内容。" = "A text file will be generated containing the date, mood, and content of all entries.";
+"日记数量" = "Entry Count";
+"日期范围" = "Date Range";
+"无日记" = "No Entries";
+"分享" = "Share";
 
 /* General UI */
 "Settings" = "Settings";
@@ -256,3 +263,11 @@
 "Authentication failed. Please check your API key and account balance." = "Authentication failed. Please check your API key and account balance.";
 "Report generation was cancelled. Please try again." = "Report generation was cancelled. Please try again.";
 "Unable to generate report: %@. Please try again later." = "Unable to generate report: %@. Please try again later."; 
+
+/* Export Content */
+"Lumory 日记导出" = "Lumory Diary Export";
+"导出日期: %@" = "Export Date: %@";
+"共 %d 篇日记" = "Total: %d entries";
+"心情: %@" = "Mood: %@";
+"摘要: %@" = "Summary: %@";
+"--- 导出结束 ---" = "--- End of Export ---";

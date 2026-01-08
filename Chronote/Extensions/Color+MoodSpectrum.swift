@@ -6,51 +6,51 @@ extension Color {
     static func moodSpectrum(value: Double) -> Color {
         let v = min(max(value, 0), 1)
 
-        // 鲜艳端点
-        let red       = (r: 1.00, g: 0.10, b: 0.10)   // 极消极
-        let pink      = (r: 1.00, g: 0.40, b: 0.60)   // 消极
-        let grayWhite = (r: 0.90, g: 0.90, b: 0.90)   // 中性
-        let babyBlue  = (r: 0.60, g: 0.85, b: 1.00)   // 积极
-        let blue      = (r: 0.20, g: 0.60, b: 1.00)   // 极积极
+        // 更加通透、液态的配色方案
+        let red       = (r: 1.00, g: 0.25, b: 0.25)   // 剔透红
+        let pink      = (r: 1.00, g: 0.50, b: 0.70)   // 柔光粉
+        let neutral   = (r: 0.92, g: 0.92, b: 0.95)   // 玻璃灰白
+        let cyan      = (r: 0.40, g: 0.80, b: 0.95)   // 冰川蓝
+        let blue      = (r: 0.10, g: 0.50, b: 1.00)   // 深海蓝
 
         switch v {
-        case 0..<0.20:          // 红 → 粉
-            let t = v / 0.20
+        case 0..<0.25:          // 红 → 粉
+            let t = v / 0.25
             return Color(
                 red:   red.r  * (1 - t) + pink.r  * t,
                 green: red.g  * (1 - t) + pink.g  * t,
                 blue:  red.b  * (1 - t) + pink.b  * t
             )
 
-        case 0.20..<0.45:       // 粉 → 灰白
-            let t = (v - 0.20) / 0.25
+        case 0.25..<0.45:       // 粉 → 灰白
+            let t = (v - 0.25) / 0.20
             return Color(
-                red:   pink.r      * (1 - t) + grayWhite.r * t,
-                green: pink.g      * (1 - t) + grayWhite.g * t,
-                blue:  pink.b      * (1 - t) + grayWhite.b * t
+                red:   pink.r      * (1 - t) + neutral.r * t,
+                green: pink.g      * (1 - t) + neutral.g * t,
+                blue:  pink.b      * (1 - t) + neutral.b * t
             )
 
-        case 0.45..<0.55:       // 中性灰白区（加宽 10%）
+        case 0.45..<0.55:       // 中性区
             return Color(
-                red:   grayWhite.r,
-                green: grayWhite.g,
-                blue:  grayWhite.b
+                red:   neutral.r,
+                green: neutral.g,
+                blue:  neutral.b
             )
 
-        case 0.55..<0.80:       // 灰白 → Baby 蓝
-            let t = (v - 0.55) / 0.25
+        case 0.55..<0.75:       // 灰白 → 冰川蓝
+            let t = (v - 0.55) / 0.20
             return Color(
-                red:   grayWhite.r * (1 - t) + babyBlue.r * t,
-                green: grayWhite.g * (1 - t) + babyBlue.g * t,
-                blue:  grayWhite.b * (1 - t) + babyBlue.b * t
+                red:   neutral.r * (1 - t) + cyan.r * t,
+                green: neutral.g * (1 - t) + cyan.g * t,
+                blue:  neutral.b * (1 - t) + cyan.b * t
             )
 
-        default:                // Baby 蓝 → 亮蓝
-            let t = (v - 0.80) / 0.20
+        default:                // 冰川蓝 → 深海蓝
+            let t = (v - 0.75) / 0.25
             return Color(
-                red:   babyBlue.r * (1 - t) + blue.r * t,
-                green: babyBlue.g * (1 - t) + blue.g * t,
-                blue:  babyBlue.b * (1 - t) + blue.b * t
+                red:   cyan.r * (1 - t) + blue.r * t,
+                green: cyan.g * (1 - t) + blue.g * t,
+                blue:  cyan.b * (1 - t) + blue.b * t
             )
         }
     }

@@ -86,31 +86,49 @@ extension DiaryEntry {
         return names.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
     }
     
-    /// Saves images data for CloudKit sync
+    /// Saves images data for CloudKit sync (synchronous - deprecated, use saveImagesForSyncAsync instead)
+    @available(*, deprecated, message: "Use saveImagesForSyncAsync to avoid blocking main thread")
     func saveImagesForSync(_ images: [Data]) {
         guard !images.isEmpty else {
             imagesData = nil
             return
         }
-        
-        // Compress images concurrently for better performance
-        var compressedImages: [Data] = []
-        let group = DispatchGroup()
-        let queue = DispatchQueue(label: "com.lumory.compression", attributes: .concurrent)
-        let lock = NSLock()
-        
-        for imageData in images {
-            group.enter()
-            queue.async {
-                let compressed = DiaryEntry.compressImageData(imageData)
-                lock.lock()
-                compressedImages.append(compressed)
-                lock.unlock()
-                group.leave()
-            }
+
+        // Use serial queue to avoid blocking main thread completely
+        // But still complete before returning
+        let compressedImages = images.map { DiaryEntry.compressImageData($0) }
+
+        // Encode as array
+        do {
+            let encoded = try NSKeyedArchiver.archivedData(withRootObject: compressedImages, requiringSecureCoding: false)
+            imagesData = encoded
+            print("[DiaryEntry] Saved \(images.count) images for sync, total size: \(encoded.count) bytes")
+        } catch {
+            print("[DiaryEntry] Failed to encode images: \(error)")
+        }
+    }
+    
+    /// 异步保存图片用于 CloudKit 同步（避免阻塞主线程）
+    func saveImagesForSyncAsync(_ images: [Data]) async {
+        guard !images.isEmpty else {
+            imagesData = nil
+            return
         }
         
-        group.wait()
+        // 使用 TaskGroup 并发压缩图片
+        let compressedImages = await withTaskGroup(of: Data.self, returning: [Data].self) { group in
+            for imageData in images {
+                group.addTask {
+                    DiaryEntry.compressImageData(imageData)
+                }
+            }
+            
+            var results: [Data] = []
+            for await compressed in group {
+                results.append(compressed)
+            }
+            return results
+        }
         
         // Encode as array
         do {
@@ -279,8 +297,25 @@ extension DiaryEntry {
         return nil
     }
     
-    /// Loads all images as Data array
+    /// Loads all images as Data array (synchronous - deprecated, use loadAllImageDataAsync instead)
+    @available(*, deprecated, message: "Use loadAllImageDataAsync to avoid blocking main thread")
     func loadAllImageData() -> [Data] {
+        // First try to load from synced data
+        let syncedImages = loadImagesFromSync()
+        if !syncedImages.isEmpty {
+            return syncedImages
+        }
+
+        // Fallback to loading from files sequentially to avoid blocking with group.wait()
+        let fileNames = imageFileNameArray
+        guard !fileNames.isEmpty else { return [] }
+
+        // Load images sequentially (still on current thread, but no group.wait())
+        return fileNames.compactMap { loadImageData(fileName: $0) }
+    }
+    
+    /// 异步加载所有图片（避免阻塞主线程）
+    func loadAllImageDataAsync() async -> [Data] {
         // First try to load from synced data
         let syncedImages = loadImagesFromSync()
         if !syncedImages.isEmpty {
@@ -291,25 +326,21 @@ extension DiaryEntry {
         let fileNames = imageFileNameArray
         guard !fileNames.isEmpty else { return [] }
         
-        var images: [Data] = []
-        let group = DispatchGroup()
-        let queue = DispatchQueue(label: "com.lumory.imageloading", attributes: .concurrent)
-        let lock = NSLock()
-        
-        for fileName in fileNames {
-            group.enter()
-            queue.async { [weak self] in
-                if let data = self?.loadImageData(fileName: fileName) {
-                    lock.lock()
-                    images.append(data)
-                    lock.unlock()
+        return await withTaskGroup(of: Data?.self, returning: [Data].self) { group in
+            for fileName in fileNames {
+                group.addTask { [weak self] in
+                    self?.loadImageData(fileName: fileName)
                 }
-                group.leave()
             }
+            
+            var results: [Data] = []
+            for await data in group {
+                if let data = data {
+                    results.append(data)
+                }
+            }
+            return results
         }
-        
-        group.wait()
-        return images
     }
     
     /// Deletes all images associated with this entry

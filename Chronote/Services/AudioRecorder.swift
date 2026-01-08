@@ -45,13 +45,13 @@ final class AudioRecorder: NSObject, ObservableObject {
             recorder?.record()
             startTime = Date()
 
-            // 启动计时器，定期更新音量数据（selector-based）
+            // 启动计时器，定期更新音量数据（使用闭包避免内存泄漏）
             timerLock.lock()
-            meterTimer = Timer.scheduledTimer(timeInterval: 0.03,
-                                             target: self,
-                                             selector: #selector(handleMeter(_:)),
-                                             userInfo: nil,
-                                             repeats: true)
+            meterTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.handleMeterUpdate()
+                }
+            }
             // Ensure timer runs on common run loop mode
             if let timer = meterTimer {
                 RunLoop.current.add(timer, forMode: .common)
@@ -129,13 +129,13 @@ final class AudioRecorder: NSObject, ObservableObject {
         recorder.record()
         isPaused = false
         
-        // Restart the meter timer
+        // Restart the meter timer (使用闭包避免内存泄漏)
         timerLock.lock()
-        meterTimer = Timer.scheduledTimer(timeInterval: 0.03,
-                                         target: self,
-                                         selector: #selector(handleMeter(_:)),
-                                         userInfo: nil,
-                                         repeats: true)
+        meterTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleMeterUpdate()
+            }
+        }
         if let timer = meterTimer {
             RunLoop.current.add(timer, forMode: .common)
         }
@@ -157,6 +157,11 @@ final class AudioRecorder: NSObject, ObservableObject {
     }
 
     @objc private func handleMeter(_ timer: Timer) {
+        handleMeterUpdate()
+    }
+    
+    /// 更新音量表读数（闭包版 Timer 调用）
+    private func handleMeterUpdate() {
         recorderLock.lock()
         guard let recorder = recorder else {
             recorderLock.unlock()
@@ -174,21 +179,19 @@ final class AudioRecorder: NSObject, ObservableObject {
     }
     
     deinit {
-        // Ensure timer cleanup happens on main thread
-        if Thread.isMainThread {
-            timerLock.lock()
-            meterTimer?.invalidate()
-            meterTimer = nil
-            timerLock.unlock()
-        } else {
-            DispatchQueue.main.sync {
-                timerLock.lock()
-                meterTimer?.invalidate()
-                meterTimer = nil
-                timerLock.unlock()
-            }
-        }
-        
+        // Since this class is @MainActor, deinit typically runs on main thread
+        // Timer invalidation must happen on main thread
+
+        timerLock.lock()
+        let timerToInvalidate = meterTimer
+        meterTimer = nil
+        timerLock.unlock()
+
+        // Timer.invalidate() is safe to call - it will handle thread safety internally
+        // For @MainActor class, deinit runs on main thread
+        timerToInvalidate?.invalidate()
+
+        // Recorder cleanup - safe on any thread
         recorderLock.lock()
         recorder?.stop()
         recorder = nil

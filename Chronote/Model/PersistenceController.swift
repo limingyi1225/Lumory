@@ -35,8 +35,23 @@ final class PersistenceController {
             let isHealthy = DatabaseRecoveryService.shared.checkDatabaseHealth(at: storeURL)
             if !isHealthy {
                 print("[PersistenceController] Database corruption detected before loading!")
-                handlePreLoadCorruption(storeURL: storeURL, container: container)
-                return
+                // Synchronously clean up corrupted files before loading
+                // Create backup first
+                let backupURL = storeURL.appendingPathExtension("corruption-backup-\(Int(Date().timeIntervalSince1970))")
+                try? FileManager.default.copyItem(at: storeURL, to: backupURL)
+                print("[PersistenceController] Created backup at: \(backupURL.path)")
+                
+                // Delete corrupted database files
+                try? FileManager.default.removeItem(at: storeURL)
+                let walURL = storeURL.deletingPathExtension().appendingPathExtension("sqlite-wal")
+                let shmURL = storeURL.deletingPathExtension().appendingPathExtension("sqlite-shm")
+                let ckURL = storeURL.deletingPathExtension().appendingPathExtension("sqlite-ck")
+                try? FileManager.default.removeItem(at: walURL)
+                try? FileManager.default.removeItem(at: shmURL)
+                try? FileManager.default.removeItem(at: ckURL)
+                print("[PersistenceController] Removed corrupted database files, will recreate on load")
+                
+                // Continue to loadPersistentStores below - it will create a fresh database
             }
         }
         
@@ -449,19 +464,59 @@ extension PersistenceController {
         }
     }
     
-    // Batch delete with performance optimization
-    func batchDelete<T: NSManagedObject>(_ type: T.Type, predicate: NSPredicate? = nil) throws {
+    // Batch delete with performance optimization - uses background context for thread safety
+    func batchDelete<T: NSManagedObject>(_ type: T.Type, predicate: NSPredicate? = nil) async throws {
+        try await container.performBackgroundTask { context in
+            let fetchRequest = NSFetchRequest<NSFetchRequestResult>(entityName: String(describing: type))
+            fetchRequest.predicate = predicate
+
+            let batchDeleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
+            batchDeleteRequest.resultType = .resultTypeObjectIDs
+
+            let result = try context.execute(batchDeleteRequest) as? NSBatchDeleteResult
+            let objectIDArray = result?.result as? [NSManagedObjectID] ?? []
+            let changes = [NSDeletedObjectsKey: objectIDArray]
+
+            // Merge changes to view context on main thread (use async to avoid blocking)
+            // Capture viewContext reference before async to satisfy Sendable requirements
+            let viewContext = self.container.viewContext
+            DispatchQueue.main.async {
+                NSManagedObjectContext.mergeChanges(fromRemoteContextSave: changes, into: [viewContext])
+            }
+        }
+    }
+
+    // Synchronous version for backwards compatibility (deprecated)
+    @available(*, deprecated, message: "Use async version instead")
+    func batchDeleteSync<T: NSManagedObject>(_ type: T.Type, predicate: NSPredicate? = nil) throws {
         let fetchRequest = NSFetchRequest<NSFetchRequestResult>(entityName: String(describing: type))
         fetchRequest.predicate = predicate
-        
+
         let batchDeleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
         batchDeleteRequest.resultType = .resultTypeObjectIDs
-        
-        let result = try container.viewContext.execute(batchDeleteRequest) as? NSBatchDeleteResult
-        let objectIDArray = result?.result as? [NSManagedObjectID] ?? []
-        let changes = [NSDeletedObjectsKey: objectIDArray]
-        
-        // Merge changes to view context
-        NSManagedObjectContext.mergeChanges(fromRemoteContextSave: changes, into: [container.viewContext])
+
+        // Use background context to avoid blocking main thread
+        var deleteError: Error?
+        let semaphore = DispatchSemaphore(value: 0)
+
+        container.performBackgroundTask { context in
+            do {
+                let result = try context.execute(batchDeleteRequest) as? NSBatchDeleteResult
+                let objectIDArray = result?.result as? [NSManagedObjectID] ?? []
+                let changes = [NSDeletedObjectsKey: objectIDArray]
+
+                DispatchQueue.main.async {
+                    NSManagedObjectContext.mergeChanges(fromRemoteContextSave: changes, into: [self.container.viewContext])
+                }
+            } catch {
+                deleteError = error
+            }
+            semaphore.signal()
+        }
+
+        semaphore.wait()
+        if let error = deleteError {
+            throw error
+        }
     }
 }

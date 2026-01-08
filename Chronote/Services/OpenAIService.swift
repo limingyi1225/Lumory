@@ -8,10 +8,8 @@ final class OpenAIService: AIServiceProtocol {
     private let backendURL = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions")!
     private let jsonEncoder = JSONEncoder()
     private let jsonDecoder = JSONDecoder()
-    
-    // Request debouncing
-    private var pendingRequests: [String: Task<String?, Never>] = [:]
-    private let requestQueue = DispatchQueue(label: "com.lumory.openai.debounce")
+
+    // Debounce delay for summarize requests
     private let debounceDelay: TimeInterval = 0.3 // 300ms debounce
 
     init(apiKey: String) {
@@ -38,58 +36,36 @@ final class OpenAIService: AIServiceProtocol {
     }
 
     func analyzeMood(text: String) async -> Double {
-        let requestKey = "mood-\(text.hashValue)"
-        return await debouncedRequest(key: requestKey) {
-            // 通用英文 prompt，返回 JSON，可包含"不确定"选项
-            let diaryEscaped = text.replacingOccurrences(of: "\"", with: "\\\"")
-            let prompt = """
-                // 请大胆使用极端值：如果日记内容非常消极，请使用1；如果非常积极，请使用100。
-                Analyze a provided diary entry and generate a mood score on a scale from 1 to 100, where 1 represents a very negative mood and 100 represents a very positive mood.
+        // 使用 gpt-5-nano 快速判断情绪，minimal reasoning
+        let diaryEscaped = text.replacingOccurrences(of: "\"", with: "\\\"")
+        let prompt = """
+            Rate the mood of this diary entry from 1 (very negative) to 100 (very positive).
+            Use extreme values when appropriate: 1-20 for very negative, 80-100 for very positive.
+            Reply with JSON: {"mood_score": <number>}
 
-                Consider the language, tone, and expressed emotions in the diary entry to assess the mood accurately.
+            Diary: "\(diaryEscaped)"
+            """
 
-                # Steps
-                1. **Read the Diary Entry**: Carefully interpret the content, context, and emotional nuances present in the diary entry.
-                2. **Analyze Emotional Content**: Identify words and phrases that indicate the mood, such as expressions of joy, sadness, anger, or anxiety.
-                3. **Determine Mood Score**: Use the analysis to assign a mood score between 1 and 100. If unable to determine the mood clearly, you may choose the string "uncertain".
-
-                # Output Format
-                The response should be in JSON format, containing the following field:
-                - "mood_score": An integer between 1 and 100 indicating the mood assessment, or the string "uncertain" if the mood cannot be determined.
-
-                # Diary Entry
-                "
-                \(diaryEscaped)
-                "
-                """
-
-            if let resultStr = await self.chat(prompt: prompt, model: "gpt-5.2", maxTokens: 32, forceJSON: true, reasoningEffort: "low")?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) {
-                // 解析 JSON 或字符串中的 mood_score
-                if let data = resultStr.data(using: .utf8) {
-                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        if let score = json["mood_score"] as? Int, (1...100).contains(score) {
-                            return Double(score) / 100.0
-                        }
-                        if let strVal = json["mood_score"] as? String {
-                            let lower = strVal.lowercased()
-                            if lower.contains("uncertain") || lower.contains("不确定") {
-                                return 0.5
-                            }
-                            if let number = Int(strVal.filter({ $0.isNumber })), (1...100).contains(number) {
-                                return Double(number) / 100.0
-                            }
-                        }
+        if let resultStr = await self.chat(prompt: prompt, model: "gpt-5-nano", maxTokens: 16, forceJSON: true, reasoningEffort: "minimal")?
+                .trimmingCharacters(in: .whitespacesAndNewlines) {
+            // 解析 JSON 或字符串中的 mood_score
+            if let data = resultStr.data(using: .utf8) {
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if let score = json["mood_score"] as? Int, (1...100).contains(score) {
+                        return Double(score) / 100.0
+                    }
+                    if let score = json["mood_score"] as? Double, (1...100).contains(Int(score)) {
+                        return score / 100.0
                     }
                 }
-                // 回退：提取文本中的数字
-                if let number = Int(resultStr.filter({ $0.isNumber })), (1...100).contains(number) {
-                    return Double(number) / 100.0
-                }
             }
-            // 默认为中立
-            return 0.5
-        } ?? 0.5
+            // 回退：提取文本中的数字
+            if let number = Int(resultStr.filter({ $0.isNumber })), (1...100).contains(number) {
+                return Double(number) / 100.0
+            }
+        }
+        // 默认为中立
+        return 0.5
     }
 
     func analyzeAndSummarize(text: String) async -> (summary: String?, mood: Double) {
@@ -169,7 +145,7 @@ Diary Entries:
 - **日期引用**：使用口语化的日期表达方式（如"四月初"），避免使用过于正式的数字格式（如2024-12-1）。
 - **结构**：不包含标题、小标题、引言或结论。使用1-4段落，段落之间用空行分隔。
 # 输出格式
-- 1-6段落的报告（Mac版本总字数不超过800字，其他平台不超过400字）。
+- 1-6段落的报告（不超过1000字）。
 - 每个段落之间用空行（两行换行）分隔。
 - 不得使用括号、破折号，引号，星号，加粗，斜体或其他类似标点符号。
 
@@ -599,8 +575,7 @@ Diary Entries:
     
     // MARK: - Debouncing
     private func debouncedRequest<T>(key: String, request: @escaping () async -> T) async -> T {
-        // Simply add a delay and execute the request
-        // More complex debouncing would require a different approach
+        // Add a delay before executing to allow for debouncing
         do {
             try await Task.sleep(nanoseconds: UInt64(debounceDelay * 1_000_000_000))
         } catch {
@@ -611,20 +586,8 @@ Diary Entries:
                 return 0.5 as! T
             }
         }
-        
+
         return await request()
-    }
-    
-    // Cancel all pending requests
-    func cancelAllPendingRequests() {
-        requestQueue.sync {
-            pendingRequests.values.forEach { $0.cancel() }
-            pendingRequests.removeAll()
-        }
-    }
-    
-    deinit {
-        cancelAllPendingRequests()
     }
 }
 

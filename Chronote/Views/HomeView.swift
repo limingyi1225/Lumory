@@ -360,6 +360,15 @@ struct HomeView: View {
         animation: .default
     ) private var entries: FetchedResults<DiaryEntry>
     
+    // 缓存分组后的日记，避免每次渲染都重新计算
+    private var groupedEntries: [(date: Date, entries: [DiaryEntry])] {
+        // FetchRequest 已按日期降序排列，无需再次排序
+        let grouped = Dictionary(grouping: entries) { cal.startOfDay(for: $0.date ?? Date()) }
+        return grouped.keys.sorted(by: >).map { date in
+            (date: date, entries: grouped[date]!)
+        }
+    }
+    
     // AI 服务（从 DiaryStore 中提取）
     private let aiService = AppleRecognitionService(openAIApiKey: AppSecrets.openAIKey)
     
@@ -379,6 +388,8 @@ struct HomeView: View {
     @State private var sendButtonState: SendButtonState = .idle
     @State private var revealedMood: Double? = nil
     @State private var textEditorHeight: CGFloat = 140
+    @State private var showMoodReveal: Bool = false
+    @State private var spectrumDisplayState: SpectrumDisplayState = .idle
     @State private var showingSettingsSheet: Bool = false
     @State private var selectedEntry: DiaryEntry? = nil
     @State private var selectedPhotos: [PhotosPickerItem] = []
@@ -429,28 +440,21 @@ struct HomeView: View {
     @ViewBuilder
     private var iOSHomeView: some View {
         GeometryReader { geometry in
+            let panelWidth = UIDevice.isMac ? MacOptimizedSpacing.sidebarWidth : geometry.size.width
+            let panelOffsetX = isSettingsOpen ? dragOffsetX : -panelWidth + dragOffsetX
+            
             ZStack(alignment: .leading) {
-                // 计算设置面板相关变量 - Mac优化
-                let panelWidth = UIDevice.isMac ? MacOptimizedSpacing.sidebarWidth : geometry.size.width
-                let panelOffsetX = isSettingsOpen ? dragOffsetX : -panelWidth + dragOffsetX
-                let normalizedOpen = min(max((panelOffsetX + panelWidth) / panelWidth, 0), 1)
-                let maskAlpha = UIDevice.isMac ? 0 : normalizedOpen * 0.3
+                // 1. 主界面
+                mainContentWithGestures(panelWidth: panelWidth)
 
-                // 主界面 - Mac自适应布局
-                mainContentView
-                    .disabled(isSettingsOpen && !UIDevice.isMac)
-                    .overlay(alignment: .leading) {
-                        leadingSwipeGesture(panelWidth: panelWidth)
-                    }
-                    .overlay(alignment: .trailing) {
-                        trailingSwipeGesture(panelWidth: panelWidth)
-                    }
+                // 2. 遮罩层
+                settingsMaskLayer(panelWidth: panelWidth, panelOffsetX: panelOffsetX)
 
-                // 遮罩层 - iOS only
-                maskLayer(maskAlpha: maskAlpha, panelWidth: panelWidth)
-
-                // 设置面板 - Mac优化为侧边栏
+                // 3. 设置面板
                 settingsPanel(panelWidth: panelWidth, panelOffsetX: panelOffsetX)
+
+                // 4. 情绪动画覆盖
+                moodAnimationOverlay
             }
         }
         .onChange(of: importService.isImporting) { _, isImporting in
@@ -493,6 +497,71 @@ struct HomeView: View {
         } message: {
             Text(NSLocalizedString("确定要删除这篇日记吗？此操作无法撤销。", comment: "Delete confirmation"))
         }
+    }
+    
+    @ViewBuilder
+    private func mainContentWithGestures(panelWidth: CGFloat) -> some View {
+        mainContentView
+            .disabled(isSettingsOpen && !UIDevice.isMac)
+            .overlay(alignment: .leading) {
+                leadingSwipeGesture(panelWidth: panelWidth)
+            }
+            .overlay(alignment: .trailing) {
+                trailingSwipeGesture(panelWidth: panelWidth)
+            }
+    }
+    
+    @ViewBuilder
+    private func settingsMaskLayer(panelWidth: CGFloat, panelOffsetX: CGFloat) -> some View {
+        if !UIDevice.isMac {
+            let normalizedOpen = min(max((panelOffsetX + panelWidth) / panelWidth, 0), 1)
+            let maskAlpha = normalizedOpen * 0.3
+            
+            Color.black.opacity(maskAlpha)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    withAnimation(AnimationConfig.smoothTransition) {
+                        isSettingsOpen = false
+                        dragOffsetX = 0
+                    }
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 5)
+                        .onChanged { value in
+                            if isSettingsOpen {
+                                let dx = value.translation.width
+                                if dx < 0 {
+                                    dragOffsetX = max(dx, -panelWidth)
+                                }
+                            }
+                        }
+                        .onEnded { value in
+                            if isSettingsOpen {
+                                let dx = value.translation.width
+                                if dx < -panelWidth * 0.15 {
+                                    #if canImport(UIKit)
+                                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                                    #endif
+                                    withAnimation(AnimationConfig.smoothTransition) {
+                                        isSettingsOpen = false
+                                        dragOffsetX = 0
+                                    }
+                                } else {
+                                    withAnimation(AnimationConfig.standardResponse) {
+                                        dragOffsetX = 0
+                                    }
+                                }
+                            }
+                        }
+                )
+                .allowsHitTesting(isSettingsOpen)
+        }
+    }
+    
+    @ViewBuilder
+    private var moodAnimationOverlay: some View {
+        // 动画现在直接在MoodSpectrumBar上显示，不需要额外覆盖层
+        EmptyView()
     }
     
     @ViewBuilder
@@ -597,17 +666,19 @@ struct HomeView: View {
     @ViewBuilder
     private var moodSliderSection: some View {
         VStack(alignment: .center, spacing: 4) {
-            SimplifiedMoodPicker(
-                moodValue: $moodValue,
-                isEnabled: !isSending && !isTranscribing
+            MoodSpectrumBar(
+                moodValue: revealedMood ?? moodValue,
+                displayState: spectrumDisplayState
             )
             .frame(maxWidth: UIDevice.isMac ? 600 : .infinity)
+            .frame(height: 32)
         }
-        .padding(.horizontal, UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 14)
-        .padding(.top, UIDevice.isMac ? 20 : 12)
-        .padding(.bottom, UIDevice.isMac ? -40 : -50)
+        .frame(height: 80)  // 给发光动画留出空间
+        .padding(.horizontal, UIDevice.isMac ? MacOptimizedSpacing.cardPadding : 16)
+        .zIndex(spectrumDisplayState == .revealed ? 100 : 0)  // 揭示时提升层级
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
     }
     
     @ViewBuilder
@@ -663,6 +734,17 @@ struct HomeView: View {
                 .font(.system(size: UIDevice.isMac ? 16 : 17)) // 移动端文字大小为17pt
                 .onChange(of: inputText) { _, newValue in
                     calculateTextHeight(for: newValue)
+                    // 当用户输入文字时，显示分析中的呼吸效果（慢速自然过渡）
+                    let hasContent = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    if hasContent && spectrumDisplayState == .idle {
+                        withAnimation(.easeInOut(duration: 1.0)) {
+                            spectrumDisplayState = .analyzing
+                        }
+                    } else if !hasContent && spectrumDisplayState == .analyzing {
+                        withAnimation(.easeInOut(duration: 0.8)) {
+                            spectrumDisplayState = .idle
+                        }
+                    }
                 }
             if inputText.isEmpty {
                 Text(NSLocalizedString("今天是怎样的一天呢？", comment: "Daily prompt"))
@@ -814,12 +896,13 @@ struct HomeView: View {
         HapticManager.shared.click()
 #endif
         Task {
-            // 1. 发送开始 → sending状态
+            // 1. 发送开始 → sending状态 + spectrum开始分析
             await MainActor.run {
                 print("[HomeView SendButton] Starting send action")
                 withAnimation(AnimationConfig.standardResponse) {
                     sendButtonState = .sending
                     isSending = true
+                    spectrumDisplayState = .analyzing  // 光谱进入分析状态（呼吸效果）
                 }
             }
 
@@ -836,20 +919,18 @@ struct HomeView: View {
                 }
             }
 
-            // 3. 显示情绪反馈 → moodRevealing状态
+            // 3. 显示情绪反馈 → spectrum揭示结果（光点聚焦动画）
             await MainActor.run {
                 withAnimation(AnimationConfig.smoothTransition) {
                     revealedMood = finalMoodValue
                     sendButtonState = .moodRevealing
+                    spectrumDisplayState = .revealed  // 光谱显示结果
                 }
-                #if canImport(UIKit)
-                HapticManager.shared.notification(.success)
-                #endif
                 print("[HomeView SendButton] Mood revealed: \(finalMoodValue)")
             }
 
-            // 4. 等待脉冲动画完成（1.2秒）
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            // 4. 等待光谱动画完成（2秒）- 让用户有更多时间欣赏动画
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
 
             // 5. 清除输入并保存日记
             let textToSend = inputText
@@ -871,7 +952,7 @@ struct HomeView: View {
             // 6. 保存日记
             await addEntry(text: textToSend, audioFileName: audioToSend, moodValue: moodToSend, images: imagesToSend)
 
-            // 7. 完成动画 → completed → idle
+            // 7. 完成动画 → 重置状态
             await MainActor.run {
                 withAnimation(AnimationConfig.smoothTransition) {
                     sendButtonState = .completed
@@ -885,6 +966,7 @@ struct HomeView: View {
                 withAnimation(AnimationConfig.smoothTransition) {
                     sendButtonState = .idle
                     revealedMood = nil
+                    spectrumDisplayState = .idle  // 光谱重置
                 }
             }
 
@@ -952,40 +1034,7 @@ struct HomeView: View {
         }
     }
     
-    @ViewBuilder
-    private func maskLayer(maskAlpha: Double, panelWidth: CGFloat) -> some View {
-        if !UIDevice.isMac {
-            Color.black
-                .opacity(maskAlpha)
-                .animation(AnimationConfig.smoothTransition, value: maskAlpha)
-                .ignoresSafeArea()
-                .allowsHitTesting(maskAlpha > 0.01)
-                .onTapGesture {
-                    #if canImport(UIKit)
-                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                    #endif
-                    withAnimation(AnimationConfig.smoothTransition) {
-                        isSettingsOpen = false
-                        dragOffsetX = 0
-                    }
-                }
-                .gesture(
-                    DragGesture().onEnded { value in
-                        let dx = value.translation.width
-                        let dy = value.translation.height
-                        if dx < -panelWidth * 0.1 && abs(dx) > abs(dy) {
-                            #if canImport(UIKit)
-                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                            #endif
-                            withAnimation(AnimationConfig.smoothTransition) {
-                                isSettingsOpen = false
-                                dragOffsetX = 0
-                            }
-                        }
-                    }
-                )
-        }
-    }
+
     
     @ViewBuilder
     private func settingsPanel(panelWidth: CGFloat, panelOffsetX: CGFloat) -> some View {
@@ -1007,8 +1056,8 @@ struct HomeView: View {
                 #endif
                 .offset(x: panelOffsetX)
                 .animationIfChanged(AnimationConfig.smoothTransition, value: panelOffsetX)
-                .gesture(
-                    DragGesture()
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 5)
                         .onChanged { value in
                             let dx = value.translation.width
                             let dy = value.translation.height
@@ -1016,11 +1065,9 @@ struct HomeView: View {
                                 dragOffsetX = min(max(dx, -panelWidth), 0)
                             }
                         }
-                        .onEnded { value in
-                            let dx = value.translation.width
-                            let dy = value.translation.height
-                            if isSettingsOpen && abs(dx) > abs(dy) {
-                                if dragOffsetX < -panelWidth * 0.2 {
+                        .onEnded { _ in
+                            if isSettingsOpen {
+                                if dragOffsetX < -panelWidth * 0.15 {
                                     #if canImport(UIKit)
                                     UIImpactFeedbackGenerator(style: .soft).impactOccurred()
                                     #endif
@@ -1136,54 +1183,47 @@ struct HomeView: View {
     // MARK: - Core Data 操作
     
     private func addEntry(text: String, audioFileName: String?, moodValue: Double? = nil, images: [Data] = []) async {
-        // 并行调用摘要与情绪（如果未提供）以提升性能
-        let finalMoodValue: Double
-        let summary: String?
-        
-        if let moodValue {
-            summary = await aiService.summarize(text: text)
-            finalMoodValue = moodValue
-        } else {
-            let (summaryResult, moodResult) = await aiService.analyzeAndSummarize(text: text)
-            summary = summaryResult
-            finalMoodValue = moodResult
-        }
-        
-        // 在主线程创建 Core Data 实体
+        // 立即保存日记（不等待标题生成），标题异步生成
+        let finalMoodValue = moodValue ?? 0.5
+        var savedEntryID: UUID?
+
+        // 在主线程创建并保存 Core Data 实体（summary为nil，稍后异步更新）
         await MainActor.run {
             let newEntry = DiaryEntry(context: viewContext)
             newEntry.id = UUID()
+            savedEntryID = newEntry.id
             newEntry.date = Date()
             newEntry.text = text
             newEntry.moodValue = finalMoodValue
-            newEntry.summary = summary
+            newEntry.summary = nil  // 标题稍后异步生成
+
             // Copy audio file to iCloud if needed
             if let audioFileName = audioFileName {
                 let localURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                     .appendingPathComponent(audioFileName)
-                
+
                 if FileManager.default.fileExists(atPath: localURL.path),
                    let audioData = try? Data(contentsOf: localURL) {
-                    
+
                     // Save to iCloud location
                     if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
                         let audioDir = iCloudURL.appendingPathComponent("Documents/LumoryAudio")
                         if !FileManager.default.fileExists(atPath: audioDir.path) {
                             try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
                         }
-                        
+
                         let iCloudAudioURL = audioDir.appendingPathComponent(audioFileName)
                         try? audioData.write(to: iCloudAudioURL)
                         print("[HomeView] Saved audio to iCloud: \(audioFileName)")
-                        
+
                         // Delete from local after successful copy
                         try? FileManager.default.removeItem(at: localURL)
                     }
                 }
-                
+
                 newEntry.audioFileName = audioFileName
             }
-            
+
             // 保存图片
             print("[HomeView addEntry] Saving \(images.count) images")
             var imageFileNames: [String] = []
@@ -1200,15 +1240,33 @@ struct HomeView: View {
             if !imageFileNames.isEmpty {
                 newEntry.imageFileNames = imageFileNames.joined(separator: ",")
                 print("[HomeView addEntry] Set imageFileNames: \(newEntry.imageFileNames ?? "")")
-                
+
                 // Also save images data for sync
                 newEntry.saveImagesForSync(images)
             }
-            
+
             do {
                 try viewContext.save()
+                print("[HomeView] 日记已保存，标题稍后生成")
             } catch {
                 print("[HomeView] 保存日记失败: \(error)")
+            }
+        }
+
+        // 异步生成标题并更新
+        if let entryID = savedEntryID, !text.isEmpty {
+            Task {
+                let summary = await aiService.summarize(text: text)
+                await MainActor.run {
+                    // 查找并更新条目
+                    let fetchRequest: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+                    fetchRequest.predicate = NSPredicate(format: "id == %@", entryID as CVarArg)
+                    if let entry = try? viewContext.fetch(fetchRequest).first {
+                        entry.summary = summary
+                        try? viewContext.save()
+                        print("[HomeView] 标题已更新: \(summary ?? "nil")")
+                    }
+                }
             }
         }
     }
@@ -1239,16 +1297,14 @@ struct HomeView: View {
     
     @ViewBuilder
     private var entriesListSection: some View {
-        let sortedEntries = entries.sorted(by: { ($0.date ?? Date.distantPast) > ($1.date ?? Date.distantPast) })
-        let grouped = Dictionary(grouping: sortedEntries) { cal.startOfDay(for: $0.date ?? Date()) }
-        let sortedDates = grouped.keys.sorted(by: >)
-        ForEach(sortedDates, id: \.self) { date in
+        // 使用缓存的 groupedEntries，避免重复排序和分组
+        ForEach(groupedEntries, id: \.date) { group in
             Section {
-                ForEach(grouped[date]!, id: \.id) { entry in
+                ForEach(group.entries, id: \.id) { entry in
                     diaryEntryRow(entry: entry)
                 }
             } header: {
-                Text(formatDate(date))
+                Text(formatDate(group.date))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1851,7 +1907,7 @@ struct AppleStyleSendButton: View {
                 return Color(NSColor.disabledControlTextColor)
                 #endif
             } else {
-                return Color(red: 114/255, green: 192/255, blue: 254/255)
+                return Color(red: 56/255, green: 176/255, blue: 252/255)
             }
 
         case .sending:

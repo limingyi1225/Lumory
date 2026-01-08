@@ -252,3 +252,11 @@
 "Authentication failed. Please check your API key and account balance." = "身份验证失败。请检查您的API密钥和账户余额。";
 "Report generation was cancelled. Please try again." = "报告生成已取消。请重试。";
 "Unable to generate report: %@. Please try again later." = "无法生成报告：%@。请稍后重试。"; 
+
+/* Export Content */
+"Lumory 日记导出" = "Lumory 日记导出";
+"导出日期: %@" = "导出日期: %@";
+"共 %d 篇日记" = "共 %d 篇日记";
+"心情: %@" = "心情: %@";
+"摘要: %@" = "摘要: %@";
+"--- 导出结束 ---" = "--- 导出结束 ---";

@@ -14,6 +14,7 @@ struct SettingsView: View {
     
     @AppStorage("appLanguage") private var appLanguage: String = Locale.current.identifier
     @State private var showImportSheet = false
+    @State private var showExportSheet = false
     @State private var showDeleteAllAlert = false
     @State private var showDeleteCompleteAlert = false
     @State private var isSyncing = false
@@ -65,6 +66,11 @@ struct SettingsView: View {
                         showImportSheet = true
                     } label: {
                         Label(NSLocalizedString("导入日记", comment: "Import diary"), systemImage: "doc.on.clipboard")
+                    }
+                    Button {
+                        showExportSheet = true
+                    } label: {
+                        Label(NSLocalizedString("导出日记", comment: "Export diary"), systemImage: "square.and.arrow.up")
                     }
                     Button {
                         showDeleteAllAlert = true
@@ -178,6 +184,10 @@ struct SettingsView: View {
             .sheet(isPresented: $showImportSheet) {
                 DiaryImportView()
                     .environmentObject(importService)
+                    .environment(\.managedObjectContext, viewContext)
+            }
+            .sheet(isPresented: $showExportSheet) {
+                DiaryExportView()
                     .environment(\.managedObjectContext, viewContext)
             }
             .alert(NSLocalizedString("删除完成", comment: "Deletion complete"), isPresented: $showDeleteCompleteAlert) {

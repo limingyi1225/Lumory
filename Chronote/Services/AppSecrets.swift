@@ -8,7 +8,7 @@ enum AppSecrets {
     static let backendURL = "http://64.176.209.155:3000"
     
     /// OpenAI API Key，用于音频转录等功能，若不使用可留空
-    static let openAIKey = "REDACTED_API_KEY"
+
     
     /// 检查后端代理地址是否已配置
     static var isValidKey: Bool { !backendURL.isEmpty }

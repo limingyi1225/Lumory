@@ -1,16 +1,21 @@
 {
   "fill" : {
-    "automatic-gradient" : "extended-gray:1.00000,1.00000"
+    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
   },
   "groups" : [
     {
       "layers" : [
         {
-          "blend-mode" : "normal",
           "fill" : "automatic",
           "glass" : true,
+          "hidden" : false,
           "image-name" : "ChatGPT Image May 22, 2025 at 09_11_22 PM copy.png",
           "name" : "ChatGPT Image May 22, 2025 at 09_11_22 PM copy"
+        },
+        {
+          "glass" : true,
+          "image-name" : "1024 x 1024.svg",
+          "name" : "1024 x 1024"
         }
       ],
       "shadow" : {

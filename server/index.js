@@ -110,6 +110,27 @@ app.use('/api', requireAppSecret);
 app.use('/api/openai/chat/completions', chatLimiter);
 app.use('/api/openai/embeddings', embeddingsLimiter);
 
+function charCountFromMessageContent(content) {
+  if (typeof content === 'string') return content.length;
+  if (!Array.isArray(content)) return 0;
+
+  return content.reduce((sum, part) => {
+    if (typeof part === 'string') return sum + part.length;
+    if (part && typeof part.text === 'string') return sum + part.text.length;
+    return sum;
+  }, 0);
+}
+
+function getEmbeddingInputCharCount(input) {
+  if (typeof input === 'string') return input.length;
+  if (!Array.isArray(input)) return -1;
+  return input.reduce((sum, item) => {
+    if (typeof item !== 'string') return -1;
+    if (sum < 0) return -1;
+    return sum + item.length;
+  }, 0);
+}
+
 // OpenAI proxy. Streaming vs buffered decided by `req.body.stream`.
 app.post('/api/openai/chat/completions', async (req, res) => {
   const isStreaming = req.body?.stream === true;
@@ -120,7 +141,10 @@ app.post('/api/openai/chat/completions', async (req, res) => {
     return;
   }
   // 防止恶意超长 prompt（也挡了意外拼错 prompt 模板浪费 tokens 的失误）
-  const totalChars = req.body.messages.reduce((acc, m) => acc + (typeof m?.content === 'string' ? m.content.length : 0), 0);
+  const totalChars = req.body.messages.reduce(
+    (acc, m) => acc + charCountFromMessageContent(m?.content),
+    0
+  );
   if (totalChars > MAX_MESSAGES_CHARS) {
     res.status(413).json({ error: 'messages too large' });
     return;
@@ -194,11 +218,12 @@ app.post('/api/openai/chat/completions', async (req, res) => {
 
 // Embeddings proxy — used by Lumory's semantic search & RAG ("Ask Your Past").
 app.post('/api/openai/embeddings', async (req, res) => {
-  if (typeof req.body?.input !== 'string' || req.body.input.length === 0) {
-    res.status(400).json({ error: 'Request body must include a non-empty `input` string.' });
+  const inputCharCount = getEmbeddingInputCharCount(req.body?.input);
+  if (inputCharCount <= 0) {
+    res.status(400).json({ error: 'Request body must include a non-empty `input` string or string array.' });
     return;
   }
-  if (req.body.input.length > MAX_EMBEDDING_INPUT_CHARS) {
+  if (inputCharCount > MAX_EMBEDDING_INPUT_CHARS) {
     res.status(413).json({ error: 'input too large' });
     return;
   }

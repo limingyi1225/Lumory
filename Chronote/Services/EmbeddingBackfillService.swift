@@ -104,14 +104,16 @@ final class EmbeddingBackfillService: ObservableObject {
             for objectID in batch {
                 if Task.isCancelled { break }
                 let ok = await processOne(objectID: objectID)
-                if ok { processed += 1 } else { failed += 1 }
+                processed += 1
+                if !ok { failed += 1 }
                 await publish(Progress(processed: processed, total: missingIDs.count, failed: failed, isRunning: true))
             }
             // 喘口气，避免 OpenAI 限流
             try? await Task.sleep(nanoseconds: throttleNanos)
         }
 
-        Log.info("[EmbeddingBackfill] 完成: 成功 \(processed) / 失败 \(failed)", category: .migration)
+        let succeeded = max(0, processed - failed)
+        Log.info("[EmbeddingBackfill] 完成: 成功 \(succeeded) / 失败 \(failed)", category: .migration)
         await publish(Progress(processed: processed, total: missingIDs.count, failed: failed, isRunning: false))
     }
 

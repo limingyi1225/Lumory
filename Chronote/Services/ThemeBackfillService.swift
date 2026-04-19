@@ -40,6 +40,7 @@ final class ThemeBackfillService: ObservableObject {
     private let batchSize: Int
     private let throttleNanos: UInt64
 
+    private let runningTaskLock = NSLock()
     private var runningTask: Task<Void, Never>?
 
     init(
@@ -72,8 +73,8 @@ final class ThemeBackfillService: ObservableObject {
     }
 
     func cancel() {
-        runningTask?.cancel()
-        runningTask = nil
+        currentRunningTask()?.cancel()
+        clearRunningTask()
     }
 
     // MARK: Core loop
@@ -81,7 +82,7 @@ final class ThemeBackfillService: ObservableObject {
     private enum Mode { case problemsOnly, all }
 
     private func run(mode: Mode) async -> Progress {
-        if runningTask != nil {
+        if currentRunningTask() != nil {
             Log.info("[ThemeBackfill] 已在运行，忽略重复调用", category: .migration)
             return progress
         }
@@ -92,9 +93,9 @@ final class ThemeBackfillService: ObservableObject {
             guard let self else { return }
             await self.execute(mode: mode)
         }
-        runningTask = task
+        setRunningTask(task)
         await task.value
-        runningTask = nil
+        clearRunningTask()
         return progress
     }
 
@@ -188,6 +189,24 @@ final class ThemeBackfillService: ObservableObject {
     @MainActor
     private func publish(_ value: Progress) {
         self.progress = value
+    }
+
+    private func currentRunningTask() -> Task<Void, Never>? {
+        runningTaskLock.lock()
+        defer { runningTaskLock.unlock() }
+        return runningTask
+    }
+
+    private func setRunningTask(_ task: Task<Void, Never>) {
+        runningTaskLock.lock()
+        runningTask = task
+        runningTaskLock.unlock()
+    }
+
+    private func clearRunningTask() {
+        runningTaskLock.lock()
+        runningTask = nil
+        runningTaskLock.unlock()
     }
 }
 

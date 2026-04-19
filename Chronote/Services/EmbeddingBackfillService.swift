@@ -40,6 +40,7 @@ final class EmbeddingBackfillService: ObservableObject {
     private let batchSize: Int
     private let throttleNanos: UInt64
 
+    private let runningTaskLock = NSLock()
     private var runningTask: Task<Void, Never>?
 
     init(
@@ -62,7 +63,7 @@ final class EmbeddingBackfillService: ObservableObject {
     /// 全量回填缺失 embedding 的条目。再次调用时若已在跑则忽略。
     @discardableResult
     func backfillAll() async -> Progress {
-        if runningTask != nil {
+        if currentRunningTask() != nil {
             Log.info("[EmbeddingBackfill] 已在运行，忽略重复调用", category: .migration)
             return progress
         }
@@ -72,15 +73,15 @@ final class EmbeddingBackfillService: ObservableObject {
             guard let self else { return }
             await self.run()
         }
-        runningTask = task
+        setRunningTask(task)
         await task.value
-        runningTask = nil
+        clearRunningTask()
         return progress
     }
 
     func cancel() {
-        runningTask?.cancel()
-        runningTask = nil
+        currentRunningTask()?.cancel()
+        clearRunningTask()
     }
 
     // MARK: Core loop
@@ -170,6 +171,24 @@ final class EmbeddingBackfillService: ObservableObject {
     @MainActor
     private func publish(_ value: Progress) {
         self.progress = value
+    }
+
+    private func currentRunningTask() -> Task<Void, Never>? {
+        runningTaskLock.lock()
+        defer { runningTaskLock.unlock() }
+        return runningTask
+    }
+
+    private func setRunningTask(_ task: Task<Void, Never>) {
+        runningTaskLock.lock()
+        runningTask = task
+        runningTaskLock.unlock()
+    }
+
+    private func clearRunningTask() {
+        runningTaskLock.lock()
+        runningTask = nil
+        runningTaskLock.unlock()
     }
 }
 

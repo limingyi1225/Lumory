@@ -7,13 +7,13 @@ import CoreData
 /// 全部是 0**，Insights 的累计字数 = 0、heatmap 强度全灭，视觉上"好像没写过日记"。
 /// NSPersistentCloudKitContainer 不会帮我们回算这种派生字段——必须我们自己扫。
 ///
-/// 策略：每次 App 启动都扫一遍 `wordCount == 0 AND text != nil`。
+/// 策略：每次 App 启动都扫一遍 `wordCount == 0`。
 /// 没有 flag——因为 CloudKit pull 进来的老 entries 可能在任意时间点抵达本地；一旦抵达，我们
-/// 仍然需要算字数。走 fetchCount 先判空，没 pending 就立刻返回，代价只有一次 SQL count。
+/// 仍然需要算字数。没 pending 时 fetch 返回空数组，for / save 都不跑，代价只是一次 SQL 扫描。
 enum WordCountBackfillService {
 
     /// 在 App 启动后 + 每次收到 `NSPersistentStoreRemoteChange` 时调。
-    /// 走后台 context，不阻塞主线程；fetchCount 为 0 时立即返回。
+    /// 走后台 context，不阻塞主线程；没 pending 时 fetch 返回空数组、for / save 都跳过。
     static func backfillIfNeeded() async {
         let processed = await runBackfill()
         if processed > 0 {

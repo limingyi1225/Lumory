@@ -67,9 +67,14 @@ app.use(pinoHttp({ logger: log }));
 function requireAppSecret(req, res, next) {
   const provided = req.get('x-app-secret') || '';
   const expected = APP_SHARED_SECRET;
+  const providedBuffer = Buffer.from(provided, 'utf8');
+  const expectedBuffer = Buffer.from(expected, 'utf8');
+
+  // 必须比较字节长度而不是字符串 length。否则多字节字符可让 "长度检查通过" 但
+  // `timingSafeEqual` 在运行时抛异常（Input buffers must have the same length）。
   if (
-    provided.length !== expected.length ||
-    !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))
+    providedBuffer.length !== expectedBuffer.length ||
+    !crypto.timingSafeEqual(providedBuffer, expectedBuffer)
   ) {
     req.log.warn('rejected: invalid or missing X-App-Secret');
     res.status(401).json({ error: 'unauthorized' });

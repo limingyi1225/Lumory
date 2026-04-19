@@ -4,157 +4,47 @@ import CoreData
 import UIKit
 #endif
 
+// MARK: - SettingsView
+//
+// 按频率分三层：
+// 1) 主层：常用 —— AI 一键索引、数据、iCloud、语言、关于
+// 2) 进阶子页：诊断 / 修复 / 分项索引 / DEBUG 工具
+// 3) 隐藏彩蛋：导入按钮长按 5 秒触发秘密导入
+//
+// 视觉去掉原来的 `listRowBackground(RoundedRectangle + shadow(0.2))` 重阴影，
+// 让 iOS 26 inset-grouped 原生样式发挥作用，和首页的 Liquid Glass 对齐。
+
 struct SettingsView: View {
     @Binding var isSettingsOpen: Bool
     @Environment(\.managedObjectContext) private var viewContext
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)],
-        animation: .default)
-    private var entries: FetchedResults<DiaryEntry>
-    
+        animation: .default
+    ) private var entries: FetchedResults<DiaryEntry>
+
     @AppStorage("appLanguage") private var appLanguage: String = Locale.current.identifier
+
+    // 各种模态 / 确认态
     @State private var showImportSheet = false
     @State private var showExportSheet = false
     @State private var showDeleteAllAlert = false
     @State private var showDeleteCompleteAlert = false
     @State private var isSyncing = false
-    @State private var syncMessage: String? = nil
-    @State private var showDiagnosticSheet = false
-    @State private var diagnosticResult: SyncDiagnosticResult? = nil
-    @State private var isRunningDiagnostic = false
-    @State private var showDatabaseRecoveryAlert = false
-    @State private var isRecoveringDatabase = false
-    
+    @State private var syncMessage: String?
+
     @EnvironmentObject var importService: CoreDataImportService
-    
-    // Platform-specific colors
-    private var systemBackgroundColor: Color {
-        #if canImport(UIKit)
-        return Color(UIColor.systemBackground)
-        #else
-        return Color(NSColor.windowBackgroundColor)
-        #endif
-    }
-    
-    private var secondarySystemBackgroundColor: Color {
-        #if canImport(UIKit)
-        return Color(UIColor.secondarySystemBackground)
-        #else
-        return Color(NSColor.controlBackgroundColor)
-        #endif
-    }
+    @EnvironmentObject var syncMonitor: CloudKitSyncMonitor
 
     var body: some View {
-        #if targetEnvironment(macCatalyst)
-        MacSettingsView()
-            .environment(\.managedObjectContext, viewContext)
-            .environmentObject(importService)
-        #else
         NavigationStack {
             Form {
-                Section(header: Text(NSLocalizedString("语言", comment: "Language")).textCase(nil)) {
-                    Picker("", selection: $appLanguage) {
-                        Text("简体中文").tag("zh-Hans")
-                        Text("English (US)").tag("en")
-                    }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
-                }
-
-                Section(header: Text(NSLocalizedString("数据", comment: "Data")).textCase(nil)) {
-                    Button {
-                        showImportSheet = true
-                    } label: {
-                        Label(NSLocalizedString("导入日记", comment: "Import diary"), systemImage: "doc.on.clipboard")
-                    }
-                    Button {
-                        showExportSheet = true
-                    } label: {
-                        Label(NSLocalizedString("导出日记", comment: "Export diary"), systemImage: "square.and.arrow.up")
-                    }
-                    Button {
-                        showDeleteAllAlert = true
-                    } label: {
-                        Label(NSLocalizedString("删除所有日记", comment: "Delete all entries"), systemImage: "trash")
-                            .foregroundColor(.blue)
-                    }
-                    .alert(NSLocalizedString("确认删除所有日记？", comment: "Confirm delete all"), isPresented: $showDeleteAllAlert) {
-                        Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
-                            deleteAllEntries()
-                            showDeleteCompleteAlert = true
-                        }
-                        Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
-                    } message: {
-                        Text(NSLocalizedString("此操作无法撤销，是否确认？", comment: "Cannot undo confirmation"))
-                    }
-                }
-
-                Section(header: Text(NSLocalizedString("iCloud 同步", comment: "iCloud sync")).textCase(nil)) {
-                    Button {
-                        performManualSync()
-                    } label: {
-                        HStack {
-                            Label {
-                                Text(NSLocalizedString("同步数据", comment: "Sync data"))
-                            } icon: {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .imageScale(.large)
-                            }
-                            Spacer()
-                            if isSyncing {
-                                ProgressView()
-                            } else if syncMessage != nil {
-                                Image(systemName: "checkmark")
-                                    .imageScale(.large)
-                                    .foregroundColor(.accentColor)
-                            }
-                        }
-                    }
-                    .disabled(isSyncing)
-
-                    Button {
-                        runSyncDiagnostic()
-                    } label: {
-                        HStack {
-                            Label {
-                                Text(NSLocalizedString("同步诊断", comment: ""))
-                            } icon: {
-                                Image(systemName: "stethoscope")
-                                    .imageScale(.large)
-                            }
-                            Spacer()
-                            if isRunningDiagnostic {
-                                ProgressView()
-                            }
-                        }
-                    }
-                    .disabled(isRunningDiagnostic)
-                    
-                    Button {
-                        showDatabaseRecoveryAlert = true
-                    } label: {
-                        HStack {
-                            Label {
-                                Text(NSLocalizedString("数据库修复", comment: ""))
-                            } icon: {
-                                Image(systemName: "wrench.and.screwdriver")
-                                    .imageScale(.large)
-                                    .foregroundColor(.orange)
-                            }
-                            Spacer()
-                            if isRecoveringDatabase {
-                                ProgressView()
-                            }
-                        }
-                    }
-                    .disabled(isRecoveringDatabase)
-                }
-
-                Section(header: Text(NSLocalizedString("关于", comment: "About")).textCase(nil)) {
-                    Link(destination: URL(string: "mailto:me@limingyi.com")!) {
-                        Label(NSLocalizedString("联系开发者", comment: "Contact developer"), systemImage: "envelope")
-                    }
-                }
+                appHeaderSection
+                aiIndexSection
+                dataSection
+                syncSection
+                languageSection
+                advancedSection
+                aboutSection
             }
             #if os(macOS)
             .listStyle(.plain)
@@ -162,22 +52,16 @@ struct SettingsView: View {
             .listStyle(.insetGrouped)
             #endif
             .scrollContentBackground(.hidden)
-            .background(systemBackgroundColor)
-            .listRowBackground(
-                RoundedRectangle(cornerRadius: UIDevice.isMac ? 8 : 12, style: .continuous)
-                    .fill(secondarySystemBackgroundColor)
-                    .shadow(color: Color.primary.opacity(UIDevice.isMac ? 0.05 : 0.2), radius: UIDevice.isMac ? 4 : 4, x: 0, y: UIDevice.isMac ? 2 : 2)
-            )
+            .background(backgroundGradient.ignoresSafeArea())
             .navigationTitle(NSLocalizedString("设置", comment: "Settings"))
             #if !os(macOS)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
+                    Button(NSLocalizedString("完成", comment: "Done")) {
                         isSettingsOpen = false
-                    } label: {
-                        Text(NSLocalizedString("返回", comment: "Back"))
                     }
+                    .fontWeight(.semibold)
                 }
             }
             #endif
@@ -195,73 +79,411 @@ struct SettingsView: View {
             } message: {
                 Text(NSLocalizedString("已删除所有日记", comment: "All entries deleted"))
             }
-            .alert("数据库修复", isPresented: $showDatabaseRecoveryAlert) {
-                Button("取消", role: .cancel) { }
-                Button("修复", role: .destructive) {
-                    performDatabaseRecovery()
+        }
+    }
+
+    // MARK: - Header
+
+    /// 顶部：App 图标 + 名字 + 版本 + 条目计数。纯装饰，没有按钮。
+    @ViewBuilder
+    private var appHeaderSection: some View {
+        Section {
+            HStack(spacing: 14) {
+                Image("LumoryIcon")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 54, height: 54)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .shadow(color: Color.primary.opacity(0.1), radius: 4, y: 2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(NSLocalizedString("Lumory", comment: "App name"))
+                        .font(.title3.weight(.semibold))
+                    Text(versionString)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Text(String(format: NSLocalizedString("%d 条日记", comment: "Entry count"), entries.count))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+                Spacer()
+            }
+            .padding(.vertical, 6)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+        }
+    }
+
+    // MARK: - AI Index (prominent)
+
+    @ViewBuilder
+    private var aiIndexSection: some View {
+        Section(header: sectionHeader("AI")) {
+            OneClickRebuildRow()
+        }
+    }
+
+    // MARK: - Data
+
+    @ViewBuilder
+    private var dataSection: some View {
+        Section(header: sectionHeader(NSLocalizedString("数据", comment: "Data"))) {
+            Button {
+                showImportSheet = true
+            } label: {
+                settingsLabel(NSLocalizedString("导入日记", comment: "Import"), icon: "square.and.arrow.down", tint: .accentColor)
+            }
+
+            Button {
+                showExportSheet = true
+            } label: {
+                settingsLabel(NSLocalizedString("导出日记", comment: "Export"), icon: "square.and.arrow.up", tint: .accentColor)
+            }
+
+            Button {
+                showDeleteAllAlert = true
+            } label: {
+                settingsLabel(NSLocalizedString("删除所有日记", comment: "Delete all"), icon: "trash", tint: .red)
+            }
+            .alert(NSLocalizedString("确认删除所有日记？", comment: "Confirm delete all"), isPresented: $showDeleteAllAlert) {
+                Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
+                    deleteAllEntries()
+                    showDeleteCompleteAlert = true
+                }
+                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
             } message: {
-                Text("如果您遇到数据库错误，此操作将尝试修复数据库。您的数据将从 iCloud 恢复。是否继续？")
+                Text(NSLocalizedString("此操作无法撤销。", comment: "Cannot undo"))
             }
         }
-        .sheet(isPresented: $showDiagnosticSheet) {
-            SyncDiagnosticView(result: diagnosticResult)
-        }
-        #endif
     }
+
+    // MARK: - iCloud
+
+    @ViewBuilder
+    private var syncSection: some View {
+        Section(header: sectionHeader("iCloud")) {
+            Button {
+                performManualSync()
+            } label: {
+                HStack {
+                    settingsLabel(
+                        NSLocalizedString("立即同步", comment: "Sync now"),
+                        icon: "arrow.triangle.2.circlepath",
+                        tint: .accentColor
+                    )
+                    Spacer()
+                    if isSyncing {
+                        ProgressView()
+                    } else if syncMessage != nil {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(Color.moodSpectrum(value: 0.85))
+                    }
+                }
+            }
+            .disabled(isSyncing)
+        }
+    }
+
+    // MARK: - Language
+
+    @ViewBuilder
+    private var languageSection: some View {
+        Section(header: sectionHeader(NSLocalizedString("语言", comment: "Language"))) {
+            Picker("", selection: $appLanguage) {
+                Text("简体中文").tag("zh-Hans")
+                Text("English (US)").tag("en")
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        }
+    }
+
+    // MARK: - Advanced
+
+    @ViewBuilder
+    private var advancedSection: some View {
+        Section(header: sectionHeader(NSLocalizedString("进阶", comment: "Advanced"))) {
+            NavigationLink {
+                AdvancedSettingsView(isSettingsOpen: $isSettingsOpen)
+                    .environment(\.managedObjectContext, viewContext)
+            } label: {
+                settingsLabel(
+                    NSLocalizedString("诊断、修复与分项控制", comment: "Advanced tools"),
+                    icon: "slider.horizontal.3",
+                    tint: .secondary
+                )
+            }
+        }
+    }
+
+    // MARK: - About
+
+    @ViewBuilder
+    private var aboutSection: some View {
+        Section(header: sectionHeader(NSLocalizedString("关于", comment: "About"))) {
+            Link(destination: URL(string: "mailto:me@limingyi.com")!) {
+                settingsLabel(
+                    NSLocalizedString("联系开发者", comment: "Contact developer"),
+                    icon: "envelope",
+                    tint: .accentColor
+                )
+            }
+        }
+    }
+
+    // MARK: - Small helpers
+
+    private func sectionHeader(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .textCase(.uppercase)
+            .tracking(0.8)
+            .foregroundStyle(.secondary)
+    }
+
+    private func settingsLabel(_ title: String, icon: String, tint: Color) -> some View {
+        Label {
+            Text(title)
+                .foregroundStyle(Color.primary)
+        } icon: {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+                .symbolRenderingMode(.hierarchical)
+                .frame(width: 24)
+        }
+    }
+
+    private var versionString: String {
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        return "\(short) (\(build))"
+    }
+
+    /// 很淡的顶部 mood-tinted 渐变，让 Settings 和首页保持同一种空气感。
+    private var backgroundGradient: some View {
+        LinearGradient(
+            colors: [
+                Color.accentColor.opacity(0.08),
+                Color.clear
+            ],
+            startPoint: .top,
+            endPoint: .center
+        )
+    }
+
+    // MARK: - Actions
 
     private func deleteAllEntries() {
         for entry in entries {
-            // Delete associated images
+            // 磁盘附件（图片 + 音频）必须在 managed object delete 之前清，否则 audioFileName /
+            // imageFileNames 访问不到，磁盘文件会永远留成孤儿。
             entry.deleteAllImages()
-            
+            entry.deleteAudioFile()
             viewContext.delete(entry)
         }
-        
         do {
             try viewContext.save()
         } catch {
-            print("[SettingsView] 删除所有日记失败: \(error)")
+            Log.error("[SettingsView] 删除所有日记失败: \(error)", category: .ui)
         }
     }
 
     private func performManualSync() {
+        // **真的调 CloudKit**，不再是 `save` + 1.5s sleep + 恒假"已同步"。
+        // 老实现让同步异常的用户看到绿色"已同步"，反而掩盖问题。
+        // 现在走 CloudKitSyncMonitor.forceSync()，它会真的和 CloudKit 交互并按事件回调翻状态。
         isSyncing = true
         syncMessage = nil
-        
-        Task {
-            do {
-                // 触发一次保存，这会让 CloudKit 检查是否有待同步的更改
-                try viewContext.save()
-                
-                // 给用户一些反馈时间
-                try await Task.sleep(nanoseconds: 1_500_000_000) // 1.5秒
-                
-                await MainActor.run {
+        syncMonitor.forceSync()
+
+        // 监听 syncMonitor 的状态变化；带 6s 超时兜底，避免长久 spin。
+        Task { @MainActor in
+            let deadline = Date().addingTimeInterval(6.0)
+            while Date() < deadline {
+                if syncMonitor.syncStatus == .synced {
                     isSyncing = false
                     syncMessage = NSLocalizedString("已同步", comment: "Synced")
-                    
-                    // 3秒后清除消息
-                    Task {
-                        try? await Task.sleep(nanoseconds: 3_000_000_000)
-                        await MainActor.run {
-                            syncMessage = nil
-                        }
-                    }
+                    #if canImport(UIKit)
+                    HapticManager.shared.click()
+                    #endif
+                    break
                 }
-                
-                #if canImport(UIKit)
-                HapticManager.shared.click()
-                #endif
-            } catch {
-                await MainActor.run {
+                if syncMonitor.syncStatus == .error || syncMonitor.syncStatus == .networkUnavailable ||
+                    syncMonitor.syncStatus == .notSignedIn {
                     isSyncing = false
-                    syncMessage = NSLocalizedString("同步失败", comment: "Sync failed")
-                    print("[SettingsView] 手动同步失败: \(error)")
+                    syncMessage = syncMonitor.errorMessage ?? NSLocalizedString("同步失败", comment: "Sync failed")
+                    Log.error("[SettingsView] 手动同步失败: \(syncMonitor.syncStatus)", category: .ui)
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            // 超时：不强报错，用户可以再试一次
+            if isSyncing {
+                isSyncing = false
+            }
+            // 3 秒后清掉提示
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            syncMessage = nil
+        }
+    }
+}
+
+struct SettingsView_Previews: PreviewProvider {
+    static var previews: some View {
+        SettingsView(isSettingsOpen: .constant(true))
+            .environmentObject(CoreDataImportService())
+            .environment(\.managedObjectContext, PersistenceController.shared.container.viewContext)
+    }
+}
+
+// MARK: - Advanced sub-page
+//
+// 不常用的东西全放这里：同步诊断、数据库修复、分项 AI 索引控件、(DEBUG) 样本数据、UI 预览。
+// NavigationLink 过来一层深度，平时看不见。
+
+private struct AdvancedSettingsView: View {
+    @Binding var isSettingsOpen: Bool
+    @Environment(\.managedObjectContext) private var viewContext
+
+    @State private var isRunningDiagnostic = false
+    @State private var showDiagnosticSheet = false
+    @State private var diagnosticResult: SyncDiagnosticResult?
+
+    @State private var showDatabaseRecoveryAlert = false
+    @State private var isRecoveringDatabase = false
+
+    #if DEBUG
+    @State private var showHomeDesignPreview = false
+    #endif
+
+    var body: some View {
+        Form {
+            troubleshootingSection
+            perServiceIndexSection
+            #if DEBUG
+            devToolsSection
+            #endif
+        }
+        #if os(macOS)
+        .listStyle(.plain)
+        #else
+        .listStyle(.insetGrouped)
+        #endif
+        .scrollContentBackground(.hidden)
+        .navigationTitle(NSLocalizedString("进阶", comment: "Advanced"))
+        #if !os(macOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .sheet(isPresented: $showDiagnosticSheet) {
+            SyncDiagnosticView(result: diagnosticResult)
+        }
+        #if DEBUG
+        .sheet(isPresented: $showHomeDesignPreview) {
+            HomeDesignPreviewView()
+                .environment(\.managedObjectContext, viewContext)
+        }
+        #endif
+        .alert(NSLocalizedString("数据库修复", comment: "Database repair alert title"), isPresented: $showDatabaseRecoveryAlert) {
+            Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }
+            Button(NSLocalizedString("修复", comment: "Repair"), role: .destructive) { performDatabaseRecovery() }
+        } message: {
+            Text(NSLocalizedString("如果你遇到了数据库错误，此操作将尝试修复。数据会从 iCloud 恢复。", comment: "Database repair alert body"))
+        }
+    }
+
+    @ViewBuilder
+    private var troubleshootingSection: some View {
+        Section(
+            header: header(NSLocalizedString("诊断与修复", comment: "Diagnose & repair")),
+            footer: Text(NSLocalizedString("只有同步出问题 / 数据显示异常时才需要用到这一层。",
+                                           comment: "Troubleshooting footer"))
+        ) {
+            Button {
+                runSyncDiagnostic()
+            } label: {
+                HStack {
+                    Label {
+                        Text(NSLocalizedString("同步诊断", comment: "Sync diagnostic"))
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "stethoscope")
+                            .foregroundStyle(Color.accentColor)
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(width: 24)
+                    }
+                    Spacer()
+                    if isRunningDiagnostic { ProgressView() }
+                }
+            }
+            .disabled(isRunningDiagnostic)
+
+            Button {
+                showDatabaseRecoveryAlert = true
+            } label: {
+                HStack {
+                    Label {
+                        Text(NSLocalizedString("数据库修复", comment: "Database recovery"))
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "wrench.and.screwdriver")
+                            .foregroundStyle(.orange)
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(width: 24)
+                    }
+                    Spacer()
+                    if isRecoveringDatabase { ProgressView() }
+                }
+            }
+            .disabled(isRecoveringDatabase)
+        }
+    }
+
+    @ViewBuilder
+    private var perServiceIndexSection: some View {
+        Section(
+            header: header(NSLocalizedString("分项索引", comment: "Per-service index")),
+            footer: Text(NSLocalizedString("想只跑其中一个时用。常规升级请用主页的『一键重建索引』。",
+                                           comment: "Per-service footer"))
+        ) {
+            EmbeddingBackfillRow()
+            ThemeBackfillRow()
+        }
+    }
+
+    #if DEBUG
+    @ViewBuilder
+    private var devToolsSection: some View {
+        Section(
+            header: header(NSLocalizedString("开发工具", comment: "Dev tools")),
+            footer: Text(NSLocalizedString("仅 DEBUG 构建可见。生成的样本 summary 以『【样本】』开头，可随时清除。",
+                                           comment: "Dev tools footer"))
+        ) {
+            SampleDataGeneratorRow()
+            Button {
+                showHomeDesignPreview = true
+            } label: {
+                Label {
+                    Text(NSLocalizedString("首页 UI 预览", comment: "Home UI preview"))
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "square.grid.2x2")
+                        .foregroundStyle(Color.accentColor)
+                        .symbolRenderingMode(.hierarchical)
+                        .frame(width: 24)
                 }
             }
         }
     }
+    #endif
+
+    private func header(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .textCase(.uppercase)
+            .tracking(0.8)
+            .foregroundStyle(.secondary)
+    }
+
+    // MARK: Actions
 
     private func runSyncDiagnostic() {
         isRunningDiagnostic = true
@@ -274,22 +496,19 @@ struct SettingsView: View {
             }
         }
     }
-    
+
     private func performDatabaseRecovery() {
         isRecoveringDatabase = true
-        
         Task {
             await MainActor.run {
                 DatabaseRecoveryService.shared.performRecovery(for: PersistenceController.shared.container) { result in
                     DispatchQueue.main.async {
                         self.isRecoveringDatabase = false
-                        
                         switch result {
                         case .success:
-                            // Close settings and let the app reload
-                            self.isSettingsOpen = false
+                            self.isSettingsOpen = false   // 修复成功关整个 settings，让 App 重载
                         case .failure(let error):
-                            print("[SettingsView] Database recovery failed: \(error)")
+                            Log.error("[AdvancedSettings] Database recovery failed: \(error)", category: .ui)
                         }
                     }
                 }
@@ -298,10 +517,396 @@ struct SettingsView: View {
     }
 }
 
-struct SettingsView_Previews: PreviewProvider {
-    static var previews: some View {
-        SettingsView(isSettingsOpen: .constant(true))
-            .environmentObject(CoreDataImportService())
-            .environment(\.managedObjectContext, PersistenceController.shared.container.viewContext)
+// MARK: - One-click rebuild row
+//
+// 大版本升级后一键把三件事连着跑：重抽主题 → 补向量 → 暖 AI 提示词缓存。
+// 组合现成的 singletons，不新起 service —— 三个 @StateObject 订阅进度；
+// 编排在一个 Task 里按阶段切换。
+
+private struct OneClickRebuildRow: View {
+    @StateObject private var themeService = ThemeBackfillService.shared
+    @StateObject private var embeddingService = EmbeddingBackfillService.shared
+    @StateObject private var suggestionEngine = PromptSuggestionEngine.shared
+
+    @State private var stage: Stage = .idle
+
+    private enum Stage: Equatable {
+        case idle
+        case themes
+        case embeddings
+        case suggestions
+        case done
+        case failed(String)
     }
-} 
+
+    var body: some View {
+        HStack {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(NSLocalizedString("一键重建索引", comment: "One-click rebuild"))
+                        .font(.body.weight(.medium))
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } icon: {
+                Image(systemName: "wand.and.stars")
+                    .imageScale(.large)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundColor(.accentColor)
+                    .frame(width: 24)
+            }
+            Spacer()
+            trailing
+        }
+    }
+
+    @ViewBuilder
+    private var trailing: some View {
+        switch stage {
+        case .idle, .done, .failed:
+            Button {
+                #if canImport(UIKit)
+                HapticManager.shared.click()
+                #endif
+                Task { await runAll() }
+            } label: {
+                Text(NSLocalizedString("一键开始", comment: "Start one-click"))
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.2)))
+                    .foregroundColor(.accentColor)
+            }
+            .buttonStyle(.plain)
+        case .themes, .embeddings, .suggestions:
+            VStack(alignment: .trailing, spacing: 4) {
+                ProgressView()
+                Text(progressDetail)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private var statusText: String {
+        switch stage {
+        case .idle:
+            return NSLocalizedString("对存量日记跑一遍最新的 AI 管线：主题 → 向量 → 提示词",
+                                     comment: "One-click idle subtitle")
+        case .themes:
+            return NSLocalizedString("第 1 / 3 步：重抽主题…", comment: "One-click stage 1")
+        case .embeddings:
+            return NSLocalizedString("第 2 / 3 步：补全语义向量…", comment: "One-click stage 2")
+        case .suggestions:
+            return NSLocalizedString("第 3 / 3 步：生成个性化提示词…", comment: "One-click stage 3")
+        case .done:
+            return NSLocalizedString("索引已是最新，随时可再跑一次", comment: "One-click done")
+        case .failed(let message):
+            return String(format: NSLocalizedString("部分步骤失败：%@", comment: "One-click failed"), message)
+        }
+    }
+
+    private var progressDetail: String {
+        switch stage {
+        case .themes:
+            return "\(themeService.progress.processed)/\(themeService.progress.total)"
+        case .embeddings:
+            return "\(embeddingService.progress.processed)/\(embeddingService.progress.total)"
+        case .suggestions:
+            return NSLocalizedString("AI 写作中", comment: "One-click suggestions stage detail")
+        default:
+            return ""
+        }
+    }
+
+    private func runAll() async {
+        // 重入 guard：按钮 UI 已隐藏 start button 在 running 状态里，但 `stage = .themes` 到
+        // 第一个 await 之间如果再被触发会并行跑两条，两路都抢同一个 ThemeBackfillService.shared
+        // 的 progress 计数器。bail 掉后来的调用。
+        switch stage {
+        case .themes, .embeddings, .suggestions:
+            Log.info("[OneClickRebuild] 已有 rebuild 在跑，忽略重复触发", category: .ui)
+            return
+        default: break
+        }
+
+        stage = .themes
+        // wordCount backfill 和主题一起跑——两者都扫全表，挂一块儿不额外往返。
+        // 先跑 wordCount：不依赖网络，几十 ms 搞定；顺序上放最前面让"累计字数"最快恢复。
+        _ = await WordCountBackfillService.forceBackfill()
+        _ = await ThemeBackfillService.shared.backfillAll()
+
+        stage = .embeddings
+        _ = await EmbeddingBackfillService.shared.backfillAll()
+
+        stage = .suggestions
+        // forceRefresh 现在返回 Bool：true 表示真的生成了新 bundle；false 表示失败或信号不够。
+        // 旧的 `current != nil` 判定在 AI 失败时会被旧 cache 误判成成功。
+        let suggestionGenerated = await PromptSuggestionEngine.shared.forceRefresh()
+        // 信号不足（<3 条日记）走的也是 false，但这是预期行为不算失败——拿 writingStats 兜底判定一次。
+        let stats = await InsightsEngine.shared.writingStats()
+        let suggestionOk = suggestionGenerated || stats.totalEntries < 3
+
+        let themeFailed = themeService.progress.failed
+        let embeddingFailed = embeddingService.progress.failed
+
+        if themeFailed == 0, embeddingFailed == 0, suggestionOk {
+            stage = .done
+        } else {
+            var parts: [String] = []
+            if themeFailed > 0 { parts.append(String(format: NSLocalizedString("主题 %d 失败", comment: ""), themeFailed)) }
+            if embeddingFailed > 0 { parts.append(String(format: NSLocalizedString("向量 %d 失败", comment: ""), embeddingFailed)) }
+            if !suggestionOk { parts.append(NSLocalizedString("提示词未生成", comment: "")) }
+            stage = .failed(parts.joined(separator: "，"))
+        }
+    }
+}
+
+// MARK: - Embedding backfill row
+
+private struct EmbeddingBackfillRow: View {
+    @StateObject private var service = EmbeddingBackfillService.shared
+
+    var body: some View {
+        HStack {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(NSLocalizedString("生成语义索引", comment: "Build embedding index"))
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } icon: {
+                Image(systemName: "sparkle.magnifyingglass")
+                    .imageScale(.large)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundColor(.accentColor)
+                    .frame(width: 24)
+            }
+            Spacer()
+            if service.progress.isRunning {
+                VStack(alignment: .trailing, spacing: 4) {
+                    ProgressView()
+                    Text("\(service.progress.processed)/\(service.progress.total)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Button(action: start) {
+                    Text(NSLocalizedString("开始", comment: "Start"))
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                        .foregroundColor(.accentColor)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var statusText: String {
+        if service.progress.isRunning {
+            return String(
+                format: NSLocalizedString("进度 %d%%（失败 %d）", comment: "Backfill progress"),
+                Int(service.progress.fraction * 100),
+                service.progress.failed
+            )
+        }
+        if service.progress.total > 0 {
+            return String(
+                format: NSLocalizedString("上次处理 %d 条，失败 %d 条", comment: "Backfill last result"),
+                service.progress.processed,
+                service.progress.failed
+            )
+        }
+        return NSLocalizedString("为历史日记生成语义向量，用于语义搜索和 Ask Your Past", comment: "Backfill subtitle")
+    }
+
+    private func start() {
+        Task { await service.backfillAll() }
+    }
+}
+
+// MARK: - Theme backfill row
+
+private struct ThemeBackfillRow: View {
+    @StateObject private var service = ThemeBackfillService.shared
+    @State private var showAllConfirm = false
+
+    var body: some View {
+        HStack {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(NSLocalizedString("刷新主题", comment: "Refresh themes"))
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } icon: {
+                Image(systemName: "tag.square.fill")
+                    .imageScale(.large)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundColor(.accentColor)
+                    .frame(width: 24)
+            }
+            Spacer()
+            if service.progress.isRunning {
+                VStack(alignment: .trailing, spacing: 4) {
+                    ProgressView()
+                    Text("\(service.progress.processed)/\(service.progress.total)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Menu {
+                    Button {
+                        Task { await service.backfillProblems() }
+                    } label: {
+                        Label(NSLocalizedString("只修有问题的", comment: "Backfill problems only"), systemImage: "wand.and.stars")
+                    }
+                    Button {
+                        showAllConfirm = true
+                    } label: {
+                        Label(NSLocalizedString("全部重抽", comment: "Backfill all"), systemImage: "arrow.clockwise")
+                    }
+                } label: {
+                    Text(NSLocalizedString("开始", comment: "Start"))
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                        .foregroundColor(.accentColor)
+                }
+            }
+        }
+        .alert(NSLocalizedString("重抽所有日记的主题？", comment: "Backfill all confirm title"),
+               isPresented: $showAllConfirm) {
+            Button(NSLocalizedString("确定", comment: "Confirm"), role: .destructive) {
+                Task { await service.backfillAll() }
+            }
+            Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(NSLocalizedString("会调用一次 AI。如果只是想清理『情绪』这类标签，选『只修有问题的』更省。",
+                                   comment: "Backfill all confirm message"))
+        }
+    }
+
+    private var statusText: String {
+        if service.progress.isRunning {
+            return String(
+                format: NSLocalizedString("进度 %d%%（失败 %d）", comment: "Backfill progress"),
+                Int(service.progress.fraction * 100),
+                service.progress.failed
+            )
+        }
+        if service.progress.total > 0 {
+            return String(
+                format: NSLocalizedString("上次处理 %d 条，失败 %d 条", comment: "Backfill last result"),
+                service.progress.processed,
+                service.progress.failed
+            )
+        }
+        return NSLocalizedString("用新的提取逻辑把存量日记的主题重新整理。",
+                                 comment: "Theme backfill subtitle")
+    }
+}
+
+// MARK: - Sample data generator row (DEBUG only)
+
+#if DEBUG
+private struct SampleDataGeneratorRow: View {
+    @StateObject private var generator = SampleDataGenerator.shared
+    @State private var includeEmbeddings: Bool = true
+    @State private var showRemoveConfirm = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(NSLocalizedString("样本日记", comment: "Sample diary entries"))
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } icon: {
+                Image(systemName: "square.stack.3d.up")
+                    .imageScale(.large)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundColor(.accentColor)
+                    .frame(width: 24)
+            }
+
+            Toggle(isOn: $includeEmbeddings) {
+                Text(NSLocalizedString("顺便生成 embedding（需要网络）", comment: "Include embeddings toggle"))
+                    .font(.caption)
+            }
+            .disabled(generator.isRunning)
+
+            HStack(spacing: 12) {
+                Button {
+                    Task { await generator.generateSamples(includeEmbeddings: includeEmbeddings) }
+                } label: {
+                    Text(generator.isRunning
+                         ? NSLocalizedString("生成中…", comment: "Generating...")
+                         : NSLocalizedString("生成样本", comment: "Generate samples"))
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                        .foregroundColor(.accentColor)
+                }
+                .buttonStyle(.plain)
+                .disabled(generator.isRunning)
+
+                Button(role: .destructive) {
+                    showRemoveConfirm = true
+                } label: {
+                    Text(NSLocalizedString("清除样本", comment: "Remove samples"))
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.red.opacity(0.12)))
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+                .disabled(generator.isRunning)
+
+                if generator.isRunning {
+                    ProgressView()
+                }
+            }
+        }
+        .confirmationDialog(
+            NSLocalizedString("清除所有样本日记？", comment: "Remove sample entries prompt"),
+            isPresented: $showRemoveConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
+                Task { await generator.removeAllSamples() }
+            }
+            Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }
+        } message: {
+            Text(NSLocalizedString("只删除 summary 以『【样本】』开头的条目，你的真实日记不受影响。", comment: "Remove samples footnote"))
+        }
+    }
+
+    private var statusText: String {
+        if generator.isRunning {
+            return String(
+                format: NSLocalizedString("进度 %d / %d", comment: "Sample gen progress"),
+                generator.generated,
+                generator.total
+            )
+        }
+        if let error = generator.lastError {
+            return String(format: NSLocalizedString("上次失败：%@", comment: "Sample gen last error"), error)
+        }
+        if generator.total > 0 {
+            return String(format: NSLocalizedString("上次生成 %d 条", comment: "Sample gen last count"), generator.generated)
+        }
+        return NSLocalizedString("一键生成 40 条覆盖近 90 天的样本", comment: "Sample gen subtitle")
+    }
+}
+#endif

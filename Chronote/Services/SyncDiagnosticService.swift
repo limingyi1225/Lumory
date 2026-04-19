@@ -6,7 +6,7 @@ import CloudKit
 struct SyncDiagnosticService {
     
     static func resetCloudKitSchema(container: NSPersistentCloudKitContainer) {
-        print("[SyncDiagnosticService] Attempting to check CloudKit schema...")
+        Log.info("[SyncDiagnosticService] Attempting to check CloudKit schema...", category: .sync)
         
         #if DEBUG
         // The initializeCloudKitSchema method doesn't throw errors in newer versions
@@ -25,45 +25,45 @@ struct SyncDiagnosticService {
             print("[SyncDiagnosticService] WARNING: No CloudKit options found in store description")
         }
         #else
-        print("[SyncDiagnosticService] Schema diagnostics are only available in DEBUG mode")
+        Log.info("[SyncDiagnosticService] Schema diagnostics are only available in DEBUG mode", category: .sync)
         #endif
     }
     
     static func diagnoseCloudKitError(_ error: CKError) {
-        print("[SyncDiagnosticService] CloudKit Error Code: \(error.code.rawValue)")
-        print("[SyncDiagnosticService] Error Description: \(error.localizedDescription)")
+        Log.error("[SyncDiagnosticService] CloudKit Error Code: \(error.code.rawValue)", category: .sync)
+        Log.error("[SyncDiagnosticService] Error Description: \(error.localizedDescription)", category: .sync)
         
         switch error.code {
         case .badDatabase:
-            print("[SyncDiagnosticService] Bad database - The CloudKit database may need to be reset")
+            Log.info("[SyncDiagnosticService] Bad database - The CloudKit database may need to be reset", category: .sync)
         case .permissionFailure:
-            print("[SyncDiagnosticService] Permission failure - Check CloudKit entitlements and capabilities")
+            Log.error("[SyncDiagnosticService] Permission failure - Check CloudKit entitlements and capabilities", category: .sync)
         case .invalidArguments:
-            print("[SyncDiagnosticService] Invalid arguments - Check the record types and field names")
+            Log.info("[SyncDiagnosticService] Invalid arguments - Check the record types and field names", category: .sync)
         case .serverRejectedRequest:
-            print("[SyncDiagnosticService] Server rejected request - The schema might already exist or have conflicts")
+            Log.info("[SyncDiagnosticService] Server rejected request - The schema might already exist or have conflicts", category: .sync)
         case .assetFileNotFound:
-            print("[SyncDiagnosticService] Asset file not found - Check binary data storage")
+            Log.info("[SyncDiagnosticService] Asset file not found - Check binary data storage", category: .sync)
         case .incompatibleVersion:
-            print("[SyncDiagnosticService] Incompatible version - The app version might not match the CloudKit schema")
+            Log.info("[SyncDiagnosticService] Incompatible version - The app version might not match the CloudKit schema", category: .sync)
         case .constraintViolation:
-            print("[SyncDiagnosticService] Constraint violation - Check for unique constraints")
+            Log.info("[SyncDiagnosticService] Constraint violation - Check for unique constraints", category: .sync)
         default:
-            print("[SyncDiagnosticService] Other error: \(error)")
+            Log.error("[SyncDiagnosticService] Other error: \(error)", category: .sync)
         }
         
         // Check for partial errors
         if let partialErrors = error.partialErrorsByItemID {
-            print("[SyncDiagnosticService] Partial errors found:")
+            Log.error("[SyncDiagnosticService] Partial errors found:", category: .sync)
             for (itemID, partialError) in partialErrors {
-                print("[SyncDiagnosticService]   Item: \(itemID), Error: \(partialError)")
+                Log.error("[SyncDiagnosticService]   Item: \(itemID), Error: \(partialError)", category: .sync)
             }
         }
     }
     
     /// 执行完整的同步诊断
     static func performDiagnostic() async -> SyncDiagnosticResult {
-        print("[SyncDiagnostic] Starting comprehensive sync diagnostic...")
+        Log.info("[SyncDiagnostic] Starting comprehensive sync diagnostic...", category: .sync)
         
         var issues: [SyncIssue] = []
         var recommendations: [String] = []
@@ -140,8 +140,14 @@ struct SyncDiagnosticService {
             let container = CKContainer(identifier: "iCloud.com.Mingyi.Lumory")
             let database = container.privateCloudDatabase
             
-            // Perform a simple query to test connectivity
-            let query = CKQuery(recordType: "CD_DiaryEntry", predicate: NSPredicate(value: true))
+            // Perform a simple query to test connectivity.
+            // **必须**用带 built-in 索引的谓词——`NSPredicate(value: true)` 在 production schema
+            // 没对应 query index，CloudKit 会抛 invalidArguments，被此函数误判为 `.networkUnavailable`。
+            // CloudKitSyncMonitor.swift 已改，这里是漏改的 sibling call site。
+            let query = CKQuery(
+                recordType: "CD_DiaryEntry",
+                predicate: NSPredicate(format: "modificationDate > %@", Date.distantPast as NSDate)
+            )
             
             if #available(macOS 12.0, iOS 15.0, *) {
                 database.fetch(withQuery: query, inZoneWith: nil, desiredKeys: nil, resultsLimit: 1) { result in
@@ -182,7 +188,7 @@ struct SyncDiagnosticService {
             try FileManager.default.removeItem(at: testFile)
             return true
         } catch {
-            print("[SyncDiagnostic] iCloud container access failed: \(error)")
+            Log.error("[SyncDiagnostic] iCloud container access failed: \(error)", category: .sync)
             return false
         }
     }

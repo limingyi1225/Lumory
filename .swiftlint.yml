@@ -1,0 +1,111 @@
+# SwiftLint 配置
+#
+# 安装：`brew install swiftlint`
+# 集成：Xcode → Target → Build Phases → New Run Script Phase:
+#   if command -v swiftlint >/dev/null; then swiftlint; fi
+#
+# 原则：项目里死代码已经清过，这里的门槛主要防止未来回退。
+# 敏感规则（file_length / force_unwrapping）先开 warning 再逐步严格化。
+
+included:
+  - Chronote
+
+excluded:
+  - Chronote/Assets.xcassets
+  - Chronote/en.lproj
+  - Chronote/zh-Hans.lproj
+  - build
+  - DerivedData
+  - server
+  - ChronoteTests
+  - ChronoteUITests
+
+disabled_rules:
+  # SwiftUI 视图树经常超长，行内表达更可读，这两个规则噪音大。
+  - trailing_whitespace
+  - todo
+  # `_ =` 在 init 里 pre-warm 动画时要用，不要误报。
+  - unused_capture_list
+
+opt_in_rules:
+  - force_unwrapping
+  - empty_count
+  - explicit_init
+  - closure_end_indentation
+  - redundant_nil_coalescing
+  - sorted_first_last
+  - vertical_whitespace_closing_braces
+  - vertical_whitespace_opening_braces
+  - unneeded_parentheses_in_closure_argument
+  - modifier_order
+
+line_length:
+  warning: 140
+  # 存量代码里有几行内嵌 JSON / URL / 长字符串触发过 200。先放宽到 250，后续整改时再收紧。
+  error: 250
+  ignores_comments: true
+  ignores_urls: true
+  ignores_function_declarations: false
+  ignores_interpolated_strings: true
+
+file_length:
+  # HomeView/DiaryDetailView 还在整改期，先放宽；目标是拆到每个文件 <500 行。
+  warning: 600
+  error: 2500
+
+type_body_length:
+  # HomeView (1073) / DiaryDetailView (825) 待拆分，放宽 error 门槛让存量代码通过。
+  warning: 400
+  error: 1200
+
+function_body_length:
+  warning: 80
+  error: 200
+
+function_parameter_count:
+  warning: 6
+  error: 8
+
+cyclomatic_complexity:
+  warning: 15
+  error: 25
+
+nesting:
+  type_level:
+    warning: 2
+  function_level:
+    warning: 5
+
+identifier_name:
+  min_length:
+    warning: 2
+    error: 1
+  max_length:
+    warning: 60
+    error: 80
+  excluded:
+    - id
+    - x
+    - y
+    - dx
+    - dy
+    - li
+    - ci
+    - t
+    - i
+    - j
+    - k
+    # OpenAI JSON 契约字段（snake_case），不能改
+    - reasoning_effort
+    - response_format
+    # HomeView 里录音时长显示变量（pre-existing，待重命名）
+    - current_m
+    - current_s
+    - total_m
+    - total_s
+
+force_cast: warning
+force_try: warning
+force_unwrapping: warning
+
+reporter: "xcode"

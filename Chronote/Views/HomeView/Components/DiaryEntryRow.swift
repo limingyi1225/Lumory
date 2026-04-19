@@ -4,7 +4,12 @@ struct DiaryEntryRow: View {
     let entry: DiaryEntry
     @State private var imageData: Data?
     @State private var shimmerPhase: CGFloat = 0
-    @AppStorage("appLanguage") private var appLanguage: String = "en"
+    // 默认值必须跟随系统 locale，否则首次启动前强制英语与其他读 `appLanguage` 的组件不一致。
+    @AppStorage("appLanguage") private var appLanguage: String = DiaryEntryRow.defaultAppLanguage
+
+    private static var defaultAppLanguage: String {
+        Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"
+    }
 
     /// 标题是否正在加载（summary为nil但text存在）
     private var isSummaryLoading: Bool {
@@ -24,7 +29,7 @@ struct DiaryEntryRow: View {
                     summaryLoadingView
                 } else {
                     Text(entry.displayText)
-                        .font(.system(size: PlatformInfo.isMacCatalyst ? 15 : 16, weight: .medium))
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundColor(.primary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
@@ -32,8 +37,11 @@ struct DiaryEntryRow: View {
                 
                 // Metadata row
                 HStack(spacing: 12) {
-                    // Mood indicator - show if mood value is not default (0.5)
-                    if entry.moodValue != 0.5 {
+                    // Mood indicator — 0.5 是 neutral sentinel（当前默认值），0.0 是老版本的
+                    // Core Data 默认值（升级用户 / CloudKit 老记录可能带 0.0），两者都视作
+                    // "未分析"隐藏掉 indicator。AI 真实返回值落在开区间 (0,1)，精确命中
+                    // 0.0 或 0.5 的概率极低，作 sentinel 够用。
+                    if entry.moodValue != 0.5 && entry.moodValue != 0.0 {
                         MoodIndicator(value: entry.moodValue)
                     }
                     
@@ -82,7 +90,9 @@ struct DiaryEntryRow: View {
                         .cornerRadius(8)
                 }
                 #endif
-            } else {
+            } else if !entry.imageFileNameArray.isEmpty {
+                // 只有"这条日记确实有图片、但还在加载"的时候才显示占位；
+                // 根本没图的日记不再显示误导性的照片占位图。
                 Image(systemName: "photo")
                     .foregroundColor(.secondary)
                     .frame(width: 40, height: 40)
@@ -139,7 +149,7 @@ struct DiaryEntryRow: View {
                 .clipShape(RoundedRectangle(cornerRadius: 4))
 
             // 加载指示文字
-            Text("生成中...")
+            Text(NSLocalizedString("status.generating", value: "生成中...", comment: "Summary-being-generated shimmer label"))
                 .font(.caption)
                 .foregroundColor(.secondary.opacity(0.6))
         }
@@ -168,66 +178,41 @@ struct DiaryEntryRow: View {
         .frame(width: 50)
     }
     
-    // Optimized date formatters - use static instances to avoid repeated creation
-    private var dayString: String {
-        dayFormatter(for: appLanguage).string(from: entry.wrappedDate)
-    }
+    // ** 静态缓存的 DateFormatter **：老实现每次 body eval 都 new 一次 DateFormatter，
+    // scroll 500 条日记时每次 diff 触发数千次 ICU locale 加载。按 (kind, language) 缓存一次就够。
+    private var dayString: String { Self.cachedFormatter(kind: .day, language: appLanguage).string(from: entry.wrappedDate) }
+    private var monthString: String { Self.cachedFormatter(kind: .month, language: appLanguage).string(from: entry.wrappedDate) }
+    private var timeString: String { Self.cachedFormatter(kind: .time, language: appLanguage).string(from: entry.wrappedDate) }
 
-    private var monthString: String {
-        monthFormatter(for: appLanguage).string(from: entry.wrappedDate)
-    }
-
-    private var timeString: String {
-        timeFormatter(for: appLanguage).string(from: entry.wrappedDate)
-    }
-
-    // Dynamic formatters that respond to language changes
-    private func dayFormatter(for language: String) -> DateFormatter {
+    private enum FormatterKind { case day, month, time }
+    private static let formatterCacheLock = NSLock()
+    private static var formatterCache: [String: DateFormatter] = [:]
+    private static func cachedFormatter(kind: FormatterKind, language: String) -> DateFormatter {
+        let key = "\(kind)-\(language)"
+        formatterCacheLock.lock()
+        defer { formatterCacheLock.unlock() }
+        if let cached = formatterCache[key] { return cached }
         let f = DateFormatter()
         f.locale = Locale(identifier: language)
-        f.dateFormat = "dd"
+        switch kind {
+        case .day:   f.dateFormat = "dd"
+        case .month: f.dateFormat = "MMM"
+        case .time:  f.timeStyle = .short
+        }
+        formatterCache[key] = f
         return f
     }
 
-    private func monthFormatter(for language: String) -> DateFormatter {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: language)
-        f.dateFormat = "MMM"
-        return f
-    }
-
-    private func timeFormatter(for language: String) -> DateFormatter {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: language)
-        f.timeStyle = .short
-        return f
-    }
-    
     private func loadThumbnail() {
         guard imageData == nil,
               let firstImageName = entry.imageFileNameArray.first else { return }
 
-        // Capture value type (String) to avoid capturing CoreData object 'entry'
+        // 只捕获文件名（值类型）——不跨线程持有 managed object。
+        // 静态 `loadImageData(fileName:)` 会依次查 iCloud / LumoryImages / 老位置三处。
         let fileName = firstImageName
-        
         Task.detached(priority: .utility) {
-            // Use static helper or direct file access to avoid 'entry' capture
-            // Assuming DiaryEntry has a static load helper or we implement simple loading
-            // To be safe and fix the error immediately, let's implement the loading manually here
-            // which guarantees we don't touch the localized 'entry' object.
-            
-            let documentURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            let fileURL = documentURL.appendingPathComponent(fileName)
-            
-            if let data = try? Data(contentsOf: fileURL) {
-                await MainActor.run {
-                    self.imageData = data
-                }
-            } else {
-                // Should also check iCloud if local fails, but for now fixed the crash/error
-                // If there's a specific static method on DiaryEntry, we should use that instead.
-                // Reverting to instance call is not allowed. 
-                // Let's rely on the text preview if image fails or wait for full load in detail.
+            if let data = DiaryEntry.loadImageData(fileName: fileName) {
+                await MainActor.run { self.imageData = data }
             }
         }
     }
@@ -252,17 +237,17 @@ struct MoodIndicator: View {
     private var moodText: String {
         switch value {
         case 0..<0.2:
-            return "很差"
+            return NSLocalizedString("mood.veryBad", value: "很差", comment: "Mood: very bad")
         case 0.2..<0.4:
-            return "较差"
+            return NSLocalizedString("mood.bad", value: "较差", comment: "Mood: bad")
         case 0.4..<0.6:
-            return "一般"
+            return NSLocalizedString("mood.neutral", value: "一般", comment: "Mood: neutral")
         case 0.6..<0.8:
-            return "不错"
+            return NSLocalizedString("mood.good", value: "不错", comment: "Mood: good")
         case 0.8...1.0:
-            return "很好"
+            return NSLocalizedString("mood.veryGood", value: "很好", comment: "Mood: very good")
         default:
-            return "一般"
+            return NSLocalizedString("mood.neutral", value: "一般", comment: "Mood: neutral")
         }
     }
 }

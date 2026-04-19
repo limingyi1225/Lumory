@@ -24,17 +24,37 @@ struct DiaryDetailView: View {
     @State private var editedSummary: String = ""
     @State private var editedText: String = ""
     @State private var editedMoodValue: Double = 0.5
+    @State private var editedDate: Date = Date()
     @State private var hasUnsavedChanges = false
+    /// 保存失败时向用户展示的错误消息；非 nil 时弹 alert。
+    @State private var saveError: String?
     @State private var showDiscardChangesAlert = false
     @Environment(\.colorScheme) private var colorScheme
     
     // Animation states
     @State private var animateIn = false
     @State private var showContent = false
-    @State private var expandedSections: Set<String> = ["内容", "摘要"]
     @State private var shareButtonPressed = false
     @State private var showImageViewer = false
     @State private var selectedImageIndex = 0
+    /// Image viewer 的图片数据：在点击缩略图时异步加载，加载完成后再呈现 viewer，
+    /// 避免在 cover/sheet body 里做同步 I/O 阻塞主线程。
+    @State private var viewerImages: [Data] = []
+
+    private func presentImageViewer(at index: Int) {
+        Task { @MainActor in
+            let loaded = await entry.loadAllImageDataAsync()
+            guard !loaded.isEmpty else { return }
+            viewerImages = loaded
+            // **index 安全钳位**：`index` 是缩略图 grid（基于 `imageFileNameArray`）的索引，
+            // `loaded` 是异步加载的 blob / fallback 结果，两者 count 不保证相等：
+            //   - blob 缺失 / CloudKit 未同步完 → fallback 过滤掉 nil → 比 grid 短
+            //   - blob 存在但 encode 时索引已做顺序保持（bug_006 修复后）→ 等长
+            // 钳位避免 grid 上点最后一张但 loaded 不够长时，TabView 抓不到 tag 显示空白 + "5 / 3" 这种乱数。
+            selectedImageIndex = min(max(index, 0), loaded.count - 1)
+            showImageViewer = true
+        }
+    }
     
     // Platform-specific color
     private var systemGray6Color: Color {
@@ -54,20 +74,36 @@ struct DiaryDetailView: View {
         }
     }()
     
-    private func formatDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: appLanguage)
-        formatter.dateStyle = .long
-        formatter.timeStyle = .none
-        return formatter.string(from: date)
+    // 缓存按 (kind, language) —— 每次 body eval new 一次 `DateFormatter` ICU 加载不便宜，
+    // 播放进度 30fps 驱动 body 时主线程会被 formatter alloc 拉满。
+    private enum DiaryDateFormatterKind { case longDate, shortTime }
+    private static let detailFormatterLock = NSLock()
+    private static var detailFormatterCache: [String: DateFormatter] = [:]
+    private static func detailFormatter(kind: DiaryDateFormatterKind, language: String) -> DateFormatter {
+        let key = "\(kind)-\(language)"
+        detailFormatterLock.lock()
+        defer { detailFormatterLock.unlock() }
+        if let cached = detailFormatterCache[key] { return cached }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: language)
+        switch kind {
+        case .longDate:
+            f.dateStyle = .long
+            f.timeStyle = .none
+        case .shortTime:
+            f.dateStyle = .none
+            f.timeStyle = .short
+        }
+        detailFormatterCache[key] = f
+        return f
     }
-    
+
+    private func formatDate(_ date: Date) -> String {
+        Self.detailFormatter(kind: .longDate, language: appLanguage).string(from: date)
+    }
+
     private func formatTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: appLanguage)
-        formatter.dateStyle = .none
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
+        Self.detailFormatter(kind: .shortTime, language: appLanguage).string(from: date)
     }
 
     var body: some View {
@@ -80,248 +116,28 @@ struct DiaryDetailView: View {
                         dismiss()
                     }
             } else {
-                #if targetEnvironment(macCatalyst)
-                // Mac-specific design
-                macDetailView
-                #else
-                // iOS design
                 ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    // 日期和心情
-                    HStack {
-                        // 心情圆点，编辑与展示通用映射
-                        Circle()
-                            .fill(isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor)
-                            .frame(width: 12, height: 12)
-                        Text(formatDate(entry.wrappedDate))
-                            .font(.headline)
-                        Spacer()
-                        Text(formatTime(entry.wrappedDate))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    // Action buttons (only show in edit mode)
-                    if isEditing {
-                        HStack(spacing: 12) {
-                            Button(action: {
-                                if hasUnsavedChanges {
-                                    showDiscardChangesAlert = true
-                                } else {
-                                    cancelEditing()
-                                }
-                            }) {
-                                Text(NSLocalizedString("取消", comment: "Cancel button"))
-                                    .font(.system(size: 15))
-                                    .foregroundColor(.secondary)
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 8)
-                                    .frame(maxWidth: .infinity)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                            .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
-                                    )
-                            }
-                            
-                            Button(action: saveChanges) {
-                                Text(NSLocalizedString("保存", comment: "Save button"))
-                                    .font(.system(size: 15, weight: .medium))
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 8)
-                                    .frame(maxWidth: .infinity)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                            .fill(Color.accentColor)
-                                    )
-                            }
-                        }
-                        .padding(.vertical, 8)
-                    }
-                    
-                    // 心情光谱（编辑模式）
-                    if isEditing {
-                        EditableMoodSpectrumBar(
-                            moodValue: $editedMoodValue,
-                            isEnabled: true
-                        )
-                        .padding(.vertical, 12)
-                    }
-                    
-                    // 摘要部分
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(NSLocalizedString("摘要", comment: "Summary label"))
-                                .font(.title3)
-                                .fontWeight(.semibold)
-                            if !isEditing && (entry.wrappedSummary ?? "").isEmpty {
-                                Text(NSLocalizedString("(未设置)", comment: "Not set label"))
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        
+                    VStack(alignment: .leading, spacing: 22) {
+                        heroHeader
                         if isEditing {
-                            TextField(NSLocalizedString("添加摘要...", comment: "Add summary placeholder"), text: $editedSummary)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(12)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(systemGray6Color)
-                                )
-                                .onChange(of: editedSummary) { _, _ in
-                                    hasUnsavedChanges = true
-                                }
-                        } else if let summary = entry.wrappedSummary, !summary.isEmpty {
-                            Text(summary)
-                                .font(.body)
+                            moodEditorBlock
+                        }
+                        summaryBlock
+                        themesSection
+                        entryBodyBlock
+                        if !entry.imageFileNameArray.isEmpty {
+                            photosBlock
+                        }
+                        if let audioFileName = entry.audioFileName, let audioURL = entry.audioURL() {
+                            audioBlock(audioFileName: audioFileName, audioURL: audioURL)
                         }
                     }
-                    
-                    // 日记内容部分
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(NSLocalizedString("我的记录", comment: "My entry label"))
-                            .font(.title3)
-                            .fontWeight(.semibold)
-                        
-                        if isEditing {
-                            TextEditor(text: $editedText)
-                                .frame(minHeight: 200)
-                                .padding(8)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(systemGray6Color)
-                                )
-                                .scrollContentBackground(.hidden)
-                                .onChange(of: editedText) { _, _ in
-                                    hasUnsavedChanges = true
-                                }
-                        } else {
-                            Text(entry.wrappedText)
-                                .font(.body)
-                        }
-                    }
-                    
-                    // 图片显示部分
-                    if !entry.imageFileNameArray.isEmpty {
-                        Divider().padding(.vertical, 8)
-                        
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(NSLocalizedString("照片", comment: "Photos label"))
-                                .font(.title3)
-                                .fontWeight(.semibold)
-                            
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 12) {
-                                    ForEach(Array(entry.imageFileNameArray.enumerated()), id: \.offset) { index, fileName in
-                                        if let imageData = entry.loadImageData(fileName: fileName) {
-                                            Group {
-                                                #if os(iOS)
-                                                if let uiImage = UIImage(data: imageData) {
-                                                    Image(uiImage: uiImage)
-                                                        .resizable()
-                                                        .scaledToFill()
-                                                        .frame(width: 120, height: 120)
-                                                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                                                        .onTapGesture {
-                                                            selectedImageIndex = index
-                                                            showImageViewer = true
-                                                        }
-                                                }
-                                                #else
-                                                if let nsImage = NSImage(data: imageData) {
-                                                    Image(nsImage: nsImage)
-                                                        .resizable()
-                                                        .scaledToFill()
-                                                        .frame(width: 120, height: 120)
-                                                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                                                        .onTapGesture {
-                                                            selectedImageIndex = index
-                                                            showImageViewer = true
-                                                        }
-                                                }
-                                                #endif
-                                            }
-                                        } else {
-                                            // Debug placeholder for missing images
-                                            RoundedRectangle(cornerRadius: 10)
-                                                .fill(Color.gray.opacity(0.3))
-                                                .frame(width: 120, height: 120)
-                                                .overlay(
-                                                    Text("图片加载失败")
-                                                        .font(.caption)
-                                                        .foregroundColor(.secondary)
-                                                )
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal, 4)
-                            }
-                            .frame(height: 128)
-                        }
-                        .onAppear {
-                            print("[DiaryDetailView] Image file names: \(entry.imageFileNameArray)")
-                            print("[DiaryDetailView] Image count: \(entry.imageFileNameArray.count)")
-                        }
-                    }
-                    
-                    // 音频播放器部分 - 类似于 RecordingRow
-                    if let audioFileName = entry.audioFileName, let audioURL = entry.audioURL() {
-                        Divider().padding(.vertical, 8)
-                        
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(NSLocalizedString("录音", comment: "Recording label"))
-                                .font(.title3)
-                                .fontWeight(.semibold)
-
-                            HStack(spacing: 8) {
-                                Image(systemName: "waveform")
-                                    .foregroundColor(.blue)
-                                
-                                Text(formattedDuration(
-                                    currentTime: audioPlaybackController.currentPlayingFileName == audioFileName ? audioPlaybackController.currentTime : 0,
-                                    totalDuration: (audioPlaybackController.currentPlayingFileName == audioFileName && audioPlaybackController.duration > 0) ? audioPlaybackController.duration : displayableAudioDuration
-                                ))
-                                    .font(.caption)
-                                    .monospacedDigit()
-                                
-                                Spacer()
-                                
-                                Button(action: {
-                                    playOrPauseAudio(url: audioURL, fileName: audioFileName)
-                                }) {
-                                    Image(systemName: audioPlaybackController.isPlaying && audioPlaybackController.currentPlayingFileName == audioFileName ? "pause.circle.fill" : "play.circle.fill")
-                                        .font(.system(size: 28)) // Slightly larger for easier tapping
-                                        .foregroundColor(.accentColor)
-                                }
-                                .buttonStyle(PlainButtonStyle())
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(
-                                ZStack(alignment: .leading) {
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(systemGray6Color)
-                                    if audioPlaybackController.currentPlayingFileName == audioFileName && displayableAudioDuration > 0 { // Use displayableAudioDuration for condition
-                                        GeometryReader { geo in
-                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                .fill(Color.blue.opacity(0.3))
-                                                .frame(width: geo.size.width * audioPlaybackController.progress)
-                                        }
-                                    }
-                                }
-                            )
-                            // Task to fetch duration when audioFileName changes or view appears
-                            .task(id: audioFileName) {
-                                displayableAudioDuration = await fetchAudioDuration(url: audioURL) ?? 0.0
-                            }
-                        }
-                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 18)
                 }
-                .padding()
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .navigationTitle(NSLocalizedString("日记详情", comment: "Diary details title"))
+                .scrollDismissesKeyboard(.interactively)
+                .background(detailBackground.ignoresSafeArea())
+                .navigationTitle(NSLocalizedString("日记详情", comment: "Diary details title"))
             .toolbar {
 #if canImport(UIKit)
                 // 左侧按钮：取消（编辑模式下）
@@ -363,10 +179,11 @@ struct DiaryDetailView: View {
                 Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
                     // Stop audio and perform deletion
                     audioPlaybackController.stopPlayback(clearCurrentFile: true)
-                    
-                    // Delete associated images
+
+                    // 在 Core Data delete 之前先清磁盘文件——delete 之后 entry 的属性访问不可靠。
                     entry.deleteAllImages()
-                    
+                    entry.deleteAudioFile()
+
                     // Delete the entry
                     viewContext.delete(entry)
                     
@@ -377,7 +194,7 @@ struct DiaryDetailView: View {
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         #endif
                     } catch {
-                        print("[DiaryDetailView] 删除日记失败: \(error)")
+                        Log.error("[DiaryDetailView] 删除日记失败: \(error)", category: .ui)
                     }
                     
                     // Dismiss immediately after deletion
@@ -395,6 +212,16 @@ struct DiaryDetailView: View {
             } message: {
                 Text(NSLocalizedString("您有未保存的更改，确定要放弃吗？", comment: "Unsaved changes warning"))
             }
+            .alert(
+                NSLocalizedString("保存失败", comment: "Save failed alert title"),
+                isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })
+            ) {
+                Button(NSLocalizedString("好", comment: "OK"), role: .cancel) { saveError = nil }
+            } message: {
+                if let msg = saveError {
+                    Text(msg)
+                }
+            }
             .onDisappear {
                 // 当视图消失时停止播放，避免音频在后台继续
                 audioPlaybackController.stopPlayback(clearCurrentFile: true)
@@ -403,10 +230,9 @@ struct DiaryDetailView: View {
             .interactiveDismissDisabled(isEditing && hasUnsavedChanges)
             #if os(iOS)
             .fullScreenCover(isPresented: $showImageViewer) {
-                let images = entry.loadAllImageData()
-                if !images.isEmpty {
+                if !viewerImages.isEmpty {
                     ImageViewerView(
-                        images: images,
+                        images: viewerImages,
                         selectedIndex: $selectedImageIndex,
                         isPresented: $showImageViewer
                     )
@@ -414,10 +240,9 @@ struct DiaryDetailView: View {
             }
             #else
             .sheet(isPresented: $showImageViewer) {
-                let images = entry.loadAllImageData()
-                if !images.isEmpty {
+                if !viewerImages.isEmpty {
                     ImageViewerView(
-                        images: images,
+                        images: viewerImages,
                         selectedIndex: $selectedImageIndex,
                         isPresented: $showImageViewer
                     )
@@ -438,474 +263,10 @@ struct DiaryDetailView: View {
                     showContent = true
                 }
             }
-            #endif
             }
         }
     }
-    
-    #if targetEnvironment(macCatalyst)
-    @ViewBuilder
-    private var macDetailView: some View {
-        if showUnifiedToolbar {
-            VStack(spacing: 0) {
-                // Unified toolbar
-                HStack(spacing: 20) {
-                    // Left side - Back button and title
-                    HStack(spacing: 12) {
-                        Button(action: { 
-                            // Post notification to clear selection
-                            NotificationCenter.default.post(name: .diaryEntryDeleted, object: entry.id)
-                        }) {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        
-                        Text("日记详情")
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundColor(.primary)
-                    }
-                    
-                    Spacer()
-                    
-                    // Right side - Action buttons
-                    HStack(spacing: 12) {
-                        if !isEditing {
-                            Button(action: startEditing) {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "pencil")
-                                        .font(.system(size: 14))
-                                    Text("编辑")
-                                        .font(.system(size: 14, weight: .medium))
-                                }
-                                .foregroundColor(.accentColor)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(
-                                    Capsule()
-                                        .fill(Color.accentColor.opacity(0.1))
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            
-                            Button(action: { showDeleteAlert = true }) {
-                                Image(systemName: "trash")
-                                    .font(.system(size: 16))
-                                    .foregroundColor(.red)
-                                    .frame(width: 32, height: 32)
-                                    .background(
-                                        Circle()
-                                            .fill(Color.red.opacity(0.1))
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            Button(action: {
-                                if hasUnsavedChanges {
-                                    showDiscardChangesAlert = true
-                                } else {
-                                    cancelEditing()
-                                }
-                            }) {
-                                Text("取消")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundColor(.secondary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        Capsule()
-                                            .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            
-                            Button(action: saveChanges) {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 14))
-                                    Text("保存")
-                                        .font(.system(size: 14, weight: .medium))
-                                }
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(
-                                    Capsule()
-                                        .fill(Color.accentColor)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!hasUnsavedChanges)
-                        }
-                    }
-                }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 16)
-                .background(
-                    ZStack {
-                        Color(UIColor.systemBackground)
-                        // Subtle gradient overlay
-                        LinearGradient(
-                            gradient: Gradient(colors: [
-                                Color(UIColor.systemBackground),
-                                Color(UIColor.systemBackground).opacity(0.95)
-                            ]),
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    }
-                )
-                
-                Divider()
-                
-                // Content area
-                ZStack {
-                    // Beautiful gradient background
-                    LinearGradient(
-                        gradient: Gradient(colors: [
-                            Color(UIColor.systemBackground),
-                            Color(UIColor.systemBackground).opacity(0.98),
-                            entry.moodColor.opacity(0.05)
-                        ]),
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    .ignoresSafeArea()
-                    
-                    ScrollView {
-                        VStack(spacing: 32) {
-                            // Header section with mood visualization
-                            headerSection
-                                .opacity(showContent ? 1 : 0)
-                                .offset(y: showContent ? 0 : 20)
-                            
-                            // Main content sections
-                            VStack(spacing: 24) {
-                                if let summary = entry.wrappedSummary, !summary.isEmpty || isEditing {
-                                    summarySection
-                                }
-                                
-                                contentSection
-                                
-                                if !entry.imageFileNameArray.isEmpty {
-                                    imageSection
-                                }
-                                
-                                if let audioFileName = entry.audioFileName, let audioURL = entry.audioURL() {
-                                    audioSection(audioFileName: audioFileName, audioURL: audioURL)
-                                }
-                            }
-                            .opacity(showContent ? 1 : 0)
-                            .offset(y: showContent ? 0 : 30)
-                        }
-                        .padding(40)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-            }
-            .navigationTitle("")
-            .navigationBarHidden(true)
-            .onAppear {
-                // Animate in
-                withAnimation(.spring(response: 0.6, dampingFraction: 0.8)) {
-                    animateIn = true
-                }
-                withAnimation(.spring(response: 0.6, dampingFraction: 0.8).delay(0.2)) {
-                    showContent = true
-                }
-            }
-            .alert(NSLocalizedString("确认删除此日记？", comment: "Delete diary confirmation"), isPresented: $showDeleteAlert) {
-                Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
-                    audioPlaybackController.stopPlayback(clearCurrentFile: true)
-                    
-                    // Delete associated images
-                    entry.deleteAllImages()
-                    
-                    viewContext.delete(entry)
-                    
-                    do {
-                        try viewContext.save()
-                        #if canImport(UIKit)
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        #endif
-                        
-                        // For Mac, post notification to clear selection
-                        #if targetEnvironment(macCatalyst)
-                        NotificationCenter.default.post(name: .diaryEntryDeleted, object: entry.id)
-                        #endif
-                    } catch {
-                        print("[DiaryDetailView] 删除日记失败: \(error)")
-                    }
-                    
-                    dismiss()
-                }
-                Button(NSLocalizedString("取消", comment: "Cancel button"), role: .cancel) { }
-            } message: {
-                Text(NSLocalizedString("此操作无法撤销，是否确定？", comment: "Cannot undo confirmation"))
-            }
-            .alert(NSLocalizedString("放弃更改？", comment: "Discard changes confirmation"), isPresented: $showDiscardChangesAlert) {
-                Button(NSLocalizedString("放弃", comment: "Discard button"), role: .destructive) {
-                    cancelEditing()
-                }
-                Button(NSLocalizedString("继续编辑", comment: "Continue editing button"), role: .cancel) { }
-            } message: {
-                Text(NSLocalizedString("您有未保存的更改，确定要放弃吗？", comment: "Unsaved changes warning"))
-            }
-            .fullScreenCover(isPresented: $showImageViewer) {
-                let images = entry.loadAllImageData()
-                if !images.isEmpty {
-                    ImageViewerView(
-                        images: images,
-                        selectedIndex: $selectedImageIndex,
-                        isPresented: $showImageViewer
-                    )
-                }
-            }
-        } else {
-            // Original macDetailView code without unified toolbar
-            ZStack {
-                // Beautiful gradient background
-                LinearGradient(
-                    gradient: Gradient(colors: [
-                        Color(UIColor.systemBackground),
-                        Color(UIColor.systemBackground).opacity(0.98),
-                        entry.moodColor.opacity(0.05)
-                    ]),
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .ignoresSafeArea()
-                
-                ScrollView {
-                    VStack(spacing: 32) {
-                        // Edit button for Mac
-                        HStack {
-                            Spacer()
-                            
-                            if !isEditing {
-                                HStack(spacing: 12) {
-                                    Button(action: startEditing) {
-                                        Label("编辑", systemImage: "pencil")
-                                            .font(.system(size: 15, weight: .medium))
-                                            .foregroundColor(.accentColor)
-                                            .padding(.horizontal, 16)
-                                            .padding(.vertical, 8)
-                                            .background(
-                                                RoundedRectangle(cornerRadius: 8)
-                                                    .fill(Color(UIColor.secondarySystemBackground))
-                                            )
-                                    }
-                                    .buttonStyle(.plain)
-                                    
-                                    Button(action: { showDeleteAlert = true }) {
-                                        Label("删除", systemImage: "trash")
-                                            .font(.system(size: 15, weight: .medium))
-                                            .foregroundColor(.red)
-                                            .padding(.horizontal, 16)
-                                            .padding(.vertical, 8)
-                                            .contentShape(Rectangle())
-                                            .background(
-                                                RoundedRectangle(cornerRadius: 8)
-                                                    .stroke(Color.red.opacity(0.3), lineWidth: 1)
-                                            )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            } else {
-                                HStack(spacing: 12) {
-                                    Button(action: {
-                                        if hasUnsavedChanges {
-                                            showDiscardChangesAlert = true
-                                        } else {
-                                            cancelEditing()
-                                        }
-                                    }) {
-                                        Text("取消")
-                                            .font(.system(size: 15))
-                                            .foregroundColor(.secondary)
-                                            .padding(.horizontal, 16)
-                                            .padding(.vertical, 8)
-                                            .background(
-                                                RoundedRectangle(cornerRadius: 8)
-                                                    .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
-                                            )
-                                    }
-                                    .buttonStyle(.plain)
-                                    
-                                    Button(action: saveChanges) {
-                                        Text("保存")
-                                            .font(.system(size: 15, weight: .medium))
-                                            .foregroundColor(.white)
-                                            .padding(.horizontal, 16)
-                                            .padding(.vertical, 8)
-                                            .background(
-                                                RoundedRectangle(cornerRadius: 8)
-                                                    .fill(Color.accentColor)
-                                            )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 40)
-                        
-                        // Header section with mood visualization
-                        headerSection
-                            .opacity(showContent ? 1 : 0)
-                            .offset(y: showContent ? 0 : 20)
-                        
-                        // Main content sections
-                        VStack(spacing: 24) {
-                            if let summary = entry.wrappedSummary, !summary.isEmpty || isEditing {
-                                summarySection
-                            }
-                            
-                            contentSection
-                            
-                            if !entry.imageFileNameArray.isEmpty {
-                                imageSection
-                            }
-                            
-                            if let audioFileName = entry.audioFileName, let audioURL = entry.audioURL() {
-                                audioSection(audioFileName: audioFileName, audioURL: audioURL)
-                            }
-                        }
-                        .opacity(showContent ? 1 : 0)
-                        .offset(y: showContent ? 0 : 30)
-                    }
-                    .padding(40)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            .navigationTitle("")
-            .toolbar {
-            ToolbarItem(placement: .navigation) {
-                HStack(spacing: 16) {
-                    if isEditing {
-                        Button(action: {
-                            if hasUnsavedChanges {
-                                showDiscardChangesAlert = true
-                            } else {
-                                cancelEditing()
-                            }
-                        }) {
-                            Text("取消")
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-            
-            ToolbarItem(placement: .primaryAction) {
-                HStack(spacing: 16) {
-                    if !isEditing {
-                        // Share button
-                        Button(action: {
-                            shareButtonPressed = true
-                            // Implement share functionality
-                        }) {
-                            Image(systemName: "square.and.arrow.up")
-                                .foregroundColor(.secondary)
-                                .scaleEffect(shareButtonPressed ? 0.8 : 1)
-                        }
-                        .buttonStyle(.plain)
-                        .animation(.spring(response: 0.3), value: shareButtonPressed)
-                        
-                        // Edit button
-                        Button(action: startEditing) {
-                            Label("编辑", systemImage: "pencil")
-                                .font(.system(size: 15))
-                                .foregroundColor(.accentColor)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        // Save button
-                        Button(action: saveChanges) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "checkmark.circle.fill")
-                                Text("保存")
-                            }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .background(
-                                Capsule()
-                                    .fill(hasUnsavedChanges ? Color.accentColor : Color.gray.opacity(0.3))
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    
-                    // Delete button
-                    Button(role: .destructive, action: { showDeleteAlert = true }) {
-                        Image(systemName: "trash")
-                            .foregroundColor(.red)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-        .onAppear {
-            // Animate in
-            withAnimation(.spring(response: 0.6, dampingFraction: 0.8)) {
-                animateIn = true
-            }
-            withAnimation(.spring(response: 0.6, dampingFraction: 0.8).delay(0.2)) {
-                showContent = true
-            }
-        }
-        .alert(NSLocalizedString("确认删除此日记？", comment: "Delete diary confirmation"), isPresented: $showDeleteAlert) {
-            Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
-                audioPlaybackController.stopPlayback(clearCurrentFile: true)
-                
-                // Delete associated images
-                entry.deleteAllImages()
-                
-                viewContext.delete(entry)
-                
-                do {
-                    try viewContext.save()
-                    #if canImport(UIKit)
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    #endif
-                    
-                    // For Mac, post notification to clear selection
-                    #if targetEnvironment(macCatalyst)
-                    NotificationCenter.default.post(name: .diaryEntryDeleted, object: entry.id)
-                    #endif
-                } catch {
-                    print("[DiaryDetailView] 删除日记失败: \(error)")
-                }
-                
-                dismiss()
-            }
-            Button(NSLocalizedString("取消", comment: "Cancel button"), role: .cancel) { }
-        } message: {
-            Text(NSLocalizedString("此操作无法撤销，是否确定？", comment: "Cannot undo confirmation"))
-        }
-        .alert(NSLocalizedString("放弃更改？", comment: "Discard changes confirmation"), isPresented: $showDiscardChangesAlert) {
-            Button(NSLocalizedString("放弃", comment: "Discard button"), role: .destructive) {
-                cancelEditing()
-            }
-            Button(NSLocalizedString("继续编辑", comment: "Continue editing button"), role: .cancel) { }
-        } message: {
-            Text(NSLocalizedString("您有未保存的更改，确定要放弃吗？", comment: "Unsaved changes warning"))
-        }
-        .fullScreenCover(isPresented: $showImageViewer) {
-            let images = entry.loadAllImageData()
-            if !images.isEmpty {
-                ImageViewerView(
-                    images: images,
-                    selectedIndex: $selectedImageIndex,
-                    isPresented: $showImageViewer
-                )
-            }
-        }
-    }
-    }
-    #endif
+
     
     // MARK: - View Components (Available for all platforms)
     
@@ -1003,236 +364,256 @@ struct DiaryDetailView: View {
         }
     }
     
+    /// 主题来自 AI 自动抽取（写入/编辑后台流水线里 extractThemes），
+    /// 用户手动编辑主题容易污染聚合结果 —— 只做只读展示，非空才渲染。
     @ViewBuilder
-    private var summarySection: some View {
-        DisclosureGroup(isExpanded: Binding(
-            get: { expandedSections.contains("摘要") },
-            set: { isExpanded in
-                if isExpanded {
-                    expandedSections.insert("摘要")
-                } else {
-                    expandedSections.remove("摘要")
+    private var themesSection: some View {
+        let themes = entry.themeArray
+        if !themes.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Text(NSLocalizedString("主题", comment: "Themes label"))
+                        .font(.title3)
+                        .fontWeight(.semibold)
+                    Image(systemName: "sparkles")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary.opacity(0.6))
+                        .accessibilityLabel(NSLocalizedString("AI 自动提取", comment: "AI auto-extracted tag"))
                 }
-            }
-        )) {
-            if isEditing {
-                TextField(NSLocalizedString("添加摘要...", comment: "Add summary placeholder"), text: $editedSummary)
-                    .textFieldStyle(PlainTextFieldStyle())
-                    .font(.system(size: 16))
-                    .padding(16)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color(UIColor.tertiarySystemBackground))
-                    )
-                    .onChange(of: editedSummary) { _, _ in
-                        hasUnsavedChanges = true
+                FlowLayout(spacing: 8) {
+                    ForEach(themes, id: \.self) { theme in
+                        Text(theme)
+                            .font(.footnote)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                            .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.25), lineWidth: 0.5))
                     }
-            } else if let summary = entry.wrappedSummary, !summary.isEmpty {
-                Text(summary)
-                    .font(.system(size: 16))
-                    .lineSpacing(4)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        } label: {
-            HStack {
-                Label("摘要", systemImage: "text.quote")
-                    .font(.title3)
-                    .fontWeight(.semibold)
-                
-                if !isEditing && (entry.wrappedSummary ?? "").isEmpty {
-                    Text("(未设置)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                 }
-                
-                Spacer()
             }
         }
-        .tint(.primary)
-        .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(UIColor.secondarySystemBackground))
-                .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
-        )
     }
-    
+
+    // MARK: - Redesigned blocks
+
+    private var detailBackground: some View {
+        // 用 mood 颜色给整页背底染一层极淡的色，让 hero 和内容有呼吸感但不喧宾夺主
+        let color = isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor
+        return LinearGradient(
+            colors: [color.opacity(0.10), Color.clear],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .frame(height: 260, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// 顶部 hero：情绪色块 + 日期 / 时间。编辑模式下日期可点改。
     @ViewBuilder
-    private var contentSection: some View {
-        DisclosureGroup(isExpanded: Binding(
-            get: { expandedSections.contains("内容") },
-            set: { isExpanded in
-                if isExpanded {
-                    expandedSections.insert("内容")
-                } else {
-                    expandedSections.remove("内容")
+    private var heroHeader: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Circle()
+                .fill(isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor)
+                .frame(width: 16, height: 16)
+                .shadow(color: (isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor).opacity(0.35), radius: 6, y: 2)
+                .accessibilityHidden(true)
+
+            if isEditing {
+                DatePicker(
+                    "",
+                    selection: $editedDate,
+                    displayedComponents: [.date, .hourAndMinute]
+                )
+                .datePickerStyle(.compact)
+                .labelsHidden()
+                .onChange(of: editedDate) { _, _ in hasUnsavedChanges = true }
+                .accessibilityLabel(NSLocalizedString("日记时间", comment: "Entry date picker a11y"))
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(formatDate(entry.wrappedDate))
+                        .font(.system(size: 22, weight: .semibold, design: .rounded))
+                    Text(formatTime(entry.wrappedDate))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
             }
-        )) {
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// 编辑态下的情绪谱条
+    @ViewBuilder
+    private var moodEditorBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(NSLocalizedString("情绪", comment: "Mood label"))
+                .font(.caption.weight(.semibold))
+                .textCase(.uppercase)
+                .tracking(0.8)
+                .foregroundStyle(.secondary)
+            EditableMoodSpectrumBar(moodValue: $editedMoodValue, isEnabled: true)
+                .onChange(of: editedMoodValue) { _, _ in hasUnsavedChanges = true }
+                .padding(.vertical, 2)
+        }
+    }
+
+    /// 摘要：引用块风格（左侧竖条 + 斜体），编辑时内联可写；无摘要且非编辑时折叠掉。
+    @ViewBuilder
+    private var summaryBlock: some View {
+        let hasSummary = !(entry.wrappedSummary ?? "").isEmpty
+        if isEditing || hasSummary {
+            VStack(alignment: .leading, spacing: 10) {
+                if isEditing {
+                    Text(NSLocalizedString("摘要", comment: "Summary label"))
+                        .font(.caption.weight(.semibold))
+                        .textCase(.uppercase)
+                        .tracking(0.8)
+                        .foregroundStyle(.secondary)
+                    TextField(
+                        NSLocalizedString("一句话记下这天…", comment: "Summary placeholder"),
+                        text: $editedSummary,
+                        axis: .vertical
+                    )
+                    .font(.body)
+                    .lineLimit(1...4)
+                    .padding(12)
+                    .liquidGlassCard(cornerRadius: 12)
+                    .onChange(of: editedSummary) { _, _ in hasUnsavedChanges = true }
+                } else if let summary = entry.wrappedSummary, !summary.isEmpty {
+                    HStack(alignment: .top, spacing: 12) {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(entry.moodColor.opacity(0.8))
+                            .frame(width: 3)
+                        Text(summary)
+                            .font(.system(size: 18, weight: .medium))
+                            .italic()
+                            .foregroundStyle(.primary)
+                            .lineSpacing(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+        }
+    }
+
+    /// 正文：细标签 + 正文；编辑模式用 liquidGlassCard 做容器。
+    @ViewBuilder
+    private var entryBodyBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(NSLocalizedString("记录", comment: "Entry label"))
+                .font(.caption.weight(.semibold))
+                .textCase(.uppercase)
+                .tracking(0.8)
+                .foregroundStyle(.secondary)
             if isEditing {
                 TextEditor(text: $editedText)
-                    .font(.system(size: 16))
+                    .frame(minHeight: 220)
+                    .font(.system(size: 17))
                     .lineSpacing(4)
-                    .frame(minHeight: 300)
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color(UIColor.tertiarySystemBackground))
-                    )
+                    .padding(10)
                     .scrollContentBackground(.hidden)
-                    .onChange(of: editedText) { _, _ in
-                        hasUnsavedChanges = true
-                    }
+                    .liquidGlassCard(cornerRadius: 14)
+                    .onChange(of: editedText) { _, _ in hasUnsavedChanges = true }
             } else {
                 Text(entry.wrappedText)
-                    .font(.system(size: 16))
+                    .font(.system(size: 17))
                     .lineSpacing(6)
-                    .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        } label: {
-            HStack {
-                Label("我的记录", systemImage: "doc.text")
-                    .font(.title3)
-                    .fontWeight(.semibold)
-                
-                Spacer()
+                    .textSelection(.enabled)
             }
         }
-        .tint(.primary)
-        .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(UIColor.secondarySystemBackground))
-                .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
-        )
     }
-    
+
+    /// 照片：水平滚动 + 圆角 + 轻阴影。
     @ViewBuilder
-    private var imageSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Label("照片", systemImage: "photo.stack")
-                    .font(.title3)
-                    .fontWeight(.semibold)
-                
-                Spacer()
-            }
-            
+    private var photosBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(NSLocalizedString("照片", comment: "Photos label"))
+                .font(.caption.weight(.semibold))
+                .textCase(.uppercase)
+                .tracking(0.8)
+                .foregroundStyle(.secondary)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 16) {
-                    ForEach(entry.imageFileNameArray, id: \.self) { fileName in
-                        if let imageData = entry.loadImageData(fileName: fileName),
-                           let uiImage = UIImage(data: imageData) {
-                            Image(uiImage: uiImage)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: 150, height: 150)
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-                                .shadow(color: Color.black.opacity(0.1), radius: 5, x: 0, y: 2)
-                                .onTapGesture {
-                                    let images = entry.loadAllImageData()
-                                    if !images.isEmpty {
-                                        selectedImageIndex = entry.imageFileNameArray.firstIndex(of: fileName) ?? 0
-                                        showImageViewer = true
-                                    }
-                                }
-                        }
+                HStack(spacing: 12) {
+                    ForEach(Array(entry.imageFileNameArray.enumerated()), id: \.offset) { index, fileName in
+                        photoThumbnail(fileName: fileName, index: index)
                     }
                 }
-                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
             }
-            .frame(height: 158)
+            .frame(height: 136)
         }
-        .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(UIColor.secondarySystemBackground))
-                .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
-        )
     }
-    
+
     @ViewBuilder
-    private func audioSection(audioFileName: String, audioURL: URL) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Label("录音", systemImage: "waveform")
-                    .font(.title3)
-                    .fontWeight(.semibold)
-                
-                Spacer()
-            }
-            
-            HStack(spacing: 16) {
-                // Play/Pause button
-                Button(action: {
+    private func photoThumbnail(fileName: String, index: Int) -> some View {
+        // 不再在 body 里 `entry.loadImageData(fileName:)`——那是磁盘 I/O + 可能的 iCloud 下载，
+        // 播放进度 30fps 驱动 body 时主线程会被 I/O 连续卡顿。
+        // 用一个小 view 持有 @State 并在 .task 里异步加载。
+        AsyncPhotoThumbnail(fileName: fileName, index: index) { idx in
+            presentImageViewer(at: idx)
+        }
+    }
+
+    /// 音频：大 play 按钮 + 进度条 + 时间。
+    @ViewBuilder
+    private func audioBlock(audioFileName: String, audioURL: URL) -> some View {
+        let isPlayingThis = audioPlaybackController.isPlaying && audioPlaybackController.currentPlayingFileName == audioFileName
+        VStack(alignment: .leading, spacing: 10) {
+            Text(NSLocalizedString("录音", comment: "Recording label"))
+                .font(.caption.weight(.semibold))
+                .textCase(.uppercase)
+                .tracking(0.8)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 14) {
+                Button {
                     playOrPauseAudio(url: audioURL, fileName: audioFileName)
-                }) {
-                    Image(systemName: audioPlaybackController.isPlaying && audioPlaybackController.currentPlayingFileName == audioFileName ? "pause.circle.fill" : "play.circle.fill")
+                } label: {
+                    Image(systemName: isPlayingThis ? "pause.circle.fill" : "play.circle.fill")
                         .font(.system(size: 36))
-                        .foregroundColor(.accentColor)
+                        .foregroundStyle(entry.moodColor)
                         .symbolRenderingMode(.hierarchical)
                 }
                 .buttonStyle(PlainButtonStyle())
-                
-                // Progress view
-                VStack(alignment: .leading, spacing: 8) {
+
+                VStack(alignment: .leading, spacing: 6) {
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
-                            // Background track
-                            Capsule()
-                                .fill(Color.secondary.opacity(0.2))
-                                .frame(height: 6)
-                            
-                            // Progress
+                            Capsule().fill(Color.secondary.opacity(0.18))
+                                .frame(height: 5)
                             if audioPlaybackController.currentPlayingFileName == audioFileName && displayableAudioDuration > 0 {
                                 Capsule()
-                                    .fill(Color.accentColor)
-                                    .frame(width: geo.size.width * audioPlaybackController.progress, height: 6)
+                                    .fill(entry.moodColor)
+                                    .frame(width: geo.size.width * audioPlaybackController.progress, height: 5)
                             }
                         }
                     }
-                    .frame(height: 6)
-                    
-                    // Time labels
-                    HStack {
-                        Text(formattedDuration(
-                            currentTime: audioPlaybackController.currentPlayingFileName == audioFileName ? audioPlaybackController.currentTime : 0,
-                            totalDuration: (audioPlaybackController.currentPlayingFileName == audioFileName && audioPlaybackController.duration > 0) ? audioPlaybackController.duration : displayableAudioDuration
-                        ))
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundColor(.secondary)
-                        
-                        Spacer()
-                    }
+                    .frame(height: 5)
+                    Text(formattedDuration(
+                        currentTime: audioPlaybackController.currentPlayingFileName == audioFileName ? audioPlaybackController.currentTime : 0,
+                        totalDuration: (audioPlaybackController.currentPlayingFileName == audioFileName && audioPlaybackController.duration > 0) ? audioPlaybackController.duration : displayableAudioDuration
+                    ))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
                 }
             }
-            .padding(20)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(UIColor.tertiarySystemBackground))
-            )
-        }
-        .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(UIColor.secondarySystemBackground))
-                .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
-        )
-        .task(id: audioFileName) {
-            displayableAudioDuration = await fetchAudioDuration(url: audioURL) ?? 0.0
+            .padding(14)
+            .liquidGlassCard(cornerRadius: 14)
+            .task(id: audioFileName) {
+                displayableAudioDuration = await fetchAudioDuration(url: audioURL) ?? 0.0
+            }
         }
     }
+
 
     // MARK: - 编辑相关方法
     
     private func startEditing() {
-        print("[DiaryDetailView] Starting edit mode")
+        Log.info("[DiaryDetailView] Starting edit mode", category: .ui)
         editedSummary = entry.wrappedSummary ?? ""
         editedText = entry.wrappedText
         editedMoodValue = entry.moodValue
+        editedDate = entry.wrappedDate
         hasUnsavedChanges = false
         
         withAnimation(AnimationConfig.gentleSpring) {
@@ -1278,29 +659,115 @@ struct DiaryDetailView: View {
     }
     
     private func saveChanges() {
-        // 更新 Core Data
+        // text 变化了就需要在后台重跑 themes + embedding（否则 Insight 主题聚合和
+        // Ask Past 的语义检索会继续用旧内容的索引）。先捕获对比值，再写 Core Data。
+        let textChanged = entry.wrappedText != editedText
+        let entryObjectID = entry.objectID
+
         entry.summary = editedSummary.trimmingCharacters(in: .whitespacesAndNewlines)
         entry.text = editedText
         entry.moodValue = editedMoodValue
-        
+        entry.date = editedDate
+        if textChanged {
+            entry.recomputeWordCount()   // 本地算，免费，现在就更新
+        }
+
         do {
+            // **先 save，再切 UI 状态**。原顺序反了——catch 里只 log，UI 已经切到 "saved"，
+            // 用户以为已保存其实没存。save 成功才做"切换到浏览态 / 关键盘 / 触发后台任务"。
             try viewContext.save()
-            
+
             withAnimation(AnimationConfig.gentleSpring) {
                 isEditing = false
             }
             hasUnsavedChanges = false
-            
+
             #if canImport(UIKit)
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            #endif
-            
-            // 隐藏键盘
-            #if canImport(UIKit)
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             #endif
+
+            if textChanged {
+                // 快照捕获：Task.detached 是 @Sendable，View struct 不能整个跨线程传
+                let textSnapshot = editedText
+                Task.detached(priority: .utility) {
+                    await Self.refreshAIIndex(for: entryObjectID, newText: textSnapshot)
+                }
+            }
         } catch {
-            print("[DiaryDetailView] 保存更改失败: \(error)")
+            Log.error("[DiaryDetailView] 保存更改失败: \(error)", category: .ui)
+            // **明确告知用户保存失败**——不能静默，否则用户以为改动已入库但下次打开还是旧内容。
+            saveError = (error as NSError).localizedDescription
+        }
+    }
+
+    /// 编辑后台刷新：跑一次 extractThemes + embed，写回 Core Data。
+    /// 取 objectID 而不是 entry 引用——viewContext 可能在 Task 跑到时已经切换，直接用 objectID 去
+    /// viewContext 重新 fetch 更安全。任何一步失败都静默跳过，不影响用户主动保存的已完成状态。
+    ///
+    /// 文本空 → 清空 themes/embedding（老的语义索引保留会让 AskPast 检索捞出"空内容带旧主题"的条目）。
+    /// 写回前做 staleness guard：用户连续快速保存两次时，两个 Task.detached 都在跑，顺序不保证；
+    /// 后提交的（text=v2）可能比先提交的（text=v1）先完成网络调用。没有 guard 的话慢的那条
+    /// `setThemes(v1)` 会覆盖快的 `setThemes(v2)`，entry.text 是 v2 但 themes/embedding 是 v1，
+    /// 静默污染语义检索。比较 `entry.wrappedText == newText`：只有当前 text 还等于我们当初快照的
+    /// 那条才写。
+    private static func refreshAIIndex(for objectID: NSManagedObjectID, newText: String) async {
+        let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let themes: [String]
+        let embedding: [Float]?
+        if trimmed.isEmpty {
+            // 用户把内容清空：直接清 themes + embedding，不发网络
+            themes = []
+            embedding = nil
+        } else {
+            // 使用共享的 service 实例，避免每次编辑都重 new 一个。
+            let ai: AIServiceProtocol = OpenAIService.shared
+            async let themesTask = ai.extractThemes(text: trimmed)
+            async let embeddingTask = ai.embed(text: trimmed)
+            (themes, embedding) = await (themesTask, embeddingTask)
+        }
+
+        await MainActor.run {
+            let context = PersistenceController.shared.container.viewContext
+            guard let entry = try? context.existingObject(with: objectID) as? DiaryEntry else {
+                Log.error("[DiaryDetailView] refreshAIIndex: 原条目已不存在", category: .ai)
+                return
+            }
+            // Stale-write guard：如果 entry.text 已经被更后的保存改掉了，这次 Task 结果已过期，
+            // 直接丢弃不写，让新 Task 的新 themes/embedding 生效。
+            // 比较时都做 trim——否则末尾换行 / 空格差异会被误判为"已被更新"。
+            let currentTrimmed = entry.wrappedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard currentTrimmed == trimmed else {
+                Log.info("[DiaryDetailView] refreshAIIndex: 文本已被更新的保存覆盖，丢弃 stale 结果", category: .ai)
+                return
+            }
+
+            if trimmed.isEmpty {
+                // 用户明确把内容清空了 → 清掉 themes + embedding（这是用户意图）
+                entry.setThemes([])
+                entry.embedding = nil
+            } else {
+                // **Partial-failure guard**：`extractThemes` 网络失败返 []、`embed` 失败返 nil，
+                // 两种返回值无法区分"真 empty"和"transient 故障"。如果这里遇到任一返回"空/nil"，
+                // 就把现有 themes/embedding 全量保留——宁可让用户多等下一次 edit 或 backfill 重试，
+                // 也不在 AI 出故障时用空值污染一条已索引好的 entry（否则 themes 清空 / embedding
+                // 指向旧文本，Ask Past 检索 ranking 和 theme chips 会对不上直到手动重建）。
+                // 两者"都成功"才整组 commit。
+                guard !themes.isEmpty, let vector = embedding else {
+                    Log.info("[DiaryDetailView] refreshAIIndex: AI 部分失败（themes=\(themes.count), embedding=\(embedding != nil ? "ok" : "nil")），保留原值", category: .ai)
+                    return
+                }
+                entry.setThemes(themes)
+                entry.setEmbedding(vector)
+            }
+
+            do {
+                try context.save()
+                Log.info("[DiaryDetailView] refreshAIIndex 完成：themes=\(themes.count), embedding=\(embedding != nil ? "ok" : "nil")", category: .ai)
+            } catch {
+                Log.error("[DiaryDetailView] refreshAIIndex save 失败: \(error)", category: .ai)
+            }
         }
     }
     
@@ -1330,14 +797,122 @@ struct DiaryDetailView: View {
         // 设置播放结束和错误的回调
         audioPlaybackController.onFinishPlaying = { [weak audioPlaybackController] in
             // UI 可以在这里更新，例如重置播放按钮状态
-            print("[DiaryDetailView] Playback finished. Controller isPlaying: \(audioPlaybackController?.isPlaying ?? false)")
+            Log.info("[DiaryDetailView] Playback finished. Controller isPlaying: \(audioPlaybackController?.isPlaying ?? false)", category: .ui)
         }
         audioPlaybackController.onPlayError = { [weak audioPlaybackController] error in // Added weak capture for consistency if needed
             let fileName = audioPlaybackController?.currentPlayingFileName ?? "N/A"
-            print("[DiaryDetailView] Audio playback error: \(error.localizedDescription). Controller file: \(fileName)")
+            Log.error("[DiaryDetailView] Audio playback error: \(error.localizedDescription). Controller file: \(fileName)", category: .ui)
             // 可以在这里向用户显示错误信息
         }
     }
 }
 
-// Removed #Preview block to avoid macro compilation issues. 
+// Removed #Preview block to avoid macro compilation issues.
+
+// MARK: - FlowLayout
+//
+// 简单的行内流式布局：把子视图按次序从左到右排列，溢出自动换行。
+// 用于主题 chip 这种长度不一的标签列表。
+
+@available(iOS 16.0, macOS 13.0, *)
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        let rows = computeRows(in: maxWidth, subviews: subviews)
+        let height = rows.reduce(0) { $0 + $1.height + spacing } - (rows.isEmpty ? 0 : spacing)
+        let width = rows.map { $0.width }.max() ?? 0
+        return CGSize(width: min(width, maxWidth), height: max(height, 0))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = computeRows(in: bounds.width, subviews: subviews)
+        var y = bounds.minY
+        for row in rows {
+            var x = bounds.minX
+            for item in row.items {
+                let size = item.subview.sizeThatFits(.unspecified)
+                item.subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+
+    private struct RowItem {
+        let subview: LayoutSubview
+        let size: CGSize
+    }
+    private struct Row {
+        var items: [RowItem] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func computeRows(in maxWidth: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = [Row()]
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            var current = rows[rows.count - 1]
+            let prospective = current.width + (current.items.isEmpty ? 0 : spacing) + size.width
+            if prospective > maxWidth && !current.items.isEmpty {
+                rows.append(Row(items: [RowItem(subview: subview, size: size)], width: size.width, height: size.height))
+            } else {
+                current.items.append(RowItem(subview: subview, size: size))
+                current.width = prospective
+                current.height = max(current.height, size.height)
+                rows[rows.count - 1] = current
+            }
+        }
+        return rows
+    }
+}
+
+// MARK: - AsyncPhotoThumbnail
+//
+// 把"磁盘读一张缩略图"和 body 解耦：body 只声明有一个缩略图要显示，
+// 真正的 `Data(contentsOf:)` 在 .task 里跑。原来的实现直接在 body 里做 I/O，
+// 播放进度 30fps 会让主线程重复命中磁盘读取。
+private struct AsyncPhotoThumbnail: View {
+    let fileName: String
+    let index: Int
+    let onTap: (Int) -> Void
+    @State private var imageData: Data?
+
+    var body: some View {
+        Group {
+            if let data = imageData {
+                #if os(iOS)
+                if let uiImage = UIImage(data: data) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .scaledToFill()
+                }
+                #else
+                if let nsImage = NSImage(data: data) {
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .scaledToFill()
+                }
+                #endif
+            } else {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.secondary.opacity(0.15))
+                    .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
+            }
+        }
+        .frame(width: 130, height: 130)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: Color.black.opacity(0.1), radius: 6, y: 2)
+        .onTapGesture { onTap(index) }
+        .task(id: fileName) {
+            if imageData == nil {
+                let data = await Task.detached(priority: .utility) {
+                    DiaryEntry.loadImageData(fileName: fileName)
+                }.value
+                await MainActor.run { self.imageData = data }
+            }
+        }
+    }
+}

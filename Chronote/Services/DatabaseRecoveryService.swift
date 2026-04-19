@@ -93,9 +93,9 @@ final class DatabaseRecoveryService {
         for store in coordinator.persistentStores {
             do {
                 try coordinator.remove(store)
-                print("[DatabaseRecovery] Removed store: \(store.url?.path ?? "unknown")")
+                Log.info("[DatabaseRecovery] Removed store: \(store.url?.path ?? "unknown")", category: .persistence)
             } catch {
-                print("[DatabaseRecovery] Failed to remove store: \(error)")
+                Log.error("[DatabaseRecovery] Failed to remove store: \(error)", category: .persistence)
             }
         }
         
@@ -105,7 +105,7 @@ final class DatabaseRecoveryService {
         // Recreate the store
         container.loadPersistentStores { storeDescription, error in
             if let error = error {
-                print("[DatabaseRecovery] Failed to recreate store: \(error)")
+                Log.error("[DatabaseRecovery] Failed to recreate store: \(error)", category: .persistence)
                 
                 // Try to restore from backup if recreation fails
                 if let backupURL = backupURL {
@@ -121,7 +121,7 @@ final class DatabaseRecoveryService {
                     completion(.failure(error))
                 }
             } else {
-                print("[DatabaseRecovery] Successfully recreated store")
+                Log.info("[DatabaseRecovery] Successfully recreated store", category: .persistence)
                 
                 // Trigger CloudKit sync to restore data
                 self.triggerCloudKitSync(container: container)
@@ -148,7 +148,7 @@ final class DatabaseRecoveryService {
         
         do {
             try FileManager.default.copyItem(at: url, to: backupURL)
-            print("[DatabaseRecovery] Created backup at: \(backupURL.path)")
+            Log.info("[DatabaseRecovery] Created backup at: \(backupURL.path)", category: .persistence)
             
             // Also backup related files
             let extensions = ["sqlite-wal", "sqlite-shm"]
@@ -160,7 +160,7 @@ final class DatabaseRecoveryService {
             
             return backupURL
         } catch {
-            print("[DatabaseRecovery] Failed to create backup: \(error)")
+            Log.error("[DatabaseRecovery] Failed to create backup: \(error)", category: .persistence)
             return nil
         }
     }
@@ -178,76 +178,80 @@ final class DatabaseRecoveryService {
             try? fileManager.removeItem(at: file)
         }
         
-        print("[DatabaseRecovery] Deleted corrupted database files")
+        Log.info("[DatabaseRecovery] Deleted corrupted database files", category: .persistence)
     }
     
     private func restoreFromBackup(backupURL: URL, to targetURL: URL) {
         do {
             try FileManager.default.copyItem(at: backupURL, to: targetURL)
-            print("[DatabaseRecovery] Restored from backup")
+            Log.info("[DatabaseRecovery] Restored from backup", category: .persistence)
         } catch {
-            print("[DatabaseRecovery] Failed to restore from backup: \(error)")
+            Log.error("[DatabaseRecovery] Failed to restore from backup: \(error)", category: .persistence)
         }
     }
     
     private func triggerCloudKitSync(container: NSPersistentCloudKitContainer) {
-        // Force a sync by creating a dummy change
-        let context = container.viewContext
-        let entity = NSEntityDescription.entity(forEntityName: "DiaryEntry", in: context)!
-        let entry = NSManagedObject(entity: entity, insertInto: context)
-        
-        // Set required fields
-        entry.setValue(UUID(), forKey: "id")
-        entry.setValue(Date(), forKey: "date")
-        entry.setValue("", forKey: "text")
-        entry.setValue(0.5, forKey: "moodValue")
-        
-        // Save and immediately delete to trigger sync
-        do {
-            try context.save()
-            context.delete(entry)
-            try context.save()
-            print("[DatabaseRecovery] Triggered CloudKit sync")
-        } catch {
-            print("[DatabaseRecovery] Failed to trigger sync: \(error)")
+        // 以前直接在 viewContext 上插+删，如果第二次 save（delete）失败，会留下一条空 DiaryEntry
+        // 同步到 CloudKit，所有设备上多出一条白板日记。
+        // 改到 background context + `perform`，任何步骤失败就 rollback，**不让脏数据走向 CloudKit**。
+        let bg = container.newBackgroundContext()
+        bg.perform {
+            guard let entity = NSEntityDescription.entity(forEntityName: "DiaryEntry", in: bg) else {
+                Log.error("[DatabaseRecovery] 无法获取 DiaryEntry entity", category: .persistence)
+                return
+            }
+            let entry = NSManagedObject(entity: entity, insertInto: bg)
+            entry.setValue(UUID(), forKey: "id")
+            entry.setValue(Date(), forKey: "date")
+            entry.setValue("", forKey: "text")
+            entry.setValue(0.5, forKey: "moodValue")
+
+            do {
+                try bg.save()
+                bg.delete(entry)
+                try bg.save()
+                Log.info("[DatabaseRecovery] Triggered CloudKit sync", category: .persistence)
+            } catch {
+                Log.error("[DatabaseRecovery] Failed to trigger sync, rolling back: \(error)", category: .persistence)
+                bg.rollback()
+            }
         }
     }
     
     private func showRecoveryAlert(completion: @escaping (Bool) -> Void) {
-        #if os(iOS) || targetEnvironment(macCatalyst)
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let window = windowScene.windows.first,
               let rootViewController = window.rootViewController else {
-            print("[DatabaseRecovery] No window available for alert, proceeding with recovery")
-            completion(true)
+            // **关键数据安全**：以前这条 fall-through 是 `completion(true)`——
+            // 多窗口 iPad / 场景 teardown race 下 rootViewController 为 nil 时，
+            // 会在用户看不到任何弹窗的情况下直接抹掉本地数据库。
+            // 改成 `completion(false)`：取消这次 recovery，让下一次"有 UI 的"启动再确认。
+            // 等不到 UI 的宁可暂时不 recover，也不能静默删用户数据。
+            Log.error("[DatabaseRecovery] No window available for confirmation alert — ABORTING recovery to avoid silent data loss", category: .persistence)
+            completion(false)
             return
         }
-        
+
         let alert = UIAlertController(
             title: "Database Recovery Required",
             message: "Your diary database appears to be corrupted. Would you like to attempt recovery? Your data will be restored from iCloud if available.",
             preferredStyle: .alert
         )
-        
+
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
             completion(false)
         })
-        
+
         alert.addAction(UIAlertAction(title: "Recover", style: .default) { _ in
             completion(true)
         })
-        
-        // Present from the topmost view controller
+
         var topController = rootViewController
         while let presentedViewController = topController.presentedViewController {
             topController = presentedViewController
         }
-        
+
         topController.present(alert, animated: true)
-        #else
-        // For macOS native, we would use NSAlert but since this is a Mac Catalyst app, the above code will work
-        completion(true)
-        #endif
     }
     
     func cleanupOldBackups(keepLast: Int = 3) {
@@ -279,10 +283,10 @@ final class DatabaseRecoveryService {
                     }
                 }
                 
-                print("[DatabaseRecovery] Cleaned up \(backups.count - keepLast) old backups")
+                Log.info("[DatabaseRecovery] Cleaned up \(backups.count - keepLast) old backups", category: .persistence)
             }
         } catch {
-            print("[DatabaseRecovery] Failed to cleanup old backups: \(error)")
+            Log.error("[DatabaseRecovery] Failed to cleanup old backups: \(error)", category: .persistence)
         }
     }
 }

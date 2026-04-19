@@ -13,6 +13,7 @@ struct DiaryExportView: View {
     @State private var isExporting = false
     @State private var exportFileURL: URL? = nil
     @State private var showShareSheet = false
+    @State private var showExportError = false
     
     private var dateRange: String {
         guard !entries.isEmpty else { return NSLocalizedString("无日记", comment: "No entries") }
@@ -84,8 +85,6 @@ struct DiaryExportView: View {
                     
                     Spacer()
                     
-                    #if canImport(UIKit) && !targetEnvironment(macCatalyst)
-                    // iOS: 只显示导出按钮，点击后自动弹出分享
                     Button {
                         performExport()
                     } label: {
@@ -98,32 +97,15 @@ struct DiaryExportView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(entries.isEmpty || isExporting)
-                    #else
-                    // macOS: 使用 ShareLink
-                    if let fileURL = exportFileURL {
-                        ShareLink(item: fileURL) {
-                            Label(NSLocalizedString("分享", comment: "Share"), systemImage: "square.and.arrow.up")
-                        }
-                        .buttonStyle(.borderedProminent)
-                    } else {
-                        Button {
-                            performExport()
-                        } label: {
-                            if isExporting {
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle())
-                            } else {
-                                Text(NSLocalizedString("导出", comment: "Export"))
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(entries.isEmpty || isExporting)
-                    }
-                    #endif
                 }
             }
             .padding()
             .navigationBarTitleDisplayMode(.inline)
+            .alert(NSLocalizedString("导出失败", comment: "Export failed"), isPresented: $showExportError) {
+                Button(NSLocalizedString("好", comment: "OK"), role: .cancel) {}
+            } message: {
+                Text(NSLocalizedString("无法创建导出文件，请检查存储空间后重试。", comment: "Export error message"))
+            }
         }
         .interactiveDismissDisabled(isExporting)
     }
@@ -149,8 +131,11 @@ struct DiaryExportView: View {
                     #endif
                 }
             } else {
+                // 以前这里只把 spinner 关掉，用户看不到任何失败提示——静默失败。
+                // 弹个 alert 让用户知道出了问题，可以重试。
                 await MainActor.run {
                     isExporting = false
+                    showExportError = true
                 }
             }
         }

@@ -264,6 +264,28 @@
 "Report generation was cancelled. Please try again." = "Report generation was cancelled. Please try again.";
 "Unable to generate report: %@. Please try again later." = "Unable to generate report: %@. Please try again later."; 
 
+/* New keys (post-launch review) */
+"mood.veryBad" = "Very Bad";
+"mood.bad" = "Bad";
+"mood.neutral" = "Normal";
+"mood.good" = "Good";
+"mood.veryGood" = "Great";
+"status.generating" = "Generating...";
+"洞察" = "Insights";
+"诊断、修复与分项控制" = "Diagnostics, repair, and granular controls";
+"一键重建索引" = "Rebuild indexes";
+"一键开始" = "Start";
+"第 1 / 3 步：重抽主题…" = "Step 1 / 3: Re-extracting themes...";
+"第 2 / 3 步：重算摘要…" = "Step 2 / 3: Regenerating summaries...";
+"第 3 / 3 步：重建 embedding…" = "Step 3 / 3: Rebuilding embeddings...";
+"索引已是最新" = "Indexes are up to date";
+"生成语义索引" = "Generate semantic index";
+"刷新主题" = "Refresh themes";
+"进阶" = "Advanced";
+"如果你遇到了数据库错误，此操作将尝试修复。数据会从 iCloud 恢复。" = "If you're seeing database errors, this will attempt repair. Your data will be restored from iCloud.";
+"数据库加载失败" = "Database failed to load";
+"请尝试在设置中运行数据库修复，或联系开发者。" = "Please try Database Repair in Settings, or contact the developer.";
+
 /* Export Content */
 "Lumory 日记导出" = "Lumory Diary Export";
 "导出日期: %@" = "Export Date: %@";

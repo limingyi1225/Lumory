@@ -1,0 +1,68 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Xcode - build products & user state
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.xcarchive
+
+# Xcode - Swift packages / CocoaPods / Carthage
+Pods/
+Carthage/Build/
+.build/
+Package.resolved
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Node / backend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp/
+.pnp.js
+.env
+.env.local
+.env.*.local
+server/.env
+
+# Logs (including PM2 output)
+*.log
+logs/
+server/logs/
+
+# Deployment / archive artifacts
+*.tar.gz
+*.tgz
+*.zip
+lumory-backend.tar.gz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS / misc
+Thumbs.db
+.cache/

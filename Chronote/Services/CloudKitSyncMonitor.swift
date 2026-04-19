@@ -54,7 +54,7 @@ class CloudKitSyncMonitor: ObservableObject {
             object: container.persistentStoreCoordinator,
             queue: .main
         ) { [weak self] _ in
-            print("[CloudKitSyncMonitor] Remote changes detected")
+            Log.info("[CloudKitSyncMonitor] Remote changes detected", category: .sync)
             self?.syncStatus = .synced
             self?.lastSyncDate = Date()
             self?.errorMessage = nil
@@ -84,7 +84,7 @@ class CloudKitSyncMonitor: ObservableObject {
                 return
             }
 
-            print("[CloudKitSyncMonitor] Local changes saved, initiating CloudKit sync")
+            Log.info("[CloudKitSyncMonitor] Local changes saved, initiating CloudKit sync", category: .sync)
             self?.syncStatus = .syncing
             self?.errorMessage = nil
 
@@ -114,46 +114,46 @@ class CloudKitSyncMonitor: ObservableObject {
 
     @available(iOS 14.0, macOS 11.0, *)
     private func handleCloudKitEvent(_ event: NSPersistentCloudKitContainer.Event) {
-        print("[CloudKitSyncMonitor] CloudKit event: \(event.type.rawValue), succeeded: \(event.succeeded)")
+        Log.info("[CloudKitSyncMonitor] CloudKit event: \(event.type.rawValue), succeeded: \(event.succeeded)", category: .sync)
 
         switch event.type {
         case .setup:
             if event.succeeded {
-                print("[CloudKitSyncMonitor] CloudKit setup completed successfully")
+                Log.info("[CloudKitSyncMonitor] CloudKit setup completed successfully", category: .sync)
                 syncStatus = .synced
                 errorMessage = nil
             } else {
-                print("[CloudKitSyncMonitor] CloudKit setup failed: \(event.error?.localizedDescription ?? "Unknown error")")
+                Log.error("[CloudKitSyncMonitor] CloudKit setup failed: \(event.error?.localizedDescription ?? "Unknown error")", category: .sync)
                 syncStatus = .error
                 errorMessage = "CloudKit setup failed: \(event.error?.localizedDescription ?? "Unknown error")"
             }
 
         case .import:
             if event.succeeded {
-                print("[CloudKitSyncMonitor] CloudKit import completed successfully")
+                Log.info("[CloudKitSyncMonitor] CloudKit import completed successfully", category: .sync)
                 syncStatus = .synced
                 lastSyncDate = Date()
                 errorMessage = nil
             } else {
-                print("[CloudKitSyncMonitor] CloudKit import failed: \(event.error?.localizedDescription ?? "Unknown error")")
+                Log.error("[CloudKitSyncMonitor] CloudKit import failed: \(event.error?.localizedDescription ?? "Unknown error")", category: .sync)
                 syncStatus = .error
                 errorMessage = "Import failed: \(event.error?.localizedDescription ?? "Unknown error")"
             }
 
         case .export:
             if event.succeeded {
-                print("[CloudKitSyncMonitor] CloudKit export completed successfully")
+                Log.info("[CloudKitSyncMonitor] CloudKit export completed successfully", category: .sync)
                 syncStatus = .synced
                 lastSyncDate = Date()
                 errorMessage = nil
             } else {
-                print("[CloudKitSyncMonitor] CloudKit export failed: \(event.error?.localizedDescription ?? "Unknown error")")
+                Log.error("[CloudKitSyncMonitor] CloudKit export failed: \(event.error?.localizedDescription ?? "Unknown error")", category: .sync)
                 syncStatus = .error
                 errorMessage = "Export failed: \(event.error?.localizedDescription ?? "Unknown error")"
             }
 
         @unknown default:
-            print("[CloudKitSyncMonitor] Unknown CloudKit event type")
+            Log.info("[CloudKitSyncMonitor] Unknown CloudKit event type", category: .sync)
         }
     }
     
@@ -164,7 +164,7 @@ class CloudKitSyncMonitor: ObservableObject {
         ckContainer.accountStatus { [weak self] status, error in
             DispatchQueue.main.async {
                 if let error = error {
-                    print("[CloudKitSyncMonitor] Account status error: \(error)")
+                    Log.error("[CloudKitSyncMonitor] Account status error: \(error)", category: .sync)
                     self?.syncStatus = .error
                     self?.errorMessage = "iCloud account error: \(error.localizedDescription)"
                     return
@@ -195,10 +195,16 @@ class CloudKitSyncMonitor: ObservableObject {
     }
 
     private func checkDatabaseAccessibility(container: CKContainer) {
-        // Test database accessibility by performing a simple query
+        // Test database accessibility by performing a simple query.
+        // 之前用 `NSPredicate(value: true)` —— 这个谓词如果没有对应的 query index 会在
+        // production schema 被 CloudKit 拒掉（`CKError.invalidArguments`），然后用户一直
+        // 看到 `.error` 状态。换成 `modificationDate > distantPast` 这种必然存在 built-in
+        // 索引的谓词，既能检测可达性，又不依赖 schema-level query index。
         let database = container.privateCloudDatabase
-        // Use a simple predicate that CloudKit can handle
-        let query = CKQuery(recordType: "CD_DiaryEntry", predicate: NSPredicate(value: true))
+        let query = CKQuery(
+            recordType: "CD_DiaryEntry",
+            predicate: NSPredicate(format: "modificationDate > %@", Date.distantPast as NSDate)
+        )
         query.sortDescriptors = [NSSortDescriptor(key: "CD_date", ascending: false)]
 
         if #available(macOS 12.0, iOS 15.0, *) {
@@ -235,11 +241,11 @@ class CloudKitSyncMonitor: ObservableObject {
                     self?.errorMessage = "iCloud storage quota exceeded"
                 case .zoneNotFound, .userDeletedZone:
                     // This is expected for new installations
-                    print("[CloudKitSyncMonitor] Zone not found (expected for new installations)")
+                    Log.info("[CloudKitSyncMonitor] Zone not found (expected for new installations)", category: .sync)
                     self?.syncStatus = .synced
                     self?.errorMessage = nil
                 default:
-                    print("[CloudKitSyncMonitor] Database access error: \(error)")
+                    Log.error("[CloudKitSyncMonitor] Database access error: \(error)", category: .sync)
                     self?.syncStatus = .error
                     self?.errorMessage = "iCloud sync error: \(error.localizedDescription)"
                 }
@@ -247,29 +253,29 @@ class CloudKitSyncMonitor: ObservableObject {
                 // Database is accessible
                 self?.syncStatus = .synced
                 self?.errorMessage = nil
-                print("[CloudKitSyncMonitor] CloudKit database accessible, sync ready")
+                Log.info("[CloudKitSyncMonitor] CloudKit database accessible, sync ready", category: .sync)
             }
         }
     }
 
-    func forcSync() {
-        print("[CloudKitSyncMonitor] Force sync initiated")
-        DispatchQueue.main.async { [weak self] in
-            self?.syncStatus = .syncing
-            self?.errorMessage = nil
-        }
+    /// @MainActor 强制：`viewContext` 是 `.mainQueueConcurrencyType`，Core Data 明确要求
+    /// 必须在主线程 / 主队列访问。此函数原来没做线程约束——HomeView pull-to-refresh 用
+    /// `Task.detached` 调过来就是活的 Core Data 线程违规，随机静默损坏对象图。
+    @MainActor
+    func forceSync() {
+        Log.info("[CloudKitSyncMonitor] Force sync initiated", category: .sync)
+        syncStatus = .syncing
+        errorMessage = nil
 
         // Trigger Core Data save to push changes to CloudKit
         let context = container.viewContext
         if context.hasChanges {
             do {
                 try context.save()
-                print("[CloudKitSyncMonitor] Local changes saved, triggering CloudKit sync")
+                Log.info("[CloudKitSyncMonitor] Local changes saved, triggering CloudKit sync", category: .sync)
             } catch {
-                DispatchQueue.main.async { [weak self] in
-                    self?.syncStatus = .error
-                    self?.errorMessage = "Failed to save local changes: \(error.localizedDescription)"
-                }
+                syncStatus = .error
+                errorMessage = "Failed to save local changes: \(error.localizedDescription)"
                 return
             }
         }
@@ -309,8 +315,14 @@ class CloudKitSyncMonitor: ObservableObject {
         // Perform a simple query to verify CloudKit connectivity
         let ckContainer = CKContainer(identifier: "iCloud.com.Mingyi.Lumory")
         let database = ckContainer.privateCloudDatabase
-        // Use a simple predicate that CloudKit can handle
-        let query = CKQuery(recordType: "CD_DiaryEntry", predicate: NSPredicate(value: true))
+        // **必须**和 checkDatabaseAccessibility 用同一个谓词——production schema 下
+        // `NSPredicate(value: true)` 没有对应的 query index，CloudKit 会直接 invalidArguments，
+        // 让 `forceSync` → pull-to-refresh 永远翻到 .error 即使 CloudKit 是健康的。
+        // modificationDate > distantPast 有 built-in 索引，既能验可达性又不依赖 schema query index。
+        let query = CKQuery(
+            recordType: "CD_DiaryEntry",
+            predicate: NSPredicate(format: "modificationDate > %@", Date.distantPast as NSDate)
+        )
         query.sortDescriptors = [NSSortDescriptor(key: "CD_date", ascending: false)]
 
         if #available(macOS 12.0, iOS 15.0, *) {
@@ -340,17 +352,17 @@ class CloudKitSyncMonitor: ObservableObject {
                     self?.syncStatus = .synced
                     self?.lastSyncDate = Date()
                     self?.errorMessage = nil
-                    print("[CloudKitSyncMonitor] Sync verified (new installation)")
+                    Log.info("[CloudKitSyncMonitor] Sync verified (new installation)", category: .sync)
                 } else {
                     self?.syncStatus = .error
                     self?.errorMessage = "Sync verification failed: \(error.localizedDescription)"
-                    print("[CloudKitSyncMonitor] Sync verification error: \(error)")
+                    Log.error("[CloudKitSyncMonitor] Sync verification error: \(error)", category: .sync)
                 }
             } else {
                 self?.syncStatus = .synced
                 self?.lastSyncDate = Date()
                 self?.errorMessage = nil
-                print("[CloudKitSyncMonitor] Sync verified successfully")
+                Log.info("[CloudKitSyncMonitor] Sync verified successfully", category: .sync)
             }
         }
     }

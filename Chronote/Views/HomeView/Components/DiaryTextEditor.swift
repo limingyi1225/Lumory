@@ -58,7 +58,7 @@ struct DiaryTextEditor: View {
     
     private func handleTextChange(oldValue: String, newValue: String) {
         // 检测清空动作
-        if oldValue.count > 0 && newValue.isEmpty {
+        if !oldValue.isEmpty && newValue.isEmpty {
             withAnimation(.easeInOut(duration: 0.3)) {
                 showEmptyPrompt = true
             }

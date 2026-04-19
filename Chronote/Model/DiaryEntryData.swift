@@ -8,15 +8,45 @@ struct DiaryEntryData {
     let text: String
     let moodValue: Double
     let summary: String
-    
-    init(id: UUID, date: Date, text: String, moodValue: Double, summary: String) {
+    // Phase 0 扩展：AI × 统计融合需要的额外字段，缺省为空以兼容旧调用点
+    let themes: [String]
+    let embedding: [Float]?
+    let wordCount: Int
+
+    init(id: UUID,
+         date: Date,
+         text: String,
+         moodValue: Double,
+         summary: String,
+         themes: [String] = [],
+         embedding: [Float]? = nil,
+         wordCount: Int = 0) {
         self.id = id
         self.date = date
         self.text = text
         self.moodValue = moodValue
         self.summary = summary
+        self.themes = themes
+        self.embedding = embedding
+        self.wordCount = wordCount
     }
     
+    /// 同步的纯函数构造器——**调用方必须保证已经在 entry.managedObjectContext 的队列里**。
+    /// 把 CoreData 字段拷成值类型时把新加的 themes/embedding/wordCount 一并带上，
+    /// 避免经 DiaryEntryData 再写回 CoreData 时用默认值清零这三列。
+    static func from(fetchedEntry: DiaryEntry) -> DiaryEntryData {
+        DiaryEntryData(
+            id: fetchedEntry.id ?? UUID(),
+            date: fetchedEntry.date ?? Date(),
+            text: fetchedEntry.text ?? "",
+            moodValue: fetchedEntry.moodValue,
+            summary: fetchedEntry.summary ?? "",
+            themes: fetchedEntry.themeArray,
+            embedding: fetchedEntry.embeddingVector,
+            wordCount: Int(fetchedEntry.wordCount)
+        )
+    }
+
     /// 从Core Data DiaryEntry创建安全的数据副本 (async版本，推荐使用)
     static func from(_ entry: DiaryEntry) async -> DiaryEntryData? {
         guard let context = entry.managedObjectContext else { return nil }
@@ -26,17 +56,15 @@ struct DiaryEntryData {
 
         return await context.perform {
             do {
-                let fetchedEntry = try context.existingObject(with: objectID) as! DiaryEntry
-
-                return DiaryEntryData(
-                    id: fetchedEntry.id ?? UUID(),
-                    date: fetchedEntry.date ?? Date(),
-                    text: fetchedEntry.text ?? "",
-                    moodValue: fetchedEntry.moodValue,
-                    summary: fetchedEntry.summary ?? ""
-                )
+                // `as?` 而不是 `as!`：即使 existingObject 成功取到对象，类型漂移 / 测试桩 / CloudKit
+                // 同步过来的残留实体都可能不是 DiaryEntry，force cast 会触发 runtime trap 整个 App 崩。
+                guard let fetchedEntry = try context.existingObject(with: objectID) as? DiaryEntry else {
+                    Log.error("[DiaryEntryData] objectID 不是 DiaryEntry: \(objectID)", category: .persistence)
+                    return nil
+                }
+                return DiaryEntryData.from(fetchedEntry: fetchedEntry)
             } catch {
-                print("[DiaryEntryData] 创建数据副本失败: \(error)")
+                Log.error("[DiaryEntryData] 创建数据副本失败: \(error)", category: .persistence)
                 return nil
             }
         }
@@ -46,20 +74,12 @@ struct DiaryEntryData {
     @MainActor
     static func fromSync(_ entry: DiaryEntry) -> DiaryEntryData? {
         guard entry.managedObjectContext != nil else { return nil }
-
-        // 在主线程直接访问 viewContext 是安全的
-        return DiaryEntryData(
-            id: entry.id ?? UUID(),
-            date: entry.date ?? Date(),
-            text: entry.text ?? "",
-            moodValue: entry.moodValue,
-            summary: entry.summary ?? ""
-        )
+        return DiaryEntryData.from(fetchedEntry: entry)
     }
     
     /// 从一组DiaryEntry安全地创建数据副本，使用独立的后台上下文 (async版本，推荐使用)
     static func safelyExtractData(from entries: [DiaryEntry], dateRange: ClosedRange<Date>) async -> [DiaryEntryData] {
-        print("[DiaryEntryData] 开始安全提取数据，条目数量: \(entries.count)")
+        Log.info("[DiaryEntryData] 开始安全提取数据，条目数量: \(entries.count)", category: .persistence)
 
         // 获取所有objectID，这些在不同上下文间是安全的
         let objectIDs = entries.map { $0.objectID }
@@ -73,7 +93,11 @@ struct DiaryEntryData {
 
                 for objectID in objectIDs {
                     do {
-                        let entry = try context.existingObject(with: objectID) as! DiaryEntry
+                        // 同上：as? + guard 保护 force-cast 崩溃面
+                        guard let entry = try context.existingObject(with: objectID) as? DiaryEntry else {
+                            Log.error("[DiaryEntryData] 跳过非 DiaryEntry 条目: \(objectID)", category: .persistence)
+                            continue
+                        }
 
                         // 提取数据
                         let entryDate = entry.date ?? Date()
@@ -81,23 +105,17 @@ struct DiaryEntryData {
                         // 检查日期范围
                         guard dateRange.contains(entryDate) else { continue }
 
-                        let data = DiaryEntryData(
-                            id: entry.id ?? UUID(),
-                            date: entryDate,
-                            text: entry.text ?? "",
-                            moodValue: entry.moodValue,
-                            summary: entry.summary ?? ""
-                        )
+                        let data = DiaryEntryData.from(fetchedEntry: entry)
 
                         safeData.append(data)
-                        print("[DiaryEntryData] 成功提取条目: \(data.id), 文本长度: \(data.text.count)")
+                        Log.info("[DiaryEntryData] 成功提取条目: \(data.id), 文本长度: \(data.text.count)", category: .persistence)
                     } catch {
-                        print("[DiaryEntryData] 跳过无法访问的条目: \(error)")
+                        Log.error("[DiaryEntryData] 跳过无法访问的条目: \(error)", category: .persistence)
                         continue
                     }
                 }
 
-                print("[DiaryEntryData] 安全提取完成，有效条目数量: \(safeData.count)")
+                Log.info("[DiaryEntryData] 安全提取完成，有效条目数量: \(safeData.count)", category: .persistence)
                 continuation.resume(returning: safeData)
             }
         }
@@ -106,7 +124,7 @@ struct DiaryEntryData {
     /// 从一组DiaryEntry安全地创建数据副本 (同步版本，已废弃)
     @available(*, deprecated, message: "Use async version instead to avoid blocking main thread")
     static func safelyExtractDataSync(from entries: [DiaryEntry], dateRange: ClosedRange<Date>) -> [DiaryEntryData] {
-        print("[DiaryEntryData] 开始安全提取数据（同步），条目数量: \(entries.count)")
+        Log.info("[DiaryEntryData] 开始安全提取数据（同步），条目数量: \(entries.count)", category: .persistence)
 
         // 获取所有objectID
         let objectIDs = entries.map { $0.objectID }
@@ -121,18 +139,14 @@ struct DiaryEntryData {
         backgroundContext.performAndWait {
             for objectID in objectIDs {
                 do {
-                    let entry = try backgroundContext.existingObject(with: objectID) as! DiaryEntry
+                    guard let entry = try backgroundContext.existingObject(with: objectID) as? DiaryEntry else {
+                        continue
+                    }
                     let entryDate = entry.date ?? Date()
 
                     guard dateRange.contains(entryDate) else { continue }
 
-                    let data = DiaryEntryData(
-                        id: entry.id ?? UUID(),
-                        date: entryDate,
-                        text: entry.text ?? "",
-                        moodValue: entry.moodValue,
-                        summary: entry.summary ?? ""
-                    )
+                    let data = DiaryEntryData.from(fetchedEntry: entry)
 
                     safeData.append(data)
                 } catch {

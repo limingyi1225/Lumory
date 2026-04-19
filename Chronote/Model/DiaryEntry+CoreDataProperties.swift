@@ -15,21 +15,26 @@ extension DiaryEntry {
     @NSManaged public var audioFileName: String?
     @NSManaged public var imageFileNames: String?
     @NSManaged public var imagesData: Data?
+
+    // AI × 统计 pipeline：主题标签（CSV）、语义向量、字数
+    @NSManaged public var themes: String?
+    @NSManaged public var embedding: Data?
+    @NSManaged public var wordCount: Int32
     
     // content属性已在DiaryEntry+Extensions.swift中定义，这里不重复定义
     
     /// 返回音频文件完整 URL（若存在）
     func audioURL() -> URL? {
         guard let fileName = audioFileName else { return nil }
-        
+
         // Try iCloud location first
         if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-            let audioURL = iCloudURL.appendingPathComponent("Documents/LumoryAudio").appendingPathComponent(fileName)
-            if FileManager.default.fileExists(atPath: audioURL.path) {
-                return audioURL
+            let audio = iCloudURL.appendingPathComponent("Documents/LumoryAudio").appendingPathComponent(fileName)
+            if FileManager.default.fileExists(atPath: audio.path) {
+                return audio
             }
         }
-        
+
         // Try local with subdirectory
         let localURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("LumoryAudio")
@@ -37,16 +42,18 @@ extension DiaryEntry {
         if FileManager.default.fileExists(atPath: localURL.path) {
             return localURL
         }
-        
+
         // Try old location for backward compatibility
         let oldURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(fileName)
         if FileManager.default.fileExists(atPath: oldURL.path) {
-            // Migrate to new location
+            // 触发迁移（异步，不阻塞），直接返回老位置的 URL 让当前调用继续用。
+            // 原实现返回 `audioURL()`（递归）——如果迁移后 iCloud 文件尚未下载完成 或
+            // 迁移失败，三条路径都找不到会再次命中老路径，触发新一轮迁移 → 栈溢出。
             migrateAudioToiCloud(fileName: fileName, oldURL: oldURL)
-            return audioURL() // Recursive call to get new location
+            return oldURL
         }
-        
+
         return nil
     }
     
@@ -62,7 +69,7 @@ extension DiaryEntry {
             
             let newURL = audioDir.appendingPathComponent(fileName)
             try? audioData.write(to: newURL)
-            print("[DiaryEntry] Migrated audio \(fileName) to iCloud")
+            Log.info("[DiaryEntry] Migrated audio \(fileName) to iCloud", category: .persistence)
             
             // Delete from old location
             try? FileManager.default.removeItem(at: oldURL)

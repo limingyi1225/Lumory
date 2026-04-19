@@ -83,10 +83,10 @@ class DiaryExportService {
         
         do {
             try content.write(to: fileURL, atomically: true, encoding: .utf8)
-            print("[DiaryExportService] Export file created at: \(fileURL.path)")
+            Log.info("[DiaryExportService] Export file created at: \(fileURL.path)", category: .persistence)
             return fileURL
         } catch {
-            print("[DiaryExportService] Failed to create export file: \(error)")
+            Log.error("[DiaryExportService] Failed to create export file: \(error)", category: .persistence)
             return nil
         }
     }

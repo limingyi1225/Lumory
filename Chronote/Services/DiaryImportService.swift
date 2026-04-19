@@ -7,7 +7,7 @@ struct DiaryImportService {
         let text: String
     }
 
-    /// 调用 OpenRouter qwen/qwen-turbo 模型解析日记，返回 (Date, String) 数组。若解析失败则返回空数组。
+    /// 调用 OpenAI gpt-5.4 模型解析日记，返回 (Date, String) 数组。若解析失败则返回空数组。
     /// - Parameters:
     ///   - rawText: 用户粘贴的整段日记文本
     /// - Returns: [(date, text)]
@@ -31,7 +31,7 @@ struct DiaryImportService {
 请按以下步骤解析文本：
 
 1. 提取文本中的日期和对应的日记内容。
-2. 如果日记没有标注年份且日期晚于今天，则为这篇日记分配的年份是2024年。如日记没有标注年份，且日期早于或就是今天，则为这篇日记分配的年份是2025年。
+2. 如果日记没有标注年份且日期晚于今天，则为这篇日记分配的年份是\(year - 1)年。如日记没有标注年份，且日期早于或就是今天，则为这篇日记分配的年份是\(year)年。
 3. 按照上述条件构建JSON数组，其中每个元素包含"date"和"text"字段。
 
 # Output Format
@@ -68,24 +68,29 @@ struct DiaryImportService {
 # Notes
 
 - 确保输出的日期和时间信息符合ISO 8601标准。
-- 确保按照上述步骤给日记分配年份（\(todayStr)）。
+- 确保按照上述步骤给日记分配年份（当前日期：\(todayStr)）。
 <<<\(rawText)>>>
 """
         let messages: [[String: String]] = [
             ["role": "user", "content": prompt]
         ]
         let requestDict: [String: Any] = [
-            "model": "qwen/qwen-turbo",
+            "model": "gpt-5.4",
             "messages": messages,
-            "max_tokens": 16384,
-            "temperature": 0.0
+            "max_completion_tokens": 16384,  // gpt-5.4 使用 max_completion_tokens 而不是 max_tokens
+            "temperature": 0.0,
+            "reasoning_effort": "low"
         ]
         guard let bodyData = try? JSONSerialization.data(withJSONObject: requestDict) else { return [] }
 
-        var request = URLRequest(url: URL(string: "https://openrouter.ai/api/v1/chat/completions")!)
+        guard let importURL = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions") else {
+            Log.error("[DiaryImportService] Invalid backend URL", category: .persistence)
+            return []
+        }
+        var request = URLRequest(url: importURL)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(AppSecrets.openAIKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
         request.timeoutInterval = 60.0 // 60 second timeout for large imports
         request.httpBody = bodyData
 
@@ -95,12 +100,12 @@ struct DiaryImportService {
                 try await URLSession.sslTolerantSession.data(for: request)
             }
             guard let http = response as? HTTPURLResponse else {
-                print("[DiaryImportService] Non-HTTP response: \(response)")
+                Log.info("[DiaryImportService] Non-HTTP response: \(response)", category: .persistence)
                 return []
             }
             guard (200...299).contains(http.statusCode) else {
                 let bodyStr = String(decoding: data, as: UTF8.self)
-                print("[DiaryImportService] Bad status code: \(http.statusCode), body: \(bodyStr)")
+                Log.info("[DiaryImportService] Bad status code: \(http.statusCode), body: \(bodyStr)", category: .persistence)
                 return []
             }
             struct Response: Decodable {
@@ -109,10 +114,12 @@ struct DiaryImportService {
             }
             let resp = try JSONDecoder().decode(Response.self, from: data)
             guard let content = resp.choices.first?.message.content else {
-                print("[DiaryImportService] No content in response choices")
+                Log.info("[DiaryImportService] No content in response choices", category: .persistence)
                 return []
             }
-            print("[DiaryImportService] raw content: \(content)")
+            // 以前 log 全文 AI 回来的解析 content（里面是用户日记原文）。用户输入可能被
+             // sysdiagnose / Console.app 抽走，是隐私泄漏点。只 log 长度给 debug 用就够了。
+            Log.info("[DiaryImportService] raw content length: \(content.count) chars", category: .persistence)
             guard let startIndex = content.firstIndex(of: "["), let endIndex = content.lastIndex(of: "]") else { return [] }
             let jsonString = String(content[startIndex...endIndex])
             guard let jsonData2 = jsonString.data(using: String.Encoding.utf8), let entries = try? JSONDecoder().decode([ParsedEntry].self, from: jsonData2) else { return [] }
@@ -126,7 +133,7 @@ struct DiaryImportService {
             }
             return results
         } catch {
-            print("[DiaryImportService] Error: \(error)")
+            Log.error("[DiaryImportService] Error: \(error)", category: .persistence)
             return []
         }
     }

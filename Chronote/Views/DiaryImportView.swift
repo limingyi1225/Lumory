@@ -72,7 +72,7 @@ struct DiaryImportView: View {
                         startImport()
                     }
                     .disabled(pastedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || importService.isImporting)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                 }
             }
             .padding()

@@ -95,7 +95,7 @@ struct DiaryExportView: View {
                             Text(NSLocalizedString("导出", comment: "Export"))
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
                     .disabled(entries.isEmpty || isExporting)
                 }
             }

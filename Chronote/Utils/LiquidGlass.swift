@@ -5,18 +5,23 @@ import SwiftUI
 extension View {
     /// iOS 26 Liquid Glass card background. Used for input container and
     /// timeline cards. Optional `tint` for mood-aware surfaces.
+    /// Set `interactive: true` only for tap-target cards (list rows, CTA cards)
+    /// — Apple's guidance reserves `.interactive()` for elements that respond
+    /// to touch/pointer.
     func liquidGlassCard(
         cornerRadius: CGFloat = 16,
         tint: Color? = nil,
-        tintStrength: Double = 0.16
+        tintStrength: Double = 0.16,
+        interactive: Bool = false
     ) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        let style: Glass = {
-            if let tint {
-                return .regular.tint(tint.opacity(tintStrength))
-            }
-            return .regular
-        }()
+        var style: Glass = .regular
+        if let tint {
+            style = style.tint(tint.opacity(tintStrength))
+        }
+        if interactive {
+            style = style.interactive()
+        }
         return self.glassEffect(style, in: shape)
     }
 

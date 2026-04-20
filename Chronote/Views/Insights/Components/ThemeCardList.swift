@@ -107,7 +107,7 @@ struct ThemeCard: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(minHeight: 130)
-        .liquidGlassCard(cornerRadius: 16, tint: Color.moodSpectrum(value: theme.avgMood), tintStrength: 0.18)
+        .liquidGlassCard(cornerRadius: 16, tint: Color.moodSpectrum(value: theme.avgMood), tintStrength: 0.18, interactive: true)
         .shadow(color: Color.primary.opacity(0.04), radius: 6, y: 2)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(

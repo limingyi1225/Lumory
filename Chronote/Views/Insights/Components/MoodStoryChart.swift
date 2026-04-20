@@ -182,8 +182,7 @@ struct MoodStoryChart: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.white.opacity(0.2)))
+        .liquidGlassCapsule()
     }
 
     private var lineGradient: LinearGradient {

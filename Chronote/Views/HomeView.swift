@@ -1517,7 +1517,7 @@ struct HomeView: View {
         }
         .padding(.init(top: 12, leading: 18, bottom: 12, trailing: 14))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlassCard(cornerRadius: cornerRadius)
+        .liquidGlassCard(cornerRadius: cornerRadius, interactive: true)
         .moodAccentBar(entry.moodColor, cornerRadius: cornerRadius)
         .accessibilityElement(children: .combine)
     }
@@ -2306,7 +2306,7 @@ struct DiaryPreviewView: View {
             }
             .padding(.init(top: 16, leading: 20, bottom: 14, trailing: 16))
             .frame(width: 300, height: 400, alignment: .topLeading)
-            .liquidGlassCard(cornerRadius: cornerRadius)
+            .liquidGlassCard(cornerRadius: cornerRadius, interactive: true)
             .moodAccentBar(entry.moodColor, cornerRadius: cornerRadius)
             .contentShape(Rectangle())
             .onTapGesture { onTap() }

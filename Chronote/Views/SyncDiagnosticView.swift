@@ -125,17 +125,17 @@ struct SyncDiagnosticView: View {
                         Button("Show Full Report") {
                             showingFullReport = true
                         }
-                        .buttonStyle(.bordered)
-                        
+                        .buttonStyle(.glass)
+
                         Spacer()
-                        
+
                         Button("Done") {
                             dismiss()
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                     }
                     .padding()
-                    
+
                 } else {
                     // No result
                     VStack(spacing: 16) {
@@ -153,7 +153,7 @@ struct SyncDiagnosticView: View {
                         Button("Close") {
                             dismiss()
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                     }
                 }
             }

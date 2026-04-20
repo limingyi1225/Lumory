@@ -145,7 +145,7 @@ struct AskPastView: View {
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .liquidGlassCard(cornerRadius: 14)
+                        .liquidGlassCard(cornerRadius: 14, interactive: true)
                     }
                     .buttonStyle(PressableScaleButtonStyle())
                 }

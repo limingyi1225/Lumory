@@ -205,7 +205,7 @@ struct InsightsView: View {
             }
             .padding(16)
             .foregroundStyle(Color.primary)
-            .liquidGlassCard(cornerRadius: 18, tint: Color.accentColor, tintStrength: 0.1)
+            .liquidGlassCard(cornerRadius: 18, tint: Color.accentColor, tintStrength: 0.1, interactive: true)
             .shadow(color: Color.accentColor.opacity(0.15), radius: 10, y: 4)
         }
         .buttonStyle(PressableScaleButtonStyle())

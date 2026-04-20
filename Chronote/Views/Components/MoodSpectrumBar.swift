@@ -44,7 +44,7 @@ struct MoodSpectrumBar: View {
                     breathingGlow
                 }
             }
-            .glassEffect(.regular, in: Capsule())
+            .liquidGlassCapsule()
         }
         .frame(height: barHeight)
         .onAppear {
@@ -319,7 +319,7 @@ struct EditableMoodSpectrumBar: View {
                     .animation(.spring(response: 0.3, dampingFraction: 0.7), value: moodValue)
             }
             .contentShape(Capsule())
-            .glassEffect(.regular, in: Capsule())
+            .liquidGlassCapsule(interactive: true)
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in

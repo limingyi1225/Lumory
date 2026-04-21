@@ -13,6 +13,10 @@ struct DiaryDetailView: View {
     @ObservedObject var entry: DiaryEntry
     var startInEditMode: Bool = false
     var showUnifiedToolbar: Bool = false
+    /// iPad split-view 专用回调——detail 列的 `dismiss()` 不能从 sidebar 的 selection 里把
+    /// 已删除条目摘掉,需要父视图显式 nil 出 selectedEntry,否则详情页会继续渲染一个
+    /// faulted entry。iPhone push 路径不需要,保持默认 nil。
+    var onEntryDeleted: (() -> Void)? = nil
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
     @State private var showDeleteAlert = false
@@ -116,6 +120,11 @@ struct DiaryDetailView: View {
                 // Entry has been deleted, just show a placeholder
                 Text(NSLocalizedString("正在返回...", comment: "Returning message"))
                     .onAppear {
+                        // iPad split-view:告诉父视图清掉 selectedEntry(sidebar 不会自动清理);
+                        // iPhone push:dismiss() 弹栈回到列表。两条路径并存不会冲突——
+                        // iPad 路径 onEntryDeleted != nil,调用后 selectedEntry 变 nil,
+                        // 整个 DiaryDetailView 被拆掉,dismiss() 再执行也是无操作。
+                        onEntryDeleted?()
                         dismiss()
                     }
             } else {
@@ -137,6 +146,9 @@ struct DiaryDetailView: View {
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 18)
+                    // iPad 宽屏下正文超过 720pt 后行长读起来累,居中限宽。
+                    // iPhone / iPad 窄态分屏保持原有全宽布局。
+                    .readableContentFrame()
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .background(detailBackground.ignoresSafeArea())
@@ -477,8 +489,10 @@ struct DiaryDetailView: View {
                 }
                 // graphical DatePicker(date+time)需要 ~500pt 才能完整放下日历 + 时间转盘,
                 // medium detent 在 iPhone Pro 上不够,会把时间挡在底下。固定 560pt 兜底。
+                // iPad form sheet 自动忽略 detents,改用 adaptiveSheetFrame 撑出最小尺寸。
                 .presentationDetents([.height(560), .large])
                 .presentationDragIndicator(.visible)
+                .adaptiveSheetFrame(minWidth: 480, minHeight: 600)
             }
             .accessibilityLabel(NSLocalizedString("日记时间", comment: "Entry date picker a11y"))
             .accessibilityHint(isEditing ? NSLocalizedString("点击修改时间", comment: "Tap to edit date") : "")

@@ -69,10 +69,12 @@ struct SettingsView: View {
                 DiaryImportView()
                     .environmentObject(importService)
                     .environment(\.managedObjectContext, viewContext)
+                    .adaptiveSheetFrame()
             }
             .sheet(isPresented: $showExportSheet) {
                 DiaryExportView()
                     .environment(\.managedObjectContext, viewContext)
+                    .adaptiveSheetFrame()
             }
             .alert(NSLocalizedString("删除完成", comment: "Deletion complete"), isPresented: $showDeleteCompleteAlert) {
                 Button(NSLocalizedString("好", comment: "OK")) { isSettingsOpen = false }
@@ -368,6 +370,7 @@ private struct AdvancedSettingsView: View {
         #endif
         .sheet(isPresented: $showDiagnosticSheet) {
             SyncDiagnosticView(result: diagnosticResult)
+                .adaptiveSheetFrame()
         }
         .alert(NSLocalizedString("数据库修复", comment: "Database repair alert title"), isPresented: $showDatabaseRecoveryAlert) {
             Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }

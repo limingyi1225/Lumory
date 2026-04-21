@@ -118,15 +118,18 @@ struct InsightsView: View {
                     // "回顾"里用户阅读长文 + 点引用 + 在输入框打字，下滑手势常被误触当做
                     // 页面滚动或失焦，不小心把整个对话关掉就丢了思路。强制必须点"关闭"按钮退出。
                     .interactiveDismissDisabled(true)
+                    .adaptiveSheetFrame(minWidth: 640, minHeight: 720)
             }
             .sheet(item: $themeFilter) { theme in
                 ThemeFilteredEntriesView(theme: theme)
                     .environment(\.managedObjectContext, viewContext)
+                    .adaptiveSheetFrame(minWidth: 560, minHeight: 680)
             }
             .sheet(item: $selectedPoint) { point in
                 PointDetailSheet(point: point)
                     .environment(\.managedObjectContext, viewContext)
                     .presentationDetents([.medium, .large])
+                    .adaptiveSheetFrame(minWidth: 520, minHeight: 520)
             }
         }
     }

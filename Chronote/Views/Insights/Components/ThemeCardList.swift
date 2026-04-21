@@ -10,6 +10,11 @@ struct ThemeCardList: View {
     let isLoading: Bool
     let onSelect: (InsightsEngine.Theme) -> Void
 
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+
+    /// iPad 宽屏下卡片拉到 220pt,视觉上更舒展;iPhone / 紧凑态保持原来的 180pt。
+    private var cardWidth: CGFloat { hSizeClass == .regular ? 220 : 180 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -42,7 +47,7 @@ struct ThemeCardList: View {
                                     onSelect(theme)
                                 } label: {
                                     ThemeCard(theme: theme)
-                                        .frame(width: 180)
+                                        .frame(width: cardWidth)
                                         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                                 }
                                 .buttonStyle(PressableScaleButtonStyle())
@@ -60,7 +65,7 @@ struct ThemeCardList: View {
             ForEach(0..<3, id: \.self) { _ in
                 RoundedRectangle(cornerRadius: 16)
                     .fill(Color.secondary.opacity(0.06))
-                    .frame(width: 180, height: 130)
+                    .frame(width: cardWidth, height: 130)
             }
         }
         .padding(.horizontal, 16)

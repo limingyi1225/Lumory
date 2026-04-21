@@ -410,7 +410,10 @@ struct HomeView: View {
     @State private var selectedImages: [Data] = []
     private let cal = Calendar.current
     @Environment(\.colorScheme) private var colorScheme
-    
+    /// iPad 宽屏(全屏 / 2-up 分屏)会报 .regular —— 切到 NavigationSplitView 双栏布局。
+    /// iPad 1/3 窄态分屏报 .compact,自动退回 NavigationStack,和 iPhone 行为一致。
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+
     // 简化的语言检测
     private static var defaultAppLanguage: String {
         let currentLocale = Locale.current.identifier
@@ -455,19 +458,12 @@ struct HomeView: View {
     @State private var databaseRecreationObserver: NSObjectProtocol?
 
     var body: some View {
-        iOSHomeView
-    }
-    
-    // 主体:一个 NavigationStack + 系统 .sheet 承载设置。
-    // 旧的自绘抽屉(ZStack + drag offset + mask 层)整个去掉,改成 iOS 26 标准 sheet,
-    // 自动拿到玻璃过渡 / 多 detent / 系统手势下滑关闭。toolbar 上的设置钮触发。
-    @ViewBuilder
-    private var iOSHomeView: some View {
-        mainContentView
+        rootContainer
             .sheet(isPresented: $isSettingsOpen) {
                 SettingsView(isSettingsOpen: $isSettingsOpen)
                     .environmentObject(importService)
                     .environment(\.managedObjectContext, viewContext)
+                    .adaptiveSheetFrame()
             }
             .onChange(of: importService.isImporting) { _, isImporting in
                 if isImporting {
@@ -499,77 +495,162 @@ struct HomeView: View {
                 Text(NSLocalizedString("确定要删除这篇日记吗？此操作无法撤销。", comment: "Delete confirmation"))
             }
     }
-    
+
+    /// 根据水平尺寸类选路径:
+    ///  - compact(iPhone / iPad 窄态分屏) → 传统 NavigationStack,导航 push DiaryDetailView
+    ///  - regular(iPad 全屏 / 2-up) → NavigationSplitView 双栏,detail 列常驻
+    @ViewBuilder
+    private var rootContainer: some View {
+        if hSizeClass == .regular {
+            iPadSplitView
+        } else {
+            mainContentView
+        }
+    }
+
+    // 主体:一个 NavigationStack + 系统 .sheet 承载设置。
+    // 旧的自绘抽屉(ZStack + drag offset + mask 层)整个去掉,改成 iOS 26 标准 sheet,
+    // 自动拿到玻璃过渡 / 多 detent / 系统手势下滑关闭。toolbar 上的设置钮触发。
     @ViewBuilder
     private var mainContentView: some View {
             NavigationStack {
-                VStack(spacing: 0) {
-                    // 导入进度条
-                    importProgressView
+                sidebarInner
+                    .navigationDestination(item: $selectedEntry) { entry in
+                        DiaryDetailView(entry: entry, startInEditMode: shouldStartEditing)
+                            .onDisappear {
+                                shouldStartEditing = false
+                            }
+                    }
+            }
+    }
 
-                    // 主列表：搜索中显示结果，否则显示常规时间线
-                    // `.searchable` 把搜索字段托管到 NavigationStack 顶部；query 非空时切到结果列表。
-                    if searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
-                        mainListContent
-                    } else {
-                        searchResultsList
-                    }
-                }
-                .navigationTitle("")
-                #if canImport(UIKit)
-                .toolbarTitleDisplayMode(.inline)
-                #endif
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button {
-                            #if canImport(UIKit)
-                            HapticManager.shared.click()
-                            #endif
-                            isSettingsOpen = true
-                        } label: {
-                            // 系统 SF Symbol "line.3.horizontal" —— iOS 26 toolbar 自动适配
-                            // 玻璃 / 描边 / 触控反馈,无需自绘 RoundedRectangle 双线。
-                            Image(systemName: "line.3.horizontal")
-                        }
-                        .accessibilityLabel(NSLocalizedString("设置", comment: "Settings"))
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            #if canImport(UIKit)
-                            HapticManager.shared.click()
-                            #endif
-                            isInsightsPresented = true
-                        } label: {
-                            Image(systemName: "chart.xyaxis.line")
-                        }
-                        .accessibilityLabel(NSLocalizedString("洞察", comment: "Insights"))
-                    }
-                }
-                .searchable(
-                    text: $searchQuery,
-                    placement: .toolbar,
-                    prompt: NSLocalizedString("搜索日记", comment: "Search field prompt")
+    /// iPad 宽屏布局:左侧 sidebar 放时间线 + 输入框(复用 sidebarInner),右侧 detail
+    /// 显示当前选中的日记详情或占位欢迎页。点击条目时 `selectedEntry` 变化直接驱动 detail 列刷新,
+    /// sidebar 的 NavigationStack 不做 push —— 所以这里刻意去掉了 navigationDestination。
+    @ViewBuilder
+    private var iPadSplitView: some View {
+        NavigationSplitView {
+            NavigationStack {
+                sidebarInner
+            }
+            .navigationSplitViewColumnWidth(
+                min: AdaptiveLayout.sidebarMinWidth,
+                ideal: AdaptiveLayout.sidebarIdealWidth,
+                max: AdaptiveLayout.sidebarMaxWidth
+            )
+        } detail: {
+            iPadDetailPane
+        }
+        // 不显式指定 style —— 系统默认(automatic)在 iPad 横屏两栏、竖屏 sidebar 覆盖,
+        // 和 Mail / Notes 行为一致,用户直觉负担最小。
+    }
+
+    @ViewBuilder
+    private var iPadDetailPane: some View {
+        if let entry = selectedEntry {
+            NavigationStack {
+                DiaryDetailView(
+                    entry: entry,
+                    startInEditMode: shouldStartEditing,
+                    // 详情页里按删除后,sidebar 不会自动清选中。在这里显式清掉,detail 列切回欢迎页。
+                    onEntryDeleted: { selectedEntry = nil }
                 )
-                .onChange(of: searchQuery) { _, newValue in
-                    scheduleInlineSearch(for: newValue)
-                }
-                .navigationDestination(item: $selectedEntry) { entry in
-                    DiaryDetailView(entry: entry, startInEditMode: shouldStartEditing)
-                        .onDisappear {
-                            shouldStartEditing = false
-                        }
-                }
-                .sheet(isPresented: $isInsightsPresented) {
-                    InsightsView()
-                        .environment(\.managedObjectContext, viewContext)
-                }
-                .task {
-                    // FetchRequest 此时已经第一轮完成，把 hasLoadedOnce 置位
-                    // 让 empty state 从此时起才允许显示（避免冷启动闪一帧）。
-                    await MainActor.run { hasLoadedOnce = true }
-                    await loadContextPrompts()
+                .onDisappear {
+                    shouldStartEditing = false
                 }
             }
+            // 切换不同条目时强制重建 NavigationStack,避免 DiaryDetailView 在编辑态下
+            // 把上一条的未保存 buffer 带到新条目上。
+            .id(entry.objectID)
+        } else {
+            iPadWelcomeDetail
+        }
+    }
+
+    private var iPadWelcomeDetail: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "book.pages")
+                .font(.system(size: 56, weight: .light))
+                .foregroundStyle(.secondary.opacity(0.65))
+            VStack(spacing: 6) {
+                Text(NSLocalizedString("选一篇日记开始阅读", comment: "iPad empty detail title"))
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.primary.opacity(0.85))
+                Text(NSLocalizedString("或在左侧写下此刻的心情", comment: "iPad empty detail subtitle"))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemGroupedBackground).opacity(0.4).ignoresSafeArea())
+    }
+
+    /// sidebar 的核心内容,两种布局(NavigationStack / NavigationSplitView sidebar)共用。
+    /// 抽出来是为了把 navigationDestination 只挂在 iPhone 路径上——iPad 走 selectedEntry
+    /// 直接驱动 detail 列,不经过 push。
+    @ViewBuilder
+    private var sidebarInner: some View {
+        VStack(spacing: 0) {
+            // 导入进度条
+            importProgressView
+
+            // 主列表：搜索中显示结果，否则显示常规时间线
+            // `.searchable` 把搜索字段托管到 NavigationStack 顶部；query 非空时切到结果列表。
+            if searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+                mainListContent
+            } else {
+                searchResultsList
+            }
+        }
+        .navigationTitle("")
+        #if canImport(UIKit)
+        .toolbarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    #if canImport(UIKit)
+                    HapticManager.shared.click()
+                    #endif
+                    isSettingsOpen = true
+                } label: {
+                    // 系统 SF Symbol "line.3.horizontal" —— iOS 26 toolbar 自动适配
+                    // 玻璃 / 描边 / 触控反馈,无需自绘 RoundedRectangle 双线。
+                    Image(systemName: "line.3.horizontal")
+                }
+                .accessibilityLabel(NSLocalizedString("设置", comment: "Settings"))
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    #if canImport(UIKit)
+                    HapticManager.shared.click()
+                    #endif
+                    isInsightsPresented = true
+                } label: {
+                    Image(systemName: "chart.xyaxis.line")
+                }
+                .accessibilityLabel(NSLocalizedString("洞察", comment: "Insights"))
+            }
+        }
+        .searchable(
+            text: $searchQuery,
+            placement: .toolbar,
+            prompt: NSLocalizedString("搜索日记", comment: "Search field prompt")
+        )
+        .onChange(of: searchQuery) { _, newValue in
+            scheduleInlineSearch(for: newValue)
+        }
+        .sheet(isPresented: $isInsightsPresented) {
+            InsightsView()
+                .environment(\.managedObjectContext, viewContext)
+                .adaptiveSheetFrame(minWidth: 640, minHeight: 720)
+        }
+        .task {
+            // FetchRequest 此时已经第一轮完成，把 hasLoadedOnce 置位
+            // 让 empty state 从此时起才允许显示（避免冷启动闪一帧）。
+            await MainActor.run { hasLoadedOnce = true }
+            await loadContextPrompts()
+        }
     }
     
     @ViewBuilder

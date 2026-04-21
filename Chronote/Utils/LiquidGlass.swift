@@ -37,6 +37,22 @@ extension View {
         return self.glassEffect(style, in: Capsule())
     }
 
+    /// 圆形 glass(日历日期格、圆形 chip 用)。
+    func liquidGlassCircle(
+        tint: Color? = nil,
+        tintStrength: Double = 0.32,
+        interactive: Bool = false
+    ) -> some View {
+        var style: Glass = .regular
+        if let tint {
+            style = style.tint(tint.opacity(tintStrength))
+        }
+        if interactive {
+            style = style.interactive()
+        }
+        return self.glassEffect(style, in: Circle())
+    }
+
     /// Insights dashboard module card — consistent corner radius + subtle shadow.
     func insightsCard(cornerRadius: CGFloat = 18) -> some View {
         self.liquidGlassCard(cornerRadius: cornerRadius)

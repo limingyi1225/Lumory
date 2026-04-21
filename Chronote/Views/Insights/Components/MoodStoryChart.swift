@@ -108,18 +108,19 @@ struct MoodStoryChart: View {
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
 
             if let selectedPoint {
+                // 只画虚线 RuleMark + 把 annotation 挂在它顶上 —— 不再加大 PointMark,
+                // 那个 140-size 的点视觉像"光晕",用户嫌重。
                 RuleMark(x: .value("selected", selectedPoint.date))
-                    .foregroundStyle(.primary.opacity(0.4))
-                    .lineStyle(StrokeStyle(lineWidth: 1))
-                PointMark(
-                    x: .value("date", selectedPoint.date),
-                    y: .value("mood", selectedPoint.mood)
-                )
-                .symbolSize(160)
-                .foregroundStyle(Color.moodSpectrum(value: selectedPoint.mood))
-                .annotation(position: .top, alignment: .center, spacing: 4) {
-                    selectionTag(point: selectedPoint)
-                }
+                    .foregroundStyle(Color.moodSpectrum(value: selectedPoint.mood).opacity(0.35))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .annotation(
+                        position: .top,
+                        alignment: .center,
+                        spacing: 6,
+                        overflowResolution: .init(x: .fit(to: .chart), y: .disabled)
+                    ) {
+                        selectionTag(point: selectedPoint)
+                    }
             }
         }
         .chartYScale(domain: 0...1)
@@ -171,19 +172,74 @@ struct MoodStoryChart: View {
         return points.first(where: { $0.date == id })
     }
 
+    /// 选中点浮标:横向 pill,日期 + · + mood 色分数。
+    /// 玻璃不带 tint(避免和 .primary 文字抢对比度),mood 色只走分数 + 外阴影,
+    /// bucket 决定时间格式(日/周月/年月)。
     @ViewBuilder
     private func selectionTag(point: InsightsEngine.MoodPoint) -> some View {
-        VStack(spacing: 2) {
-            Text(Self.tagDateFormatter.string(from: point.date))
-                .font(.caption2.weight(.semibold))
+        let mood = Color.moodSpectrum(value: point.mood)
+        HStack(spacing: 8) {
+            Text(formattedTagDate(point.date))
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(mood)
+            Text("·")
+                .font(.footnote)
+                .foregroundStyle(mood.opacity(0.55))
             Text(String(format: "%d", Int(point.mood * 100)))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .font(.footnote.weight(.semibold).monospacedDigit())
+                .foregroundStyle(mood)
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
         .liquidGlassCapsule()
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            String(
+                format: NSLocalizedString("%@,情绪 %d 分", comment: "A11y selected mood point"),
+                formattedTagDate(point.date), Int(point.mood * 100)
+            )
+        )
     }
+
+    private func formattedTagDate(_ date: Date) -> String {
+        switch bucket {
+        case .day:
+            return Self.dayTagFormatter.string(from: date)
+        case .week:
+            // 周维度:显示该周的起止日期范围(eg. "Apr 7 – 13"),
+            // 不是 weekTagFormatter 的单天日期 —— 那个会让用户以为只选中了一天。
+            return Self.weekRangeString(from: date)
+        case .month:
+            return Self.monthTagFormatter.string(from: date)
+        }
+    }
+
+    /// 把一个落在某周内的日期格式化成 "Apr 7 – 13" / "4月7日–13日"。
+    private static func weekRangeString(from date: Date) -> String {
+        let cal = Calendar.current
+        guard let weekInterval = cal.dateInterval(of: .weekOfYear, for: date) else {
+            return weekTagFormatter.string(from: date)
+        }
+        let start = weekInterval.start
+        // .end 是下一周的开始,减 1 秒得到本周最后一天。
+        let end = weekInterval.end.addingTimeInterval(-1)
+        let startStr = weekTagFormatter.string(from: start)
+        // 同月只显示日号 —— 用 dayOnlyFormatter 走 setLocalizedDateFormatFromTemplate("d"),
+        // 这样 zh 会带"日"后缀("13日")、en 不会("13");不像之前 cal.component(.day) 给 raw int
+        // → zh 显示"4月7日 – 13"丢"日"。
+        let sameMonth = cal.component(.month, from: start) == cal.component(.month, from: end)
+        let endStr = sameMonth
+            ? dayOnlyFormatter.string(from: end)
+            : weekTagFormatter.string(from: end)
+        return "\(startStr) – \(endStr)"
+    }
+
+    /// 仅日号,locale-aware。zh-Hans → "13日";en → "13"。
+    private static let dayOnlyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("d")
+        return f
+    }()
 
     private var lineGradient: LinearGradient {
         // 按路径上的每个点采样，颜色跟随 mood 真实变化
@@ -279,9 +335,20 @@ struct MoodStoryChart: View {
         )
     }
 
-    private static let tagDateFormatter: DateFormatter = {
+    /// 三个 bucket 各自一份模板,setLocalizedDateFormatFromTemplate 自动适配中英语序。
+    private static let dayTagFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateStyle = .short
+        f.setLocalizedDateFormatFromTemplate("MMMd")
+        return f
+    }()
+    private static let weekTagFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("MMMd")
+        return f
+    }()
+    private static let monthTagFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("yMMM")
         return f
     }()
 }

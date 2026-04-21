@@ -8,6 +8,7 @@ Icon?
 # Xcode - build products & user state
 build/
 DerivedData/
+.deriveddata*/
 *.xcuserstate
 *.xcuserdatad
 xcuserdata/

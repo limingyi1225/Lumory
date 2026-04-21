@@ -9,7 +9,6 @@ final class OpenAIService: AIServiceProtocol {
     static let shared = OpenAIService(apiKey: "")
 
     private let apiKey: String
-    private let baseURL = URL(string: "https://api.openai.com/v1/chat/completions")!
     private let backendURL = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions")!
     private let jsonEncoder = JSONEncoder()
     private let jsonDecoder = JSONDecoder()
@@ -918,7 +917,13 @@ extension OpenAIService {
     ) -> SuggestionBundle? {
         guard let data = rawJSON.data(using: .utf8) else { return nil }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // 新 prompt 明确要求模型引用具体人名 / 事件 / 原文片段。一旦解析失败,rawJSON 的
+            // 前 200 字极大概率含 PII。生产构建只记长度与是否疑似空回复,DEBUG 保留原片段便于排查。
+            #if DEBUG
             Log.error("[composeSuggestions] JSON parse 失败，原始片段: \(rawJSON.prefix(200))", category: .ai)
+            #else
+            Log.error("[composeSuggestions] JSON parse 失败 (len=\(rawJSON.count), empty=\(rawJSON.isEmpty))", category: .ai)
+            #endif
             return nil
         }
 
@@ -993,81 +998,143 @@ extension OpenAIService {
 
         if zh {
             return """
-            你要为一个日记 App 写一批提问和输入框占位语，用户最讨厌的就是"关于 X 最近怎么样？"
-            这种模板化填空。请像一个真正读过他日记的朋友，写具体、带细节、能扎到心的句子。
+            你要为一个日记 App 写两类文案,都从用户的真实数据里取材,让人一眼觉得"这个 App 真的认识我"。
+            **A 类是用户自己的内心独白(主语"我")**;**B 类是 App 跟今天的用户搭话(主语"你")**。
+            视角不同,语气都要具体、有温度、扎到心。
 
-            ## 绝对规则
-            1. 每一条都必须**引用真实细节**——具体人名、事件、场景、金句片段——从我下面给的
-               数据里挑出来用。不能写成任何模板套公式。
-            2. 不要心灵鸡汤，不要 coach 话术，不要审判。语气像一个熟识的朋友。
-            3. 视角变化：问现在（"今天还在想 TA 吗？"）、问对比（"A 让你放松、B 让你紧张——
-               察觉了吗？"）、问反思（"你最开心那篇正好和 Abby 在一起——你注意到了吗？"）。
-            4. **禁止引用具体日期或相对时间锚点**。不要出现"1 月 10 号"、"三天前"、
-               "上周"、"两个月前"、"X 天前"这类表达——用户不会按日期记事，看到只会困惑。
-               用**事件/人物/主题**锚定，不用时间。
-            5. **不要用括号『』包起名字**——自然融入句子。
+            ## 通用规则(适用所有条目)
 
-            ## 输出格式（JSON，字段严格）
+            1. **每一条都引用真实细节**:从下面给的数据里挑具体人名、事件、场景、原文金句,
+               把它们直接写进句子里。
+
+            2. **用事件 / 人物 / 主题做时间锚**:像"和妈妈通话之后"、"在咖啡馆那次"、
+               "为了 X 项目焦虑那阵"。
+
+            3. **名字直接融进句子**,像写小说,不加括号或引号包装。
+
+            4. **语气走心、具体、有温度**,像翻日记翻到那一页时心里冒出来的那句话。
+
+            ## A. askPastPresets — 4 条问题(第一人称 · 用户内心独白)
+
+            - **主语只能是"我" / "我们" / "我自己"** —— 用户对自己说的话。
+            - 长度 15-40 字。
+            - **问号结尾**。
+            - 写给"想搞清楚关于自己的某件事"的用户 —— 让用户一眼想点进去翻自己的日记找答案。
+
+            ✅ "我和 Abby 之间最近的紧张感到底从哪来的？"
+            ✅ "为什么提到妈妈我总会变得安静？"
+            ✅ "我最开心的几篇为什么都和深夜散步有关？"
+
+            ## B. homePlaceholders — 5 条占位文字(第二人称 · App 跟今天的用户搭话)
+
+            - **主语只能是"你"** —— App 在跟用户对话,**不是**用户对自己说话。**不要出现"我"**。
+            - **聚焦"当下"和"最近"**:用户最近写过的人 / 事 / 状态,以一个朋友
+              的语气问问"现在怎么样了?""最近怎么应对的?""今天有没有...?"。
+            - **不要问用户具体某天的感受**(像"3 月 5 号那天怎么样")。聊"现在"和"最近"。
+            - **每条必须是完整句子**,问号或句号收尾,不能是半截观察。
+            - 长度 8-22 字。
+
+            ### homePlaceholders 示例(基于"用户最近经历了分手 + 工作焦虑"这种真实数据)
+
+            ✅ "分手之后你做了什么让自己好一些？"
+            ✅ "你最近还和她联系吗？想聊聊吗？"
+            ✅ "今天那场会议还在让你紧张吗？"
+            ✅ "有没有什么你想对今天的自己说的？"
+            ✅ "和爸爸通完电话,你想记下什么？"
+            ✅ "想聊聊昨晚没睡好的原因吗？"
+
+            ## 输出 JSON(字段严格)
+
             {
-              "askPastPresets": ["问题1?", "问题2?", "问题3?", "问题4?"],
-              "homePlaceholders": ["短句1", "短句2", "短句3", "短句4", "短句5"]
+              "askPastPresets": ["我...?", "我...?", "我...?", "我...?"],
+              "homePlaceholders": ["你...?", "你...?", "你...?", "你...?", "你...?"]
             }
 
-            - askPastPresets：4 条，每条 15-40 字，以问号结尾。这是在 Ask Past 界面给用户
-              "试试这些问题"用的——要让用户一眼就想点进去。
-            - homePlaceholders：5 条，每条 8-20 字，可以不是问号。这是首页输入框里的占位
-              文字——要让用户看了就想开始写。可以是陈述句、引子、观察。
-
             ## 用户数据
-            【最常出现的人/事/地】
+
+            【最常出现的人 / 事 / 地】
             \(themesBlock)
 
             【最近 30 天情绪均值】\(avgMoodInt)/100
             \(extremesBlock)
 
-            【连续写了 \(context.currentStreak) 天，一共 \(context.totalEntries) 篇】
+            【连续写了 \(context.currentStreak) 天,一共 \(context.totalEntries) 篇】
 
             【最近 3 篇原文片段】
             \(recentBlock)
             """
         } else {
             return """
-            You're writing prompts for a journaling app. The user hates mechanical template
-            substitutions like "How's X going?". Write like a close friend who's actually read
-            their diary — specific, concrete, emotionally precise.
+            Write two kinds of copy for a journaling app, both grounded in the user's real
+            data so every line feels like the app knows the user. **Type A is the user's
+            inner monologue (subject = "I")**; **Type B is the app speaking to the user
+            today (subject = "you")**. Different voices, same intimate tone — specific,
+            warm, emotionally precise.
 
-            ## Absolute rules
-            1. Every line must **reference real details** — names, events, scenes, quoted
-               phrases — drawn from the data below. No formulaic fill-in-the-blank.
-            2. No self-help clichés, no coaching language, no judgment. Voice = a close friend.
-            3. Vary perspective: present ("Still thinking about her today?"), contrast
-               ("A relaxes you, B tenses you — have you noticed?"), reflection ("Your happiest
-               entry happened to be with Abby — did you catch that?").
-            4. **Never reference specific dates or relative time anchors.** Don't say "on Jan 10",
-               "three days ago", "last week", "two months back", "X days ago", etc. People don't
-               remember their lives by date — it just confuses the reader. Anchor on
-               events/people/themes instead of time.
-            5. Do **not** wrap names in quotes or brackets — integrate them naturally.
+            ## Universal rules (apply to every entry)
 
-            ## Output format (strict JSON)
+            1. **Every line references real details**: pick specific names, events, scenes,
+               quoted phrases from the data below and weave them in.
+
+            2. **Anchor time with events / people / themes** — phrases like "after talking
+               to Mom", "at the coffee shop that time", "during the X project crunch".
+
+            3. **Integrate names naturally** into the sentence, like prose, no brackets
+               or quotes around them.
+
+            4. **Tone = concrete, warm, intimate** — like the line that flashes through
+               your head when you flip to that page.
+
+            ## A. askPastPresets — 4 questions (first-person, user's inner monologue)
+
+            - **Subject must be "I" / "my" / "we"** — the user speaking to themselves.
+            - 15-40 chars each.
+            - **End with a question mark.**
+            - Written for a user trying to figure out something about themselves — should
+              make them tap to dig through their diary for the answer.
+
+            ✅ "Why does talking about Mom always make me go quiet?"
+            ✅ "What is it about Abby that always relaxes me?"
+            ✅ "Why are my happiest entries all from late-night walks?"
+
+            ## B. homePlaceholders — 5 placeholder lines (second-person, APP speaks to user)
+
+            - **Subject must be "you" / "your"** — the app talks to the user,
+              **not** the user to themselves. **Do not use "I".**
+            - **Focus on the present and the recent**: pick people / events / states the
+              user has been writing about lately, then ask how it's going **right now**
+              or **how they've been coping recently**.
+            - **Don't ask about specific past dates** (no "on March 5"). Talk in
+              "now" / "lately" terms.
+            - **Each line must be a complete sentence**, ending in ? or . — no half-
+              finished observations.
+            - 4-14 words each.
+
+            ### homePlaceholders examples (assuming "user just went through a breakup + work stress")
+
+            ✅ "What's helped you feel a little better since the breakup?"
+            ✅ "Have you reached out to her at all recently?"
+            ✅ "Is that meeting still weighing on you today?"
+            ✅ "Anything you want to tell yourself today?"
+            ✅ "Want to write about how the call with Dad went?"
+            ✅ "What's keeping you up at night these days?"
+
+            ## Output JSON (strict)
+
             {
-              "askPastPresets": ["question 1?", "question 2?", "question 3?", "question 4?"],
-              "homePlaceholders": ["line 1", "line 2", "line 3", "line 4", "line 5"]
+              "askPastPresets": ["I ...?", "I ...?", "I ...?", "I ...?"],
+              "homePlaceholders": ["You ...?", "You ...?", "You ...?", "You ...?", "You ...?"]
             }
 
-            - askPastPresets: 4 entries, 10-25 words each, ending with a question mark.
-              Shown on Ask Past screen — should make the user want to tap.
-            - homePlaceholders: 5 entries, 4-14 words each, not necessarily questions.
-              Shown inside the home text editor as placeholder — should entice the user to write.
-
             ## User data
-            [Most recurring people/events/places]
+
+            [Most recurring people / events / places]
             \(themesBlock)
 
             [Past 30 days mood average] \(avgMoodInt)/100
             \(extremesBlock)
 
-            [Streak: \(context.currentStreak) days, total \(context.totalEntries) entries]
+            [Streak: \(context.currentStreak) days, \(context.totalEntries) entries total]
 
             [Last 3 entries]
             \(recentBlock)

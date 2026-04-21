@@ -26,7 +26,6 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,target/sch
     - [NetworkRetryHelper.swift](Chronote/Services/NetworkRetryHelper.swift) — SSE / HTTP 重试。
     - [AppSecrets.swift](Chronote/Services/AppSecrets.swift) — 后端 URL + `X-App-Secret` 共享密钥(⚠️ 目前硬编码,见下方"约定")。
     - `HapticManager.swift` — 触觉反馈统一入口。
-    - `SampleDataGenerator.swift` — Debug 用随机样本生成。
   - `Views/`
     - [HomeView.swift](Chronote/Views/HomeView.swift) + `HomeView/Components/`(`DiaryEntryRow` · `DiaryTextEditor` · `PhotosCollectionView`)
     - `Insights/` — `InsightsView` · `AskPastView` · `TimeRange`,组件见 `Insights/Components/`(`CalendarMonthModule`、`MoodStoryChart`、`WritingHeatmap`、`ThemeCardList`、`NarrativeReader`、`CitationEntryCard`、`CorrelationChipList`)
@@ -34,7 +33,6 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,target/sch
     - [DiaryDetailView.swift](Chronote/Views/DiaryDetailView.swift) · [SettingsView.swift](Chronote/Views/SettingsView.swift) · [SyncDiagnosticView.swift](Chronote/Views/SyncDiagnosticView.swift) · [DiaryImportView.swift](Chronote/Views/DiaryImportView.swift) · [DiaryExportView.swift](Chronote/Views/DiaryExportView.swift) · `ImageViewerView.swift`
     - `Components/` — `MoodSpectrumBar`、`MoodSendAnimation`、`MarkdownText`
     - `Shared/` — `EmptyStateView`、`Animations/BreathingDots`
-    - `DesignPreview/` — 设计预览
   - `Extensions/` — `Color+MoodSpectrum`、`Image+Compression`
   - `Utils/` — `AnimationConfig`、`LiquidGlass`、`LocalizationHelper`、`Log`、`PerformanceOptimization`
 - `ChronoteTests/` · `ChronoteUITests/` — 单测 / UI 测试
@@ -66,7 +64,7 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,target/sch
 
 iOS:
 - 构建 Debug:`xcodebuild -project Lumory.xcodeproj -scheme Lumory -configuration Debug build`
-- 跑测试:`xcodebuild test -project Lumory.xcodeproj -scheme Lumory -destination 'platform=iOS Simulator,name=iPhone 16'`
+- 跑测试:`xcodebuild test -project Lumory.xcodeproj -scheme Lumory -destination 'platform=iOS Simulator,name=iPhone 17'`
 - 清理:`./clean-build.sh`;彻底清(含 DerivedData / ModuleCache / .swiftpm):`./deep-clean.sh`
 - 本地 DB 损坏恢复:`./clean-corrupted-db.sh` 或 `Scripts/reset-database.sh`
 

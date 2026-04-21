@@ -29,23 +29,27 @@ struct ThemeCardList: View {
             } else if themes.isEmpty {
                 emptyState
             } else {
+                // 横向 ScrollView 跨越了外层 Insights 的 GlassEffectContainer 边界,
+                // 这里再套一层自己的 container,确保卡片之间的折射/模糊能正确合批并一次性渲染。
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(themes) { theme in
-                            Button {
-                                #if canImport(UIKit)
-                                HapticManager.shared.click()
-                                #endif
-                                onSelect(theme)
-                            } label: {
-                                ThemeCard(theme: theme)
-                                    .frame(width: 180)
-                                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    GlassEffectContainer(spacing: 12) {
+                        HStack(spacing: 12) {
+                            ForEach(themes) { theme in
+                                Button {
+                                    #if canImport(UIKit)
+                                    HapticManager.shared.click()
+                                    #endif
+                                    onSelect(theme)
+                                } label: {
+                                    ThemeCard(theme: theme)
+                                        .frame(width: 180)
+                                        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                }
+                                .buttonStyle(PressableScaleButtonStyle())
                             }
-                            .buttonStyle(PressableScaleButtonStyle())
                         }
+                        .padding(.horizontal, 16)
                     }
-                    .padding(.horizontal, 16)
                 }
             }
         }

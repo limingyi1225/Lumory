@@ -29,16 +29,33 @@ struct SuggestionContext {
     let recentEntries: [DiaryEntryData]  // 最近 3 条，text 已截 ≤200 字
     let language: String                 // "zh" / "en"
 
-    /// 稳定指纹——输入变了则重新生成。取 top-3 主题名 + 总条数 + 最新日记那一天。
+    /// 稳定指纹——输入"明显"变了才重新生成。
+    ///
+    /// 历史:V1 用 `totalEntries`,每写一篇就 +1,用户每次开 AskPast 都看到重生成 → 删了。
+    /// V2 只保留 latestWeek + top3themes,但走太远 —— 同一周内写新日记、moodHigh/Low 变了、
+    /// recentEntries 内容变了,指纹都不感知,AskPast 一直引用上周的旧片段。
+    /// V3:加"最新日记的 ID 前 8 位",新写日记触发刷新。
+    /// V4(当前):再加 30 天 mood 平均的 10% 桶 —— 用户编辑老条目改变情绪极端值时,
+    /// id 没变但 moodAvg 变了,V3 漏掉这个。10% 粒度足够稳定,小波动不触发刷新。
+    /// **用户看不到可见重生成**,因为 AskPastView 是 "cache 命中立刻展示 + detached
+    /// refresh" 模式,新 bundle 只在下次进入时浮上来。
     func makeFingerprint() -> String {
         let topNames = topThemes.prefix(3).map { $0.name.lowercased() }.joined(separator: "|")
-        let latestDay: String = {
+        let latestId = recentEntries.first.map { String($0.id.uuidString.prefix(8)) } ?? "none"
+        let latestWeek: String = {
             guard let latest = recentEntries.first else { return "none" }
             let f = DateFormatter()
-            f.dateFormat = "yyyy-MM-dd"
+            // ISO 8601 周年 + 周编号。**必须显式 pin calendar/locale** —— DateFormatter 默认
+            // 用 Calendar.current(美区 firstWeekday=1,非 ISO)+ Locale.current,跨地区 /
+            // 夏令时边界会漂,指纹稳定性依赖这个固定。
+            f.calendar = Calendar(identifier: .iso8601)
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.dateFormat = "YYYY-'W'ww"
             return f.string(from: latest.date)
         }()
-        return "\(language)|\(totalEntries)|\(latestDay)|\(topNames)"
+        // 0..1 区间分成 10 档 → 单条日记 mood 改动通常落在同一桶,极端波动才跨桶。
+        let moodBucket = Int((moodAvg30d * 10).rounded())
+        return "\(language)|\(latestWeek)|\(latestId)|m\(moodBucket)|\(topNames)"
     }
 
     /// 数据太少时跳 AI，让调用方落到模板 fallback。
@@ -63,10 +80,14 @@ final class PromptSuggestionEngine: ObservableObject {
 
     private let insights: InsightsEngine
     private let ai: AIServiceProtocol
-    // V2：去掉 prompt 里的日期锚点后 bump；老 cache 里可能还有 "三天前/1-10 号" 这种 date-anchored
-    // 问题，下次启动时 loadCache 找不到 V2 → 走新 prompt 重新生成。老的 V1 文件留在磁盘占几 KB，
-    // 可接受；真要清可以 scan applicationSupport 里的 `.protected.json` 清一次，但没必要。
-    private let cacheKey = "promptSuggestionCacheV2"
+    // V6:V5 的 prompt 同时强调"所有条目第一人称"又要求 homePlaceholders 第二人称,
+    //     模型偶发吐出"我..."占位(视角错配)。V6 的 prompt 把视角指令拆到 A / B 各自
+    //     内部,取消"universal first-person"规则。bump 到 V6 对历史 V5 bundle 做一次
+    //     性失效,避免用户继续看到混合视角的占位文字。
+    // V5:home placeholder 改成第二人称 + 当下相关(App 跟今天的用户搭话)。
+    //     V4 的 placeholder 是第一人称内心独白("我..."),和 askPast 重了,且没有"现在"
+    //     框架。askPast 仍是第一人称(用户问自己),两套视角分得更清楚。
+    private let cacheKey = "promptSuggestionCacheV6"
     private let ttl: TimeInterval = 24 * 60 * 60   // 24 小时
 
     /// 随机池选中后记录，避免连续重复
@@ -122,15 +143,27 @@ final class PromptSuggestionEngine: ObservableObject {
     // MARK: Core refresh
 
     private func runRefresh() async -> Bool {
+        // C2 path:已有在飞 task,直接 join 结果,避免重复 AI 调用。
+        // 注意:这里不把 caller cancel 桥到 task,因为 task 还在为其他 caller 服务。
         if let task = inFlight {
             return await task.value
         }
+        // C1 path:起 dedup task。**关键**:`Task { }` 是 unstructured,不继承外层 cancel,
+        // 所以 executeRefresh 内的 `Task.isCancelled` 检查默认永远是 false。用
+        // `withTaskCancellationHandler` 手动把 caller(AskPastView 的 .task / HomeView 的
+        // backgroundRefreshTask)的 cancel 桥到 dedup task.cancel(),让 executeRefresh
+        // 的 early-return guard 真正生效。C2 path 的 join 方会被这个 cancel 波及,返回
+        // false —— 视角是"starter 放弃了,大家一起失败",符合 dedup 语义。
         let task = Task<Bool, Never> { [weak self] in
             guard let self else { return false }
             return await self.executeRefresh()
         }
         inFlight = task
-        let result = await task.value
+        let result = await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
         inFlight = nil
         return result
     }
@@ -139,7 +172,12 @@ final class PromptSuggestionEngine: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        // F4 fix:每次 await 之前/之后检查 Task.isCancelled。AskPastView 在 onDisappear
+        // 取消 backgroundRefreshTask,但如果 executeRefresh 已经过了 await composeSuggestions
+        // 还在跑 buildContext 或 saveCache,cancel 会被忽略,旧 task 仍然写 current,
+        // 触发其他订阅者(OneClickRebuildRow)无意义重渲染。
         let context = await buildContext()
+        guard !Task.isCancelled else { return false }
         guard context.hasEnoughSignal else {
             Log.info("[PromptSuggestion] signal 不够（<3 条），跳过 AI", category: .ai)
             return false
@@ -149,6 +187,7 @@ final class PromptSuggestionEngine: ObservableObject {
             Log.error("[PromptSuggestion] AI 未返回有效 bundle，保留旧 cache", category: .ai)
             return false
         }
+        guard !Task.isCancelled else { return false }
         guard bundle.hasUsableContent else {
             Log.error("[PromptSuggestion] bundle 字段空，保留旧 cache", category: .ai)
             return false

@@ -29,6 +29,9 @@ struct DiaryDetailView: View {
     /// 保存失败时向用户展示的错误消息；非 nil 时弹 alert。
     @State private var saveError: String?
     @State private var showDiscardChangesAlert = false
+    /// 编辑态下日期 picker 的 popover 显隐 —— 让查看 / 编辑两种模式渲染同一个 Text,
+    /// 只是编辑模式下点击 Text 弹 popover,避免 .compact DatePicker 切换时日期格式跳变。
+    @State private var showDatePopover: Bool = false
     @Environment(\.colorScheme) private var colorScheme
     
     // Animation states
@@ -335,17 +338,22 @@ struct DiaryDetailView: View {
                                         .font(.system(size: 32))
                                     Text(mood.label)
                                         .font(.system(size: 12, weight: .medium))
-                                        .foregroundColor(editedMoodValue == mood.value ? .white : .primary)
+                                        .foregroundColor(.primary)
                                 }
                                 .frame(width: 80, height: 80)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .fill(editedMoodValue == mood.value ? Color.moodSpectrum(value: mood.value) : Color(UIColor.tertiarySystemBackground))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(editedMoodValue == mood.value ? Color.clear : Color.primary.opacity(0.1), lineWidth: 1)
-                                )
+                                // 选中和未选中都走 liquidGlass + mood 色 tint —— 不再饱和实色,
+                                // 视觉饱和度对齐首页 spectrum bar(那个是 0.32 透明度叠在玻璃上)。
+                                // 区分"已选"靠更强的 tint(0.42 vs 0.12) + 1.05 缩放 + mood 色阴影,
+                                // 不再靠"实色 vs 玻璃"的材质对比。
+                                .background {
+                                    Color.clear
+                                        .liquidGlassCard(
+                                            cornerRadius: 12,
+                                            tint: Color.moodSpectrum(value: mood.value),
+                                            tintStrength: editedMoodValue == mood.value ? 0.42 : 0.12,
+                                            interactive: true
+                                        )
+                                }
                                 .scaleEffect(editedMoodValue == mood.value ? 1.05 : 1.0)
                                 .shadow(color: editedMoodValue == mood.value ? Color.moodSpectrum(value: mood.value).opacity(0.3) : Color.clear, radius: 8)
                             }
@@ -354,11 +362,9 @@ struct DiaryDetailView: View {
                     }
                 }
                 .padding(20)
-                .background(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(Color(UIColor.secondarySystemBackground))
-                        .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
-                )
+                // 整个 mood selector 容器换成 liquidGlassCard,和 App 整体玻璃语言对齐。
+                .liquidGlassCard(cornerRadius: 16)
+                .shadow(color: Color.primary.opacity(0.05), radius: 10, y: 5)
                 .transition(.asymmetric(insertion: .scale.combined(with: .opacity), removal: .scale.combined(with: .opacity)))
             }
         }
@@ -384,10 +390,9 @@ struct DiaryDetailView: View {
                     ForEach(themes, id: \.self) { theme in
                         Text(theme)
                             .font(.footnote)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Capsule().fill(Color.accentColor.opacity(0.12)))
-                            .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.25), lineWidth: 0.5))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .liquidGlassCapsule(tint: Color.accentColor)
                     }
                 }
             }
@@ -408,36 +413,76 @@ struct DiaryDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    /// 顶部 hero：情绪色块 + 日期 / 时间。编辑模式下日期可点改。
+    /// 顶部 hero：情绪色块 + 日期 / 时间。
+    /// 查看 / 编辑两种模式都渲染**同一个 Text**(formatDate + formatTime),
+    /// 编辑模式下点击 Text 弹 popover 改日期 —— 这样切换编辑态时日期文本不会从
+    /// 长格式跳变到 .compact DatePicker 的短格式,转场无缝。
     @ViewBuilder
     private var heroHeader: some View {
+        let displayedDate = isEditing ? editedDate : entry.wrappedDate
+        let moodColor = isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor
+
         HStack(alignment: .center, spacing: 14) {
             Circle()
-                .fill(isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor)
+                .fill(moodColor)
                 .frame(width: 16, height: 16)
-                .shadow(color: (isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor).opacity(0.35), radius: 6, y: 2)
+                .shadow(color: moodColor.opacity(0.35), radius: 6, y: 2)
                 .accessibilityHidden(true)
 
-            if isEditing {
-                DatePicker(
-                    "",
-                    selection: $editedDate,
-                    displayedComponents: [.date, .hourAndMinute]
-                )
-                .datePickerStyle(.compact)
-                .labelsHidden()
-                .onChange(of: editedDate) { _, _ in hasUnsavedChanges = true }
-                .accessibilityLabel(NSLocalizedString("日记时间", comment: "Entry date picker a11y"))
-            } else {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(formatDate(entry.wrappedDate))
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(formatDate(displayedDate))
                         .font(.system(size: 22, weight: .semibold, design: .rounded))
-                    Text(formatTime(entry.wrappedDate))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+                    if isEditing {
+                        Image(systemName: "calendar")
+                            .font(.caption)
+                            .foregroundStyle(.secondary.opacity(0.6))
+                    }
                 }
+                Text(formatTime(displayedDate))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
             }
+            // 编辑模式下整块可点 → 弹 popover 改日期
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard isEditing else { return }
+                showDatePopover = true
+            }
+            // 用 sheet + .medium detent 而非 popover —— iPhone 上 popover 会被压扁,
+            // sheet 给 graphical DatePicker 足够的高度展开。
+            .sheet(isPresented: $showDatePopover) {
+                NavigationStack {
+                    DatePicker(
+                        NSLocalizedString("修改时间", comment: "Edit date sheet title"),
+                        selection: $editedDate,
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                    .datePickerStyle(.graphical)
+                    .padding()
+                    .onChange(of: editedDate) { _, _ in hasUnsavedChanges = true }
+                    .navigationTitle(NSLocalizedString("修改时间", comment: "Edit date sheet title"))
+                    #if canImport(UIKit)
+                    .navigationBarTitleDisplayMode(.inline)
+                    #endif
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button(NSLocalizedString("完成", comment: "Done")) {
+                                showDatePopover = false
+                            }
+                            .fontWeight(.semibold)
+                        }
+                    }
+                }
+                // graphical DatePicker(date+time)需要 ~500pt 才能完整放下日历 + 时间转盘,
+                // medium detent 在 iPhone Pro 上不够,会把时间挡在底下。固定 560pt 兜底。
+                .presentationDetents([.height(560), .large])
+                .presentationDragIndicator(.visible)
+            }
+            .accessibilityLabel(NSLocalizedString("日记时间", comment: "Entry date picker a11y"))
+            .accessibilityHint(isEditing ? NSLocalizedString("点击修改时间", comment: "Tap to edit date") : "")
+
             Spacer(minLength: 0)
         }
     }
@@ -626,24 +671,31 @@ struct DiaryDetailView: View {
     }
     
     private func cancelEditing() {
+        // 防御:用户在编辑模式开过日期 sheet 没关掉就点取消 → sheet 残留 / 下次进编辑闪一下。
+        // cancelEditing 是退出编辑态的 single source of truth,在这里 reset 所有编辑专属 UI 状态。
+        showDatePopover = false
+
         withAnimation(AnimationConfig.gentleSpring) {
             isEditing = false
         }
         hasUnsavedChanges = false
-        
+
         // 隐藏键盘
         #if canImport(UIKit)
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         #endif
     }
     
+    /// 5 个 mood 锚点和首页光谱的色阶严格对齐(0 / 0.25 / 0.5 / 0.75 / 1.0)。
+    /// 之前用 0.1 / 0.3 / 0.7 / 0.9 是软化色,导致 pill 颜色和首页 spectrum bar 上同名情绪
+    /// 显示出来的颜色不一致 —— 用户在两处看到同一情绪却是不同的红/蓝。统一到光谱端点。
     private var moodOptions: [(emoji: String, label: String, value: Double)] {
         [
-            ("😢", "非常低落", 0.1),
-            ("😞", "有些低落", 0.3),
+            ("😢", "非常低落", 0.0),
+            ("😞", "有些低落", 0.25),
             ("😐", "平静", 0.5),
-            ("😊", "愉快", 0.7),
-            ("😄", "非常开心", 0.9)
+            ("😊", "愉快", 0.75),
+            ("😄", "非常开心", 1.0)
         ]
     }
     
@@ -677,14 +729,21 @@ struct DiaryDetailView: View {
             // 用户以为已保存其实没存。save 成功才做"切换到浏览态 / 关键盘 / 触发后台任务"。
             try viewContext.save()
 
-            withAnimation(AnimationConfig.gentleSpring) {
+            // 顺序优化(修保存掉帧):
+            //   1. 先关键盘 —— 让系统先开始它的 dismiss 动画
+            //   2. 再切 isEditing —— 不用 spring(spring 物理重算 + 多视图重排会撞上键盘动画掉帧)
+            //   3. 触觉 + 后台任务 放最后
+            #if canImport(UIKit)
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            #endif
+
+            withAnimation(.smooth(duration: 0.22)) {
                 isEditing = false
             }
             hasUnsavedChanges = false
 
             #if canImport(UIKit)
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            HapticManager.shared.notification(.success)
             #endif
 
             if textChanged {

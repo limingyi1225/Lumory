@@ -35,7 +35,12 @@ struct AskPastView: View {
 
     // 动态预设问题
     @State private var presets: [String] = []
-    @State private var isLoadingPresets: Bool = true
+    /// 初始 false —— `.task` 跑 loadPresetsIfNeeded 时:Path A(cache 命中)立刻拿到 presets
+    /// 不显 spinner;Path B(无 cache)在阻塞前会显式 set true。初始 true 会在 .task 触发前
+    /// 闪一帧 spinner,即使 cache 命中也一闪而过。
+    @State private var isLoadingPresets: Bool = false
+    /// 后台静默刷新 task 的句柄 —— onDisappear 时取消,避免 view 关掉后还在跑/写 singleton。
+    @State private var backgroundRefreshTask: Task<Void, Never>?
 
     private let engine = InsightsEngine.shared
 
@@ -50,6 +55,7 @@ struct AskPastView: View {
                         }
                         .padding(20)
                     }
+                    .scrollDismissesKeyboard(.interactively)
                 } else {
                     conversationList
                 }
@@ -81,6 +87,7 @@ struct AskPastView: View {
             }
             .onDisappear {
                 activeTask?.cancel()
+                backgroundRefreshTask?.cancel()
             }
         }
     }
@@ -128,26 +135,31 @@ struct AskPastView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(presets, id: \.self) { preset in
-                    Button {
-                        submit(preset)
-                    } label: {
-                        HStack {
-                            Text(preset)
-                                .font(.subheadline)
-                                .foregroundStyle(.primary)
-                                .multilineTextAlignment(.leading)
-                            Spacer(minLength: 8)
-                            Image(systemName: "arrow.up.right")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                // 多个相邻 glass card 用同一个 container 合并采样,折射边缘更自然。
+                GlassEffectContainer(spacing: 10) {
+                    VStack(spacing: 10) {
+                        ForEach(presets, id: \.self) { preset in
+                            Button {
+                                submit(preset)
+                            } label: {
+                                HStack {
+                                    Text(preset)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.primary)
+                                        .multilineTextAlignment(.leading)
+                                    Spacer(minLength: 8)
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .liquidGlassCard(cornerRadius: 14, interactive: true)
+                            }
+                            .buttonStyle(PressableScaleButtonStyle())
                         }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .liquidGlassCard(cornerRadius: 14, interactive: true)
                     }
-                    .buttonStyle(PressableScaleButtonStyle())
                 }
             }
         }
@@ -167,6 +179,7 @@ struct AskPastView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
             }
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: messages.last?.id) { _, id in
                 guard let id else { return }
                 withAnimation(AnimationConfig.smoothTransition) {
@@ -303,38 +316,44 @@ struct AskPastView: View {
     // MARK: Input bar
 
     private var inputBar: some View {
-        HStack(spacing: 8) {
-            TextField(
-                NSLocalizedString("问问过去的自己…", comment: "Ask placeholder"),
-                text: $inputText,
-                axis: .vertical
-            )
-            .lineLimit(1...4)
-            .focused($inputFocused)
-            .textFieldStyle(.plain)
-            .padding(.vertical, 10)
-            .padding(.horizontal, 14)
-            .background(
-                RoundedRectangle(cornerRadius: 22).fill(Color.secondary.opacity(0.1))
-            )
+        // iOS 26 浮动玻璃 dock:输入框走 glass 胶囊,发送按钮走 glassProminent。
+        // 多个相邻 glass 元素归到同一个 GlassEffectContainer,折射合批,边缘观感统一。
+        GlassEffectContainer(spacing: 10) {
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField(
+                    NSLocalizedString("问问过去的自己…", comment: "Ask placeholder"),
+                    text: $inputText,
+                    axis: .vertical
+                )
+                .lineLimit(1...4)
+                .focused($inputFocused)
+                .textFieldStyle(.plain)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .liquidGlassCapsule()
 
-            Button {
-                submit(inputText)
-            } label: {
-                Image(systemName: isStreaming ? "stop.circle.fill" : "arrow.up.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundStyle(canSubmit || isStreaming ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary.opacity(0.5)))
-            }
-            .disabled(!canSubmit && !isStreaming)
-            .onTapGesture {
-                if isStreaming {
-                    activeTask?.cancel()
+                Button {
+                    if isStreaming {
+                        activeTask?.cancel()
+                    } else {
+                        submit(inputText)
+                    }
+                } label: {
+                    Image(systemName: isStreaming ? "stop.fill" : "arrow.up")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 22, height: 22)
                 }
+                .buttonStyle(.glassProminent)
+                .disabled(!canSubmit && !isStreaming)
+                .accessibilityLabel(
+                    isStreaming
+                    ? NSLocalizedString("停止", comment: "Stop streaming")
+                    : NSLocalizedString("发送", comment: "Send")
+                )
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 
     private var canSubmit: Bool {
@@ -402,20 +421,30 @@ struct AskPastView: View {
 
     // MARK: Presets (AI-authored via PromptSuggestionEngine)
 
-    /// 进入视图时调。先读缓存，没命中才发 AI；命中即展示，永不阻塞 UI。
+    /// 进入视图时调。
+    /// 关键约束:**只要 cache 命中就立刻展示并 return,绝不在用户面前重生成。**
+    /// 刷新只通过用户主动点 refresh 按钮触发,或后台静默 task(下次进入才生效)。
     private func loadPresetsIfNeeded() async {
         guard presets.isEmpty else { return }
-        isLoadingPresets = true
 
-        // 1) 先把 cache 里的直接展示（即使过期，比空白好）
-        if let cached = PromptSuggestionEngine.shared.current {
+        // Path A:有缓存 → 直接展示,不显示 spinner,不重生成。
+        // 后台静默 refresh 存到 backgroundRefreshTask 句柄,onDisappear 时 cancel,
+        // 避免 view 关掉后还在跑(虽然写到 singleton 不算泄漏,但会引起其他订阅者
+        // 不必要的 SwiftUI 重渲染)。
+        if let cached = PromptSuggestionEngine.shared.current,
+           !cached.askPastPresets.isEmpty {
             presets = cached.askPastPresets
+            isLoadingPresets = false
+            backgroundRefreshTask?.cancel()
+            backgroundRefreshTask = Task.detached(priority: .utility) {
+                await PromptSuggestionEngine.shared.refreshIfNeeded()
+            }
+            return
         }
 
-        // 2) 后台决定是否需要刷新
+        // Path B:没缓存(首次进入 / 旧版本 cache 失效) → 阻塞等待
+        isLoadingPresets = true
         await PromptSuggestionEngine.shared.refreshIfNeeded()
-
-        // 3) 拿最新结果；AI 失败则降级到本地模板（静默）
         await applyFreshestSuggestions()
         isLoadingPresets = false
     }

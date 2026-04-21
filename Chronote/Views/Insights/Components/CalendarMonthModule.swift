@@ -102,6 +102,8 @@ struct CalendarMonthModule: View {
         let daysInMonth = days(for: displayedMonth)
         // 填充到 42 格（6×7），没用的格子渲染透明占位，保证高度稳定
         let padded = daysInMonth + Array(repeating: Date?.none, count: max(0, 42 - daysInMonth.count))
+        // 不套 GlassEffectContainer:小尺寸 disc + container 合批渲染时
+        // glass 材质会被压成不透明色块,数字看不见。每个 disc 独立 glassEffect 反而正常。
         LazyVGrid(
             columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 7),
             spacing: Self.rowSpacing
@@ -117,6 +119,9 @@ struct CalendarMonthModule: View {
         .transition(.opacity)
         .id(monthKey(displayedMonth))  // 月份切换时整块重建，避免残留动画
     }
+
+    /// 圆盘统一直径(写过日记的那天 / 今天都用同样大小,只在材质 tint 上区分)。
+    private static let diskSize: CGFloat = 30
 
     @ViewBuilder
     private func dayCell(for date: Date) -> some View {
@@ -134,29 +139,49 @@ struct CalendarMonthModule: View {
             #endif
             onSelectDate(date)
         } label: {
-            ZStack {
-                if let mood {
-                    Circle()
-                        .fill(Color.moodSpectrum(value: mood).opacity(0.7))
-                        .padding(2)
+            // 把 glass 直接挂在 Text 上 —— `.glassEffect` 的语义是"把材质放在被修饰视图后面",
+            // 内容(数字)天然就在材质前面。之前用 .background/ZStack 都不稳是因为
+            // 当被修饰视图是 Color.clear 时 glass 会塌成色块。挂在 Text 上没这个问题。
+            dayContent(day: day, isToday: isToday, isFuture: isFuture, hasEntry: hasEntry, mood: mood)
+                .overlay {
+                    if isToday {
+                        Circle()
+                            .strokeBorder(Color.primary.opacity(0.55), lineWidth: 1.2)
+                            .frame(width: Self.diskSize, height: Self.diskSize)
+                    }
                 }
-                if isToday {
-                    Circle()
-                        .strokeBorder(Color.primary.opacity(0.85), lineWidth: 1.5)
-                        .padding(2)
-                }
-                Text("\(day)")
-                    .font(.system(size: 13, weight: isToday ? .bold : .regular))
-                    .foregroundColor(isFuture ? .secondary.opacity(0.4) : .primary)
-            }
-            .frame(maxWidth: .infinity, minHeight: Self.cellHeight)
-            .contentShape(Rectangle())
+                .frame(maxWidth: .infinity, minHeight: Self.cellHeight)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!hasEntry || isFuture)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel(for: date, mood: mood, isToday: isToday))
         .accessibilityAddTraits(isToday ? [.isSelected] : [])
+    }
+
+    /// 数字本身 + 玻璃 disc(条件性套上去)。两个分支共用同一段 Text 以保证 layout 一致。
+    @ViewBuilder
+    private func dayContent(
+        day: Int,
+        isToday: Bool,
+        isFuture: Bool,
+        hasEntry: Bool,
+        mood: Double?
+    ) -> some View {
+        let text = Text("\(day)")
+            .font(.system(size: 13, weight: isToday ? .bold : .regular))
+            .foregroundColor(isFuture ? .secondary.opacity(0.4) : .primary)
+            .frame(width: Self.diskSize, height: Self.diskSize)
+
+        if hasEntry || isToday {
+            text.liquidGlassCircle(
+                tint: mood.map { Color.moodSpectrum(value: $0) },
+                tintStrength: 0.20
+            )
+        } else {
+            text
+        }
     }
 
     private func accessibilityLabel(for date: Date, mood: Double?, isToday: Bool) -> String {

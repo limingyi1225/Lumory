@@ -369,30 +369,6 @@ struct Recording: Identifiable {
     let duration: TimeInterval
 }
 
-// 自定义两条横线图标
-struct TwoLineIcon: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            RoundedRectangle(cornerRadius: 1)
-                .frame(width: 18, height: 2)
-            RoundedRectangle(cornerRadius: 1)
-                .frame(width: 12, height: 2)
-        }
-        .frame(width: 24, height: 24, alignment: .leading)
-        .foregroundColor(Color.primary.opacity(0.75))
-    }
-}
-
-// Custom ButtonStyle for Settings Icon visual feedback
-struct SettingsIconButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .opacity(configuration.isPressed ? 0.6 : 1.0)
-            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .animation(AnimationConfig.fastResponse, value: configuration.isPressed)
-    }
-}
-
 struct HomeView: View {
     // Core Data 相关
     @Environment(\.managedObjectContext) private var viewContext
@@ -422,12 +398,15 @@ struct HomeView: View {
     @State private var isSending: Bool = false
     @State private var sendButtonState: SendButtonState = .idle
     @State private var revealedMood: Double? = nil
-    @State private var textEditorHeight: CGFloat = 140
     @State private var showMoodReveal: Bool = false
     @State private var spectrumDisplayState: SpectrumDisplayState = .idle
-    @State private var showingSettingsSheet: Bool = false
     @State private var selectedEntry: DiaryEntry? = nil
     @State private var selectedPhotos: [PhotosPickerItem] = []
+    /// 用 Button + .photosPicker(isPresented:) 弹 sheet,而不是 PhotosPicker 直接当
+    /// button 用 —— 后者在 HStack 里 hit area 会和隔壁按钮串,导致点照片触发录音。
+    @State private var photosPickerPresented: Bool = false
+    /// 上一次的 photo 压缩任务,选择变化时取消,防止旧任务回来覆盖新结果(F1 race fix)。
+    @State private var photoLoadTask: Task<Void, Never>?
     @State private var selectedImages: [Data] = []
     private let cal = Calendar.current
     @Environment(\.colorScheme) private var colorScheme
@@ -446,8 +425,8 @@ struct HomeView: View {
     
     @State private var audioRecordings: [Recording] = []
     @State private var deleteTarget: String? = nil
+    /// 现在直接驱动 `.sheet` —— 不再走自绘抽屉。
     @State private var isSettingsOpen: Bool = false
-    @State private var dragOffsetX: CGFloat = 0
     @State private var isInsightsPresented: Bool = false
     @State private var contextPrompts: [ContextPrompt] = []
     /// 稳定的占位语——只在明确时刻更新（进入页面 / 发送完成 / AI 池刷新完成），
@@ -459,12 +438,17 @@ struct HomeView: View {
     /// 冷启动首帧 @FetchRequest 尚未完成时为 false——避免 emptyState 闪一帧。
     @State private var hasLoadedOnce: Bool = false
 
-    // Inline search state — 替代原来的全屏 SearchView sheet
-    @State private var isSearchActive: Bool = false
+    // Search state — 由系统 .searchable 托管输入；下面三个仅是结果与节流任务。
     @State private var searchQuery: String = ""
     @State private var searchResults: [DiaryEntry] = []
     @State private var searchTask: Task<Void, Never>?
-    @FocusState private var searchFocused: Bool
+
+
+    /// 滚动深度 —— 用户向下滚超过阈值才显示"回顶部"FAB,避免常态遮挡内容。
+    @State private var showScrollToTop: Bool = false
+    /// List 顶部锚点 id,FAB 用 ScrollViewProxy.scrollTo 跳回这里。
+    private let topAnchorID = "__lumory_top__"
+
 
 
     // Database recreation observer
@@ -474,148 +458,101 @@ struct HomeView: View {
         iOSHomeView
     }
     
-    // 将 iOS 界面提取为单独的计算属性
+    // 主体:一个 NavigationStack + 系统 .sheet 承载设置。
+    // 旧的自绘抽屉(ZStack + drag offset + mask 层)整个去掉,改成 iOS 26 标准 sheet,
+    // 自动拿到玻璃过渡 / 多 detent / 系统手势下滑关闭。toolbar 上的设置钮触发。
     @ViewBuilder
     private var iOSHomeView: some View {
-        GeometryReader { geometry in
-            let panelWidth = geometry.size.width
-            let panelOffsetX = isSettingsOpen ? dragOffsetX : -panelWidth + dragOffsetX
-            
-            ZStack(alignment: .leading) {
-                // 1. 主界面
-                mainContentWithGestures(panelWidth: panelWidth)
-
-                // 2. 遮罩层
-                settingsMaskLayer(panelWidth: panelWidth, panelOffsetX: panelOffsetX)
-
-                // 3. 设置面板
-                settingsPanel(panelWidth: panelWidth, panelOffsetX: panelOffsetX)
-
-                // 4. 情绪动画覆盖
-                moodAnimationOverlay
+        mainContentView
+            .sheet(isPresented: $isSettingsOpen) {
+                SettingsView(isSettingsOpen: $isSettingsOpen)
+                    .environmentObject(importService)
+                    .environment(\.managedObjectContext, viewContext)
             }
-        }
-        .onChange(of: importService.isImporting) { _, isImporting in
-            if isImporting {
-                isSettingsOpen = false
-            } else {
-                #if canImport(UIKit)
-                HapticManager.shared.click()
-                #endif
-            }
-        }
-        .onChange(of: isSettingsOpen) { _, _ in
-            dragOffsetX = 0
-        }
-        .onAppear {
-            setupDatabaseRecreationObserver()
-            // AI 池可能已就绪（另一视图暖过）——进入首页立即尝试拿一条稳定值
-            rollPlaceholderIfNeeded()
-        }
-        .onDisappear {
-            removeDatabaseRecreationObserver()
-        }
-        .alert(NSLocalizedString("删除日记", comment: "Delete entry"), isPresented: $showDeleteConfirmation) {
-            Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
-                if let entry = entryToDelete {
-                    deleteEntry(entry)
+            .onChange(of: importService.isImporting) { _, isImporting in
+                if isImporting {
+                    isSettingsOpen = false
+                } else {
+                    #if canImport(UIKit)
+                    HapticManager.shared.click()
+                    #endif
                 }
             }
-            Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {
-                entryToDelete = nil
+            .onAppear {
+                setupDatabaseRecreationObserver()
+                // AI 池可能已就绪（另一视图暖过）——进入首页立即尝试拿一条稳定值
+                rollPlaceholderIfNeeded()
             }
-        } message: {
-            Text(NSLocalizedString("确定要删除这篇日记吗？此操作无法撤销。", comment: "Delete confirmation"))
-        }
-    }
-    
-    @ViewBuilder
-    private func mainContentWithGestures(panelWidth: CGFloat) -> some View {
-        mainContentView
-            .disabled(isSettingsOpen)
-            .overlay(alignment: .leading) {
-                leadingSwipeGesture(panelWidth: panelWidth)
+            .onDisappear {
+                removeDatabaseRecreationObserver()
             }
-            .overlay(alignment: .trailing) {
-                trailingSwipeGesture(panelWidth: panelWidth)
-            }
-    }
-    
-    @ViewBuilder
-    private func settingsMaskLayer(panelWidth: CGFloat, panelOffsetX: CGFloat) -> some View {
-            let normalizedOpen = min(max((panelOffsetX + panelWidth) / panelWidth, 0), 1)
-            let maskAlpha = normalizedOpen * 0.3
-            
-            Color.black.opacity(maskAlpha)
-                .ignoresSafeArea()
-                .onTapGesture {
-                    withAnimation(AnimationConfig.smoothTransition) {
-                        isSettingsOpen = false
-                        dragOffsetX = 0
+            .alert(NSLocalizedString("删除日记", comment: "Delete entry"), isPresented: $showDeleteConfirmation) {
+                Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
+                    if let entry = entryToDelete {
+                        deleteEntry(entry)
                     }
                 }
-                .gesture(
-                    DragGesture(minimumDistance: 5)
-                        .onChanged { value in
-                            if isSettingsOpen {
-                                let dx = value.translation.width
-                                if dx < 0 {
-                                    dragOffsetX = max(dx, -panelWidth)
-                                }
-                            }
-                        }
-                        .onEnded { value in
-                            if isSettingsOpen {
-                                let dx = value.translation.width
-                                if dx < -panelWidth * 0.15 {
-                                    #if canImport(UIKit)
-                                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                    #endif
-                                    withAnimation(AnimationConfig.smoothTransition) {
-                                        isSettingsOpen = false
-                                        dragOffsetX = 0
-                                    }
-                                } else {
-                                    withAnimation(AnimationConfig.standardResponse) {
-                                        dragOffsetX = 0
-                                    }
-                                }
-                            }
-                        }
-                )
-                .allowsHitTesting(isSettingsOpen)
-    }
-    
-    @ViewBuilder
-    private var moodAnimationOverlay: some View {
-        // 动画现在直接在MoodSpectrumBar上显示，不需要额外覆盖层
-        EmptyView()
+                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {
+                    entryToDelete = nil
+                }
+            } message: {
+                Text(NSLocalizedString("确定要删除这篇日记吗？此操作无法撤销。", comment: "Delete confirmation"))
+            }
     }
     
     @ViewBuilder
     private var mainContentView: some View {
             NavigationStack {
                 VStack(spacing: 0) {
-                    // 顶栏：搜索激活时换成搜索输入条
-                    if isSearchActive {
-                        inlineSearchBar
-                            .transition(.move(edge: .top).combined(with: .opacity))
-                    } else {
-                        customNavigationBar
-                            .transition(.opacity)
-                    }
-
                     // 导入进度条
                     importProgressView
 
                     // 主列表：搜索中显示结果，否则显示常规时间线
-                    if isSearchActive {
-                        searchResultsList
-                    } else {
+                    // `.searchable` 把搜索字段托管到 NavigationStack 顶部；query 非空时切到结果列表。
+                    if searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
                         mainListContent
+                    } else {
+                        searchResultsList
                     }
                 }
-                .animation(.interpolatingSpring(stiffness: 320, damping: 28), value: isSearchActive)
+                .navigationTitle("")
+                #if canImport(UIKit)
+                .toolbarTitleDisplayMode(.inline)
+                #endif
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            #if canImport(UIKit)
+                            HapticManager.shared.click()
+                            #endif
+                            isSettingsOpen = true
+                        } label: {
+                            // 系统 SF Symbol "line.3.horizontal" —— iOS 26 toolbar 自动适配
+                            // 玻璃 / 描边 / 触控反馈,无需自绘 RoundedRectangle 双线。
+                            Image(systemName: "line.3.horizontal")
+                        }
+                        .accessibilityLabel(NSLocalizedString("设置", comment: "Settings"))
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            #if canImport(UIKit)
+                            HapticManager.shared.click()
+                            #endif
+                            isInsightsPresented = true
+                        } label: {
+                            Image(systemName: "chart.xyaxis.line")
+                        }
+                        .accessibilityLabel(NSLocalizedString("洞察", comment: "Insights"))
+                    }
+                }
+                .searchable(
+                    text: $searchQuery,
+                    placement: .toolbar,
+                    prompt: NSLocalizedString("搜索日记", comment: "Search field prompt")
+                )
+                .onChange(of: searchQuery) { _, newValue in
+                    scheduleInlineSearch(for: newValue)
+                }
                 .navigationDestination(item: $selectedEntry) { entry in
                     DiaryDetailView(entry: entry, startInEditMode: shouldStartEditing)
                         .onDisappear {
@@ -632,68 +569,7 @@ struct HomeView: View {
                     await MainActor.run { hasLoadedOnce = true }
                     await loadContextPrompts()
                 }
-#if canImport(UIKit)
-                .navigationBarHidden(true)
-#endif
             }
-    }
-    
-    @ViewBuilder
-    private var customNavigationBar: some View {
-            HStack {
-                Button {
-                    #if canImport(UIKit)
-                    HapticManager.shared.click()
-                    #endif
-                    withAnimation(AnimationConfig.smoothTransition) {
-                        isSettingsOpen = true
-                        dragOffsetX = 0
-                    }
-                } label: {
-                    TwoLineIcon()
-                        .padding(8) // 扩大触摸区域
-                }
-                .contentShape(Rectangle())
-                .buttonStyle(SettingsIconButtonStyle())
-                .foregroundColor(Color.primary.opacity(0.75))
-
-                Spacer()
-
-                Button {
-                    #if canImport(UIKit)
-                    HapticManager.shared.click()
-                    #endif
-                    withAnimation(.interpolatingSpring(stiffness: 320, damping: 28)) {
-                        isSearchActive = true
-                    }
-                    // 下一帧再 focus，避免动画和键盘抢节奏
-                    DispatchQueue.main.async { searchFocused = true }
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 20, weight: .regular))
-                        .frame(width: 24, height: 24, alignment: .center)
-                }
-                .buttonStyle(PressableScaleButtonStyle())
-                .foregroundColor(Color.primary.opacity(0.75))
-                .accessibilityLabel(NSLocalizedString("搜索日记", comment: "Search diary"))
-
-                Button {
-                    #if canImport(UIKit)
-                    HapticManager.shared.click()
-                    #endif
-                    isInsightsPresented = true
-                } label: {
-                    Image(systemName: "chart.xyaxis.line")
-                        .font(.system(size: 20, weight: .regular))
-                        .frame(width: 28, height: 24, alignment: .center)
-                }
-                .buttonStyle(PressableScaleButtonStyle())
-                .foregroundColor(Color.primary.opacity(0.75))
-                .accessibilityLabel(NSLocalizedString("洞察", comment: "Insights"))
-
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
     }
     
     @ViewBuilder
@@ -711,20 +587,54 @@ struct HomeView: View {
     
     @ViewBuilder
     private var mainListContent: some View {
-        List {
-            // 心情光谱滑块 - Mac优化布局
-            moodSliderSection
+        ScrollViewReader { proxy in
+            List {
+                // 心情光谱滑块 - Mac优化布局
+                moodSliderSection
+                    .id(topAnchorID)
 
-            // 输入框和录音功能容器 - Mac优化
-            inputSection
+                // 输入框和录音功能容器 - Mac优化
+                inputSection
 
-            // 日记条目内容 Sections
-            diaryContentSections
-        }
-        .optimizedList()
-        .scrollDismissesKeyboard(.interactively)
-        .refreshable {
-            await triggerManualSync()
+                // 日记条目内容 Sections
+                diaryContentSections
+            }
+            .optimizedList()
+            .scrollDismissesKeyboard(.interactively)
+            .refreshable {
+                await triggerManualSync()
+            }
+            // 跟踪滚动 offset:超过 480pt 才弹 FAB,小幅滚动不打扰。
+            .onScrollGeometryChange(for: CGFloat.self) { geo in
+                geo.contentOffset.y
+            } action: { _, newY in
+                let shouldShow = newY > 480
+                if shouldShow != showScrollToTop {
+                    withAnimation(.smooth(duration: 0.25)) {
+                        showScrollToTop = shouldShow
+                    }
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if showScrollToTop {
+                    Button {
+                        #if canImport(UIKit)
+                        HapticManager.shared.click()
+                        #endif
+                        withAnimation(.smooth(duration: 0.45)) {
+                            proxy.scrollTo(topAnchorID, anchor: .top)
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(.glass)
+                    .padding(.bottom, 18)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    .accessibilityLabel(NSLocalizedString("回到顶部", comment: "Scroll to top"))
+                }
+            }
         }
     }
 
@@ -761,55 +671,67 @@ struct HomeView: View {
     
     @ViewBuilder
     private var inputSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            textInputArea
-            recordingsSection
-            if !selectedImages.isEmpty { photosSection }
-            Divider().overlay(Color.primary.opacity(0.08))
-            iconToolbarRow
+        // GlassEffectContainer 包 outer card glass + inner send button(.glassProminent),
+        // SwiftUI 合并渲染,给 .glassProminent 必要的 surface 上下文。
+        // 不保证视觉上有明显玻璃感 —— .glassProminent 在没有可折射 backdrop 时可能就是
+        // tinted 色块,原生就这样,算了。
+        GlassEffectContainer(spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
+                textInputArea
+                recordingsSection
+                if !selectedImages.isEmpty { photosSection }
+                // 卡内分隔线:把"内容区"和"动作区(工具栏)"隔开。
+                Capsule()
+                    .fill(Color.primary.opacity(0.06))
+                    .frame(height: 1)
+                    .padding(.horizontal, 4)
+                // 工具栏:photo / mic / 计时 / 发送。
+                HStack(spacing: 18) {
+                    keyboardActionsBar
+                }
+                .padding(.top, 2)
+            }
+            .padding(16)
+            .liquidGlassCard(cornerRadius: 22)
         }
-        .padding(.init(top: 14, leading: 14, bottom: 10, trailing: 10))
-        .liquidGlassCard(cornerRadius: 22)
-        .shadow(color: Color.primary.opacity(0.06), radius: 10, x: 0, y: 4)
-        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 12, trailing: 16))
+        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 28, trailing: 16))
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
     }
 
     @ViewBuilder
     private var textInputArea: some View {
-        ZStack(alignment: .topLeading) {
-            TextEditor(text: $inputText)
-                .frame(minHeight: 140, maxHeight: 400)
-                .frame(height: textEditorHeight)
-                .frame(maxWidth: .infinity)
-                .background(Color.clear)
-                .scrollContentBackground(.hidden)
-                .font(.system(size: 17))
-                .onChange(of: inputText) { _, newValue in
-                    calculateTextHeight(for: newValue)
-                    let hasContent = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    if hasContent && spectrumDisplayState == .idle {
-                        withAnimation(.easeInOut(duration: 1.0)) {
-                            spectrumDisplayState = .analyzing
-                        }
-                    } else if !hasContent && spectrumDisplayState == .analyzing {
-                        withAnimation(.easeInOut(duration: 0.8)) {
-                            spectrumDisplayState = .idle
-                        }
-                    }
+        // 原生 SwiftUI TextField(axis:.vertical),不再走 UIKit 桥也不挂 .toolbar(.keyboard) ——
+        // 工具栏挪进了输入卡内部(横线下方),始终可见,不再依赖 keyboard accessory 协商。
+        // Prompt 颜色按色彩模式分:亮色 secondary 0.50(浅),暗色实 .secondary。
+        let promptColor: Color = colorScheme == .dark
+            ? Color.secondary
+            : Color.secondary.opacity(0.50)
+
+        TextField(
+            "",
+            text: $inputText,
+            prompt: Text(inputPlaceholder)
+                .font(.system(size: 16))
+                .foregroundColor(promptColor),
+            axis: .vertical
+        )
+        .lineLimit(6...20)
+        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
+        .background(Color.clear)
+        .font(.system(size: 17))
+        .onChange(of: inputText) { _, newValue in
+            let hasContent = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if hasContent && spectrumDisplayState == .idle {
+                withAnimation(.easeInOut(duration: 1.0)) {
+                    spectrumDisplayState = .analyzing
                 }
-            if inputText.isEmpty {
-                Text(inputPlaceholder)
-                    .font(.system(size: 17))
-                    .foregroundColor(.secondary.opacity(0.55))
-                    .padding(.leading, 5)
-                    .padding(.top, 8)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
+            } else if !hasContent && spectrumDisplayState == .analyzing {
+                withAnimation(.easeInOut(duration: 0.8)) {
+                    spectrumDisplayState = .idle
+                }
             }
         }
-        .frame(maxWidth: .infinity)
     }
     
     
@@ -871,42 +793,56 @@ struct HomeView: View {
     }
     
     private func loadPhotosWithCompression(_ items: [PhotosPickerItem]) async {
-        var compressedImages: [Data] = []
+        // 关键改动 1:每个 item 走 Task.detached 跳到后台 actor —— 之前 addTask 继承父
+        // MainActor,compressImage 里的 UIImage 解码 + JPEG 重编码全卡在主线程上,选 9 张图
+        // 直接掉帧到底。detached 之后 UI 不再被压死,选完照片到出现缩略图之间也没有阻塞。
+        //
+        // 关键改动 2:**保序 + 配对收集**。每个 (PhotosPickerItem, Data?) 一起收回来,
+        // 失败的丢弃但**两边一起丢弃**。之前只 compactMap selectedImages,
+        // selectedPhotos 没动 → 长度不一致 → 删除时 firstIndex(of:) 找 selectedImages 的 idx
+        // 然后用同 idx 删 selectedPhotos 删错。F2 fix:同步重建 selectedPhotos。
+        var indexed: [(Int, Data?)] = []
 
-        await withTaskGroup(of: Data?.self) { group in
-            for item in items {
+        await withTaskGroup(of: (Int, Data?).self) { group in
+            for (idx, item) in items.enumerated() {
                 group.addTask {
-                    if let data = try? await item.loadTransferable(type: Data.self) {
-                        let originalSize = data.count
-                        if let compressed = await data.compressImage(maxSizeKB: 500, maxDimension: 1024) {
-                            let compressedSize = compressed.count
-                            Log.info("[HomeView] Image compressed: \(originalSize/1024)KB → \(compressedSize/1024)KB", category: .ui)
-                            return compressed
-                        }
+                    guard let data = try? await item.loadTransferable(type: Data.self) else {
+                        return (idx, nil)
                     }
-                    return nil
+                    let compressed = await Task.detached(priority: .userInitiated) {
+                        await data.compressImage(maxSizeKB: 500, maxDimension: 1024)
+                    }.value
+                    return (idx, compressed)
                 }
             }
-
-            for await compressedData in group {
-                if let data = compressedData {
-                    compressedImages.append(data)
-                }
+            for await result in group {
+                if Task.isCancelled { return }   // F1:任务被取消立即收手
+                indexed.append(result)
             }
         }
+
+        // F1:任务被取消则不更新 state,让新任务去主导。
+        if Task.isCancelled { return }
+
+        // 按 idx 排序,只保留压缩成功的 (item, data) 对。
+        let successful: [(PhotosPickerItem, Data)] = indexed
+            .sorted { $0.0 < $1.0 }
+            .compactMap { (i, data) -> (PhotosPickerItem, Data)? in
+                guard let data else { return nil }
+                return (items[i], data)
+            }
+
+        let prunedItems = successful.map(\.0)
+        let images = successful.map(\.1)
 
         await MainActor.run {
-            selectedImages = compressedImages
+            selectedImages = images
+            // F2:把 selectedPhotos 也剪枝到只剩压缩成功的 items,保证两边长度严格对齐。
+            // 等值检查避免触发自身的 .onChange 死循环 —— PhotosPickerItem 是 Equatable。
+            if selectedPhotos != prunedItems {
+                selectedPhotos = prunedItems
+            }
             Log.info("[HomeView] Total compressed images: \(selectedImages.count)", category: .ui)
-        }
-    }
-
-    private func calculateTextHeight(for text: String) {
-        let lineCount = text.components(separatedBy: "\n").count
-        let estimatedHeight = max(140, min(400, CGFloat(lineCount) * 22 + 40))
-
-        withAnimation(AnimationConfig.smoothTransition) {
-            textEditorHeight = estimatedHeight
         }
     }
 
@@ -1028,110 +964,6 @@ struct HomeView: View {
     }
     
     @ViewBuilder
-    private func leadingSwipeGesture(panelWidth: CGFloat) -> some View {
-        if selectedEntry == nil && !isSettingsOpen {
-            Color.clear
-                .frame(width: 20)
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 10)
-                        .onChanged { value in
-                            let dx = value.translation.width
-                            let dy = value.translation.height
-                            // 水平滑动大于垂直，且起始点在左边缘
-                            if abs(dx) > abs(dy) && dx > 0 {
-                                dragOffsetX = min(dx, panelWidth)
-                            }
-                        }
-                        .onEnded { value in
-                            let dx = value.translation.width
-                            if dx > panelWidth * 0.2 {
-                                #if canImport(UIKit)
-                                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                #endif
-                                withAnimation(AnimationConfig.smoothTransition) {
-                                    isSettingsOpen = true
-                                    dragOffsetX = 0
-                                }
-                            } else {
-                                withAnimation(AnimationConfig.standardResponse) {
-                                    dragOffsetX = 0
-                                }
-                            }
-                        }
-                )
-        }
-    }
-    
-    @ViewBuilder
-    private func trailingSwipeGesture(panelWidth: CGFloat) -> some View {
-        if selectedEntry == nil && !isSettingsOpen {
-            Color.clear
-                .frame(width: 20)
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 10)
-                        .onEnded { value in
-                            let dx = value.translation.width
-                            let dy = value.translation.height
-                            if abs(dx) > abs(dy) && dx < 0 {
-                                if dx < -panelWidth * 0.1 {
-                                    #if canImport(UIKit)
-                                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                    #endif
-                                    isInsightsPresented = true
-                                }
-                            }
-                        }
-                )
-        }
-    }
-    
-
-    
-    @ViewBuilder
-    private func settingsPanel(panelWidth: CGFloat, panelOffsetX: CGFloat) -> some View {
-            SettingsView(isSettingsOpen: $isSettingsOpen)
-                .environmentObject(importService)
-                .environment(\.managedObjectContext, viewContext)
-                .frame(width: panelWidth)
-                #if canImport(UIKit)
-                .background(Color(UIColor.systemBackground))
-                #else
-                .background(Color(NSColor.windowBackgroundColor))
-                #endif
-                .offset(x: panelOffsetX)
-                .animationIfChanged(AnimationConfig.smoothTransition, value: panelOffsetX)
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 5)
-                        .onChanged { value in
-                            let dx = value.translation.width
-                            let dy = value.translation.height
-                            if isSettingsOpen && abs(dx) > abs(dy) {
-                                dragOffsetX = min(max(dx, -panelWidth), 0)
-                            }
-                        }
-                        .onEnded { _ in
-                            if isSettingsOpen {
-                                if dragOffsetX < -panelWidth * 0.15 {
-                                    #if canImport(UIKit)
-                                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                    #endif
-                                    withAnimation(AnimationConfig.smoothTransition) {
-                                        isSettingsOpen = false
-                                        dragOffsetX = 0
-                                    }
-                                } else {
-                                    withAnimation(AnimationConfig.standardResponse) {
-                                        dragOffsetX = 0
-                                    }
-                                }
-                            }
-                        }
-                )
-    }
-
-    @ViewBuilder
     private var photosSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -1142,71 +974,29 @@ struct HomeView: View {
                     .foregroundColor(.secondary)
                 Spacer()
             }
-            
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(selectedImages.indices, id: \.self) { index in
-                        Group {
-                            #if os(iOS)
-                            if let uiImage = UIImage(data: selectedImages[index]) {
-                                ZStack(alignment: .topTrailing) {
-                                    Image(uiImage: uiImage)
-                                        .resizable()
-                                        .scaledToFill()
-                                        .frame(width: 80, height: 80)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    
-                                    Button(action: {
-                                        withAnimation(AnimationConfig.stiffSpring) {
-                                            selectedImages.remove(at: index)
-                                            if index < selectedPhotos.count {
-                                                selectedPhotos.remove(at: index)
-                                            }
+                    // 用 Data 内容作 id —— InputPhotoThumbnail 内部 @State 缓存解码后的
+                    // UIImage,如果用 index 作 id,删掉中间一张图后剩下的图接管它的 index
+                    // 但 @State 还在 → 一闪"错图配错按钮"。Data 作 id 让 SwiftUI 按内容
+                    // 追踪 cell 身份,删除/重排都不会让仍存在的 cell 重新解码。
+                    ForEach(selectedImages, id: \.self) { data in
+                        InputPhotoThumbnail(
+                            data: data,
+                            onRemove: {
+                                withAnimation(AnimationConfig.stiffSpring) {
+                                    // 按内容查当前 index —— closure 捕获的 index 在
+                                    // selectedImages 被其他事件改过后会过期。
+                                    if let idx = selectedImages.firstIndex(of: data) {
+                                        selectedImages.remove(at: idx)
+                                        if idx < selectedPhotos.count {
+                                            selectedPhotos.remove(at: idx)
                                         }
-                                    }) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 20))
-                                            .foregroundColor(.white)
-                                            .background(
-                                                Circle()
-                                                    .fill(Color.black.opacity(0.6))
-                                            )
                                     }
-                                    .buttonStyle(PlainButtonStyle())
-                                    .padding(4)
                                 }
                             }
-                            #else
-                            if let nsImage = NSImage(data: selectedImages[index]) {
-                                ZStack(alignment: .topTrailing) {
-                                    Image(nsImage: nsImage)
-                                        .resizable()
-                                        .scaledToFill()
-                                        .frame(width: 80, height: 80)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    
-                                    Button(action: {
-                                        withAnimation(AnimationConfig.stiffSpring) {
-                                            selectedImages.remove(at: index)
-                                            if index < selectedPhotos.count {
-                                                selectedPhotos.remove(at: index)
-                                            }
-                                        }
-                                    }) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 20))
-                                            .foregroundColor(.white)
-                                            .background(
-                                                Circle()
-                                                    .fill(Color.black.opacity(0.6))
-                                            )
-                                    }
-                                    .buttonStyle(PlainButtonStyle())
-                                    .padding(4)
-                                }
-                            }
-                            #endif
-                        }
+                        )
                     }
                 }
                 .padding(.horizontal, 4)
@@ -1404,7 +1194,6 @@ struct HomeView: View {
 
     @ViewBuilder
     private var entriesListSection: some View {
-        timelineSectionHeader
         // **NOTE — 为什么不用 `ForEach(entries, id: \.objectID)`**：
         // 这里的 ForEach 在外层 `List` 里。换成 objectID identity 后，SwiftUI 的 List
         // 能识别"单行 delete"，会播**原生 row-removal 动画**（被删行 fade + 下方 slide up）；
@@ -1417,21 +1206,6 @@ struct HomeView: View {
             timelineRow(entry: entry, isFirst: idx == 0, isLast: idx == lastIndex)
                 .id(entry.objectID)
         }
-    }
-
-    /// 输入框和第一条日记之间的分节线：纯一条淡色细线居中。
-    @ViewBuilder
-    private var timelineSectionHeader: some View {
-        Rectangle()
-            .fill(Color.secondary.opacity(0.18))
-            .frame(height: 0.5)
-            .padding(.top, 6)
-            .padding(.bottom, 8)
-            .padding(.horizontal, 60)
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-            .accessibilityHidden(true)
     }
 
     @ViewBuilder
@@ -1842,12 +1616,15 @@ struct HomeView: View {
         // 保持旧值；下次 AI 池 / 本地模板就绪会再试
     }
 
-    /// 启动 / 进入首页时调。**本地 fallback 先顶上，AI 在后台刷新**：
-    /// 冷启动 + 无 cache + 网慢时，`refreshIfNeeded` 可能要几秒，不能让占位语被它拖着等——
-    /// 先把本地 `ContextPromptGenerator` 的结果 apply + roll 一次，AI 完成后再 roll 第二次，
-    /// 有新池就无缝升级，没新池也不影响用户看到合理的本地占位。
+    /// 启动 / 进入首页时调。**本地 fallback 顶上,AI 在后台静默刷新**:
+    /// 冷启动 + 无 cache + 网慢时,`refreshIfNeeded` 可能要几秒。先把本地
+    /// `ContextPromptGenerator` 的结果 apply + roll 一次,AI 写完之后**只更新 cache,
+    /// 不在用户面前 re-roll** —— 用户下次下拉刷新 / 发送日记后才看到新的 AI 提示词。
+    /// 之前的"AI 完成后强制 re-roll"会在用户盯着首页时占位语突然换字,体验不好。
     private func loadContextPrompts() async {
-        let aiRefreshTask = Task.detached(priority: .utility) {
+        // AI 在后台静默刷新,完成后落到 PromptSuggestionEngine.shared.current,
+        // 等下次 rollPlaceholderIfNeeded(force: true) 被用户主动触发时才用上。
+        Task.detached(priority: .utility) {
             await PromptSuggestionEngine.shared.refreshIfNeeded()
         }
 
@@ -1858,55 +1635,111 @@ struct HomeView: View {
             }
             rollPlaceholderIfNeeded()
         }
-
-        await aiRefreshTask.value
-        await MainActor.run {
-            // AI 池准备好了，强制 roll 一次，让首页用户第一屏能看到 AI 写的占位语。
-            rollPlaceholderIfNeeded(force: true)
-        }
     }
 }
 
-// MARK: - Input Toolbar
+// MARK: - Keyboard Accessory Toolbar
 
 extension HomeView {
     @ViewBuilder
-    var iconToolbarRow: some View {
-        HStack(spacing: 4) {
-            CompactMicButton(
-                recorder: recorder,
-                onStop: { await handleStopRecording() },
-                disabled: audioRecordings.count >= 1
-            )
+    var keyboardActionsBar: some View {
+        // 关键 fix 1(tap 串):PhotosPicker 当 button 用时 hit area 在 HStack 里和邻居
+        // 按钮串,点照片偶尔触发录音。改成普通 Button + `.photosPicker(isPresented:)` ——
+        // 走 SwiftUI 标准的 sheet 模态,完全独立按钮,绝不和 mic 串。
+        // 关键 fix 2(玻璃):每个 tappable 显式 `.frame(44, 36) + .contentShape(Rectangle())`,
+        // tap 区独立。
 
-            PhotosPicker(selection: $selectedPhotos, maxSelectionCount: 9, matching: .images) {
-                Image(systemName: "photo.badge.plus")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.75))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(PressableScaleButtonStyle())
-            .disabled(selectedImages.count >= 9)
-
-            Spacer(minLength: 0)
-
-            if recorder.isRecording {
-                Text(formattedDuration(currentTime: recorder.duration, totalDuration: 0))
-                    .font(.system(size: 13, weight: .medium).monospacedDigit())
-                    .foregroundColor(.red)
-                    .transition(.opacity)
-            }
-
-            CompactSendButton(
-                buttonState: $sendButtonState,
-                revealedMood: $revealedMood,
-                isEnabled: hasSendableContent,
-                action: handleSendAction
-            )
+        Button {
+            #if canImport(UIKit)
+            HapticManager.shared.click()
+            #endif
+            photosPickerPresented = true
+        } label: {
+            Image(systemName: "photo")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(Color.primary.opacity(0.85))
+                .frame(width: 44, height: 36)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .disabled(selectedImages.count >= 9)
+        .accessibilityLabel(NSLocalizedString("添加照片", comment: "Add photos"))
+        .accessibilityIdentifier("home.keyboard.photo")
+        .photosPicker(
+            isPresented: $photosPickerPresented,
+            selection: $selectedPhotos,
+            maxSelectionCount: 9,
+            matching: .images
+        )
         .onChange(of: selectedPhotos) { _, newValue in
-            Task { await loadPhotosWithCompression(newValue) }
+            // F1 fix:取消上一轮压缩任务。否则用户快速换选时,旧任务可能后完成
+            // 覆盖掉新结果(stale write)。
+            photoLoadTask?.cancel()
+            photoLoadTask = Task { await loadPhotosWithCompression(newValue) }
+        }
+
+        Button {
+            #if canImport(UIKit)
+            HapticManager.shared.click()
+            #endif
+            if recorder.isRecording {
+                Task { await handleStopRecording() }
+            } else {
+                recorder.startRecording()
+                #if canImport(UIKit)
+                // 录音开始的第二记重一些的反馈,告诉用户"已经在录了" ——
+                // 不只是按下按钮,而是确认进入了录音状态。
+                HapticManager.shared.notification(.success)
+                #endif
+            }
+        } label: {
+            Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(recorder.isRecording ? .red : Color.primary.opacity(0.85))
+                .symbolEffect(.bounce, value: recorder.isRecording)
+                .frame(width: 44, height: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(audioRecordings.count >= 1 && !recorder.isRecording)
+        .accessibilityLabel(recorder.isRecording
+            ? NSLocalizedString("停止录音", comment: "Stop recording")
+            : NSLocalizedString("开始录音", comment: "Start recording"))
+        .accessibilityIdentifier("home.keyboard.mic")
+
+        recordingTimerInline
+
+        Spacer()
+
+        // 原生 `.buttonStyle(.glassProminent)` + accent tint。
+        // Apple 文档说这是"the most prominent action"用的 Liquid Glass style。
+        // 在 GlassEffectContainer 里 + 外层 liquidGlassCard 提供 surface 上下文。
+        // 渲染成什么样交给 SwiftUI,不手绘装饰。
+        Button {
+            handleSendAction()
+        } label: {
+            if sendButtonState == .sending {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 16, weight: .bold))
+            }
+        }
+        .buttonStyle(.glassProminent)
+        .tint(Color.accentColor)
+        .disabled(!hasSendableContent || sendButtonState != .idle)
+        .accessibilityLabel(NSLocalizedString("发送", comment: "Send"))
+        .accessibilityIdentifier("home.keyboard.send")
+    }
+
+    @ViewBuilder
+    private var recordingTimerInline: some View {
+        if recorder.isRecording {
+            Text(formattedDuration(currentTime: recorder.duration, totalDuration: 0))
+                .font(.footnote.weight(.medium).monospacedDigit())
+                .foregroundColor(.red)
+                .transition(.opacity)
         }
     }
 
@@ -1926,57 +1759,6 @@ extension HomeView {
 // MARK: - Inline search
 
 extension HomeView {
-    @ViewBuilder
-    var inlineSearchBar: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField(
-                    NSLocalizedString("搜索日记", comment: "Search field prompt"),
-                    text: $searchQuery
-                )
-                .textFieldStyle(.plain)
-                .focused($searchFocused)
-                .submitLabel(.search)
-                .onChange(of: searchQuery) { _, newValue in
-                    scheduleInlineSearch(for: newValue)
-                }
-                if !searchQuery.isEmpty {
-                    Button {
-                        searchQuery = ""
-                        searchResults = []
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(NSLocalizedString("清空搜索", comment: "Clear search"))
-                }
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 36)
-            .liquidGlassCapsule()
-
-            Button(NSLocalizedString("取消", comment: "Cancel")) {
-                #if canImport(UIKit)
-                HapticManager.shared.click()
-                #endif
-                searchFocused = false
-                searchTask?.cancel()
-                withAnimation(.interpolatingSpring(stiffness: 320, damping: 28)) {
-                    isSearchActive = false
-                    searchQuery = ""
-                    searchResults = []
-                }
-            }
-            .font(.body)
-            .foregroundStyle(Color.primary.opacity(0.85))
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-    }
-
     @ViewBuilder
     var searchResultsList: some View {
         let trimmed = searchQuery.trimmingCharacters(in: .whitespaces)
@@ -2073,117 +1855,6 @@ struct PressableScaleButtonStyle: ButtonStyle {
     }
 }
 
-// MARK: - Compact icon buttons (for toolbar & floating input styles)
-
-struct CompactMicButton: View {
-    @ObservedObject var recorder: AudioRecorder
-    var onStop: () async -> Void
-    var disabled: Bool = false
-    var size: CGFloat = 44
-
-    @State private var pulseOpacity: Double = 0
-
-    var body: some View {
-        Button {
-            #if canImport(UIKit)
-            HapticManager.shared.click()
-            #endif
-            if recorder.isRecording {
-                Task { await onStop() }
-            } else {
-                recorder.startRecording()
-            }
-        } label: {
-            ZStack {
-                if recorder.isRecording {
-                    Circle()
-                        .fill(Color.red)
-                    Circle()
-                        .stroke(Color.red.opacity(0.4), lineWidth: 2)
-                        .opacity(pulseOpacity)
-                }
-                Image(systemName: recorder.isRecording ? "stop.fill" : "mic.fill")
-                    .font(.system(size: size * 0.38, weight: .semibold))
-                    .foregroundStyle(recorder.isRecording ? .white : Color.primary.opacity(0.8))
-            }
-            .frame(width: size, height: size)
-            .contentShape(Circle())
-        }
-        .buttonStyle(PressableScaleButtonStyle())
-        .disabled(disabled)
-        .opacity(disabled ? 0.4 : 1.0)
-        .animation(AnimationConfig.bouncySpring, value: recorder.isRecording)
-        .onChange(of: recorder.isRecording) { _, isRecording in
-            if isRecording {
-                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                    pulseOpacity = 1.0
-                }
-            } else {
-                pulseOpacity = 0.0
-            }
-        }
-    }
-}
-
-struct CompactSendButton: View {
-    @Binding var buttonState: SendButtonState
-    @Binding var revealedMood: Double?
-    let isEnabled: Bool
-    let action: () -> Void
-    var size: CGFloat = 44
-
-    @State private var bounce: Int = 0
-
-    var body: some View {
-        Button {
-            bounce &+= 1
-            action()
-        } label: {
-            ZStack {
-                iconView
-            }
-            .frame(width: size, height: size)
-            .foregroundStyle(iconColor)
-            .contentShape(Circle())
-        }
-        .buttonStyle(PressableScaleButtonStyle())
-        .disabled(!isEnabled || buttonState != .idle)
-        .scaleEffect(buttonState == .moodRevealing ? 1.1 : 1.0)
-        .animation(AnimationConfig.smoothTransition, value: buttonState)
-        .accessibilityLabel(NSLocalizedString("发送", comment: "Send"))
-    }
-
-    /// 和 mic/photo 统一：只是一个 symbol；颜色用"可用 → accent 蓝 / 禁用 → 次要灰"语义来暗示状态。
-    /// 不加额外玻璃底、光晕或阴影；按钮在 iconToolbarRow 里已经坐在 liquidGlassCard 上，够了。
-    @ViewBuilder
-    private var iconView: some View {
-        switch buttonState {
-        case .sending:
-            ProgressView()
-                .progressViewStyle(CircularProgressViewStyle(tint: .secondary))
-                .scaleEffect(0.75)
-        default:
-            Image(systemName: "paperplane.fill")
-                .font(.system(size: size * 0.42, weight: .semibold))
-                .symbolEffect(.bounce, value: bounce)
-        }
-    }
-
-    /// 仅用颜色区分状态，不再堆叠玻璃+光晕
-    private var iconColor: Color {
-        switch buttonState {
-        case .idle, .completed:
-            return isEnabled
-                ? Color(red: 48/255, green: 164/255, blue: 255/255)
-                : Color.primary.opacity(0.3)
-        case .sending:
-            return .secondary
-        case .moodRevealing:
-            return Color.moodSpectrum(value: revealedMood ?? 0.5)
-        }
-    }
-}
-
 // 插入录音行子视图以简化列表项
 struct RecordingRow: View {
     let recording: Recording
@@ -2192,56 +1863,140 @@ struct RecordingRow: View {
     let onPlay: () -> Void
     let onDelete: () -> Void
 
+    private var isCurrent: Bool {
+        controller.currentPlayingFileName == recording.fileName
+    }
+    private var isPlayingThis: Bool {
+        isCurrent && controller.isPlaying
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
+            // 左侧 mini 播放/暂停按钮 —— 单层 glass,小尺寸,贴合输入卡的玻璃语言
+            Button(action: onPlay) {
+                Image(systemName: isPlayingThis ? "pause.fill" : "play.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.glass)
+            .disabled(isTranscribing)
+            .accessibilityLabel(isPlayingThis
+                ? NSLocalizedString("暂停", comment: "Pause")
+                : NSLocalizedString("播放", comment: "Play"))
+
             Image(systemName: "waveform")
-                .foregroundColor(.blue)
+                .font(.footnote)
+                .foregroundStyle(Color.accentColor.opacity(0.85))
+
             Text(formattedDuration(
-                currentTime: controller.currentPlayingFileName == recording.fileName ? controller.currentTime : 0,
+                currentTime: isCurrent ? controller.currentTime : 0,
                 totalDuration: recording.duration
             ))
-                .font(.caption)
-                .monospacedDigit()
-            Spacer()
-            Button(action: onPlay) {
-                Image(systemName: controller.isPlaying && controller.currentPlayingFileName == recording.fileName ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 24))
-                    .foregroundColor(.accentColor)
-            }
-            .buttonStyle(PlainButtonStyle())
-            .fixedSize()
-            .disabled(isTranscribing)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.primary.opacity(0.85))
+
+            Spacer(minLength: 4)
+
+            // 右侧 ghost 删除钮 —— 不抢眼,但 hit area 够大
             Button(action: onDelete) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 24))
-                    .foregroundColor(.red)
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(PlainButtonStyle())
-            .fixedSize()
+            .buttonStyle(.plain)
+            .accessibilityLabel(NSLocalizedString("删除录音", comment: "Delete recording"))
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(
+        .background {
+            // 玻璃胶囊背景 + 播放进度作为 accent 色 capsule overlay,
+            // 比之前的实色灰底 + 蓝条柔和很多。
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-#if canImport(UIKit)
-                    .fill(Color(.systemGray6))
-#else
-                    .fill(Color(NSColor.controlBackgroundColor))
-#endif
-                if controller.currentPlayingFileName == recording.fileName && recording.duration > 0 {
+                Capsule()
+                    .fill(.clear)
+                    .liquidGlassCapsule()
+                if isCurrent && recording.duration > 0 {
                     GeometryReader { geo in
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.blue.opacity(0.3))
+                        Capsule()
+                            .fill(Color.accentColor.opacity(0.18))
                             .frame(width: geo.size.width * controller.progress)
                     }
+                    .clipShape(Capsule())
+                    .allowsHitTesting(false)
                 }
             }
-        )
-        // 移除自定义 transition，依赖 withAnimation 平滑移动
+        }
     }
 }
 
+
+// MARK: - Input photo thumbnail (lazy decode + cache)
+//
+// 抽出独立子视图避免父视图(HomeView)body 重 eval 时反复 `UIImage(data:)` 解码 9 张图。
+// 之前每输入一个字符就触发 9 次解码,选完照片后输入卡卡得没法用。
+//
+// 内部用 .task(id: data) 把 UIImage 解码挪到 Task.detached 后台,完成后存到 @State。
+// data 变了(新一组照片)才重新解码。
+
+struct InputPhotoThumbnail: View {
+    let data: Data
+    let onRemove: () -> Void
+
+    #if canImport(UIKit)
+    @State private var decoded: UIImage?
+    #else
+    @State private var decoded: NSImage?
+    #endif
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let decoded {
+                    #if canImport(UIKit)
+                    Image(uiImage: decoded)
+                        .resizable()
+                        .scaledToFill()
+                    #else
+                    Image(nsImage: decoded)
+                        .resizable()
+                        .scaledToFill()
+                    #endif
+                } else {
+                    Color.secondary.opacity(0.10)
+                        .overlay(
+                            ProgressView()
+                                .controlSize(.small)
+                        )
+                }
+            }
+            .frame(width: 80, height: 80)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 20))
+                    .foregroundColor(.white)
+                    .background(Circle().fill(Color.black.opacity(0.6)))
+            }
+            .buttonStyle(PlainButtonStyle())
+            .padding(4)
+        }
+        .task(id: data) {
+            // detached → 解码不占主线程,选 9 张图后输入框立刻能用,缩略图陆续浮上来。
+            let bytes = data
+            let image = await Task.detached(priority: .userInitiated) {
+                #if canImport(UIKit)
+                return UIImage(data: bytes)
+                #else
+                return NSImage(data: bytes)
+                #endif
+            }.value
+            await MainActor.run { self.decoded = image }
+        }
+    }
+}
 
 // 日记预览视图
 struct DiaryPreviewView: View {

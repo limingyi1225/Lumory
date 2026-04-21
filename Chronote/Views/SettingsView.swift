@@ -351,17 +351,10 @@ private struct AdvancedSettingsView: View {
     @State private var showDatabaseRecoveryAlert = false
     @State private var isRecoveringDatabase = false
 
-    #if DEBUG
-    @State private var showHomeDesignPreview = false
-    #endif
-
     var body: some View {
         Form {
             troubleshootingSection
             perServiceIndexSection
-            #if DEBUG
-            devToolsSection
-            #endif
         }
         #if os(macOS)
         .listStyle(.plain)
@@ -376,12 +369,6 @@ private struct AdvancedSettingsView: View {
         .sheet(isPresented: $showDiagnosticSheet) {
             SyncDiagnosticView(result: diagnosticResult)
         }
-        #if DEBUG
-        .sheet(isPresented: $showHomeDesignPreview) {
-            HomeDesignPreviewView()
-                .environment(\.managedObjectContext, viewContext)
-        }
-        #endif
         .alert(NSLocalizedString("数据库修复", comment: "Database repair alert title"), isPresented: $showDatabaseRecoveryAlert) {
             Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }
             Button(NSLocalizedString("修复", comment: "Repair"), role: .destructive) { performDatabaseRecovery() }
@@ -449,32 +436,6 @@ private struct AdvancedSettingsView: View {
         }
     }
 
-    #if DEBUG
-    @ViewBuilder
-    private var devToolsSection: some View {
-        Section(
-            header: header(NSLocalizedString("开发工具", comment: "Dev tools")),
-            footer: Text(NSLocalizedString("仅 DEBUG 构建可见。生成的样本 summary 以『【样本】』开头，可随时清除。",
-                                           comment: "Dev tools footer"))
-        ) {
-            SampleDataGeneratorRow()
-            Button {
-                showHomeDesignPreview = true
-            } label: {
-                Label {
-                    Text(NSLocalizedString("首页 UI 预览", comment: "Home UI preview"))
-                        .foregroundStyle(Color.primary)
-                } icon: {
-                    Image(systemName: "square.grid.2x2")
-                        .foregroundStyle(Color.accentColor)
-                        .symbolRenderingMode(.hierarchical)
-                        .frame(width: 24)
-                }
-            }
-        }
-    }
-    #endif
-
     private func header(_ text: String) -> some View {
         Text(text)
             .font(.caption.weight(.semibold))
@@ -517,6 +478,36 @@ private struct AdvancedSettingsView: View {
     }
 }
 
+// MARK: - Backfill coordinator
+//
+// CLAUDE.md 点名的 `.shared.runningTask` race 的 UI 层解。
+// `ThemeBackfillService` / `EmbeddingBackfillService` / `PromptSuggestionEngine` 都是
+// 进程级单例且**非 actor-safe**(run() 的 `runningTask != nil` 检查没锁);OneClickRebuildRow
+// 走 theme → embedding → suggestions 串行,阶段之间 `progress.isRunning` 有 sub-ms 窗口都
+// 为 false,若此时用户从 AdvancedSettings 触发 per-service rebuild,会撞上 silent-drop。
+//
+// 这里用一个 `@Published` flag 跨 view 广播"OneClick 整体串行期间",让三个 rebuild 入口
+// 通过观察这个 flag + 各自 service 的 `isRunning` 互相 disable。
+@MainActor
+private final class BackfillCoordinator: ObservableObject {
+    static let shared = BackfillCoordinator()
+
+    /// OneClickRebuildRow.runAll() 整条串行流期间为 true。defer 复位,异常路径也安全。
+    @Published private(set) var isOneClickRunning: Bool = false
+
+    private init() {}
+
+    func runOneClick(_ operation: () async -> Void) async {
+        guard !isOneClickRunning else {
+            Log.info("[BackfillCoordinator] 已有一键重建在跑,忽略并发触发", category: .ui)
+            return
+        }
+        isOneClickRunning = true
+        defer { isOneClickRunning = false }
+        await operation()
+    }
+}
+
 // MARK: - One-click rebuild row
 //
 // 大版本升级后一键把三件事连着跑：重抽主题 → 补向量 → 暖 AI 提示词缓存。
@@ -527,8 +518,12 @@ private struct OneClickRebuildRow: View {
     @StateObject private var themeService = ThemeBackfillService.shared
     @StateObject private var embeddingService = EmbeddingBackfillService.shared
     @StateObject private var suggestionEngine = PromptSuggestionEngine.shared
+    @StateObject private var coordinator = BackfillCoordinator.shared
 
     @State private var stage: Stage = .idle
+    /// 待索引条目数 —— 进入设置时 / 重建完成后刷新一次。nil = 还没查过,不显示数字。
+    @State private var pendingCount: Int? = nil
+    @State private var isCountingPending: Bool = false
 
     private enum Stage: Equatable {
         case idle
@@ -547,17 +542,60 @@ private struct OneClickRebuildRow: View {
                         .font(.body.weight(.medium))
                     Text(statusText)
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(statusColor)
                 }
             } icon: {
-                Image(systemName: "wand.and.stars")
+                Image(systemName: stageIcon)
                     .imageScale(.large)
                     .symbolRenderingMode(.hierarchical)
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(stageIconColor)
                     .frame(width: 24)
             }
             Spacer()
             trailing
+        }
+        .task {
+            await refreshPendingCount()
+        }
+    }
+
+    private var stageIcon: String {
+        switch stage {
+        case .failed:
+            // .failed 必须独立分支 —— 之前和 .idle/.done 共用,凑巧 pendingCount = 0 时
+            // 显示 ✓,误导用户以为成功了。
+            return "exclamationmark.triangle.fill"
+        case .idle, .done:
+            if pendingCount == 0 { return "checkmark.seal.fill" }
+            return "wand.and.stars"
+        case .themes, .embeddings, .suggestions:
+            return "wand.and.stars"
+        }
+    }
+
+    private var stageIconColor: Color {
+        switch stage {
+        case .failed:
+            return .orange
+        case .idle, .done:
+            if pendingCount == 0 { return Color.moodSpectrum(value: 0.85) }
+            return .accentColor
+        case .themes, .embeddings, .suggestions:
+            return .accentColor
+        }
+    }
+
+    private var statusColor: Color {
+        switch stage {
+        case .failed:
+            return .orange.opacity(0.9)
+        case .idle:
+            if let n = pendingCount, n == 0 {
+                return Color.moodSpectrum(value: 0.85).opacity(0.85)
+            }
+            return .secondary
+        default:
+            return .secondary
         }
     }
 
@@ -573,12 +611,11 @@ private struct OneClickRebuildRow: View {
             } label: {
                 Text(NSLocalizedString("一键开始", comment: "Start one-click"))
                     .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.2)))
-                    .foregroundColor(.accentColor)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.glassProminent)
+            // 另一条 rebuild 在跑(Advanced 的 per-service,或其他 OneClick 实例)→ 禁用,
+            // 防撞 `.shared.runningTask` 非 actor-safe 的 race 窗口。
+            .disabled(isExternalBackfillActive)
         case .themes, .embeddings, .suggestions:
             VStack(alignment: .trailing, spacing: 4) {
                 ProgressView()
@@ -589,11 +626,36 @@ private struct OneClickRebuildRow: View {
         }
     }
 
+    /// 本 row 当前不在 OneClick 运行态(那时 trailing 另走进度分支)时,外部是否有 rebuild 在跑。
+    /// `coordinator.isOneClickRunning` 覆盖 OneClick 阶段间隙(service.isRunning 暂时全 false
+    /// 的那几 ms);两个 service 的 `progress.isRunning` 覆盖 AdvancedSettings 入口;
+    /// `suggestionEngine.isRefreshing` 覆盖 suggestions 阶段。
+    private var isExternalBackfillActive: Bool {
+        coordinator.isOneClickRunning
+            || themeService.progress.isRunning
+            || embeddingService.progress.isRunning
+            || suggestionEngine.isRefreshing
+    }
+
     private var statusText: String {
         switch stage {
         case .idle:
-            return NSLocalizedString("对存量日记跑一遍最新的 AI 管线：主题 → 向量 → 提示词",
-                                     comment: "One-click idle subtitle")
+            // 还没查过 → 模糊文案;有待索引 → 提示数量;0 → 明确"无需重建"。
+            guard let n = pendingCount else {
+                if isCountingPending {
+                    return NSLocalizedString("正在检查待索引条目…", comment: "Checking pending")
+                }
+                return NSLocalizedString("对存量日记跑一遍最新的 AI 管线", comment: "One-click idle subtitle")
+            }
+            if n == 0 {
+                return NSLocalizedString("索引已是最新,无需重建 ✓", comment: "Up to date")
+            }
+            // 用"项"而不是"条" —— pendingCount 是主题待修 + 向量待补的**和**,
+            // 一篇日记可能两边都需要,会被算两次。"项"更诚实(任务数,不是日记数)。
+            return String(
+                format: NSLocalizedString("有 %d 项索引待更新,建议运行一次", comment: "Pending count"),
+                n
+            )
         case .themes:
             return NSLocalizedString("第 1 / 3 步：重抽主题…", comment: "One-click stage 1")
         case .embeddings:
@@ -601,10 +663,20 @@ private struct OneClickRebuildRow: View {
         case .suggestions:
             return NSLocalizedString("第 3 / 3 步：生成个性化提示词…", comment: "One-click stage 3")
         case .done:
-            return NSLocalizedString("索引已是最新，随时可再跑一次", comment: "One-click done")
+            return NSLocalizedString("索引已是最新 ✓", comment: "One-click done")
         case .failed(let message):
             return String(format: NSLocalizedString("部分步骤失败：%@", comment: "One-click failed"), message)
         }
+    }
+
+    /// 拉取两个 backfill 服务的待处理总数。一次并发 + 求和。
+    private func refreshPendingCount() async {
+        isCountingPending = true
+        async let themePending = ThemeBackfillService.shared.pendingCount()
+        async let embeddingPending = EmbeddingBackfillService.shared.pendingCount()
+        let total = (await themePending) + (await embeddingPending)
+        pendingCount = total
+        isCountingPending = false
     }
 
     private var progressDetail: String {
@@ -630,35 +702,46 @@ private struct OneClickRebuildRow: View {
             return
         default: break
         }
+        // 兜底:Advanced 的 per-service 入口/另一条 OneClick 正在跑(按钮 disabled 之后仍
+        // 可能因观察时延被触发)→ 直接早退。
+        guard !isExternalBackfillActive else {
+            Log.info("[OneClickRebuild] 另一路 rebuild 已在跑(Advanced 或并发 OneClick)，忽略", category: .ui)
+            return
+        }
 
-        stage = .themes
-        // wordCount backfill 和主题一起跑——两者都扫全表，挂一块儿不额外往返。
-        // 先跑 wordCount：不依赖网络，几十 ms 搞定；顺序上放最前面让"累计字数"最快恢复。
-        _ = await WordCountBackfillService.forceBackfill()
-        _ = await ThemeBackfillService.shared.backfillAll()
+        await coordinator.runOneClick {
+            stage = .themes
+            // wordCount backfill 和主题一起跑——两者都扫全表，挂一块儿不额外往返。
+            // 先跑 wordCount：不依赖网络，几十 ms 搞定；顺序上放最前面让"累计字数"最快恢复。
+            _ = await WordCountBackfillService.forceBackfill()
+            _ = await ThemeBackfillService.shared.backfillAll()
 
-        stage = .embeddings
-        _ = await EmbeddingBackfillService.shared.backfillAll()
+            stage = .embeddings
+            _ = await EmbeddingBackfillService.shared.backfillAll()
 
-        stage = .suggestions
-        // forceRefresh 现在返回 Bool：true 表示真的生成了新 bundle；false 表示失败或信号不够。
-        // 旧的 `current != nil` 判定在 AI 失败时会被旧 cache 误判成成功。
-        let suggestionGenerated = await PromptSuggestionEngine.shared.forceRefresh()
-        // 信号不足（<3 条日记）走的也是 false，但这是预期行为不算失败——拿 writingStats 兜底判定一次。
-        let stats = await InsightsEngine.shared.writingStats()
-        let suggestionOk = suggestionGenerated || stats.totalEntries < 3
+            stage = .suggestions
+            // forceRefresh 现在返回 Bool：true 表示真的生成了新 bundle；false 表示失败或信号不够。
+            // 旧的 `current != nil` 判定在 AI 失败时会被旧 cache 误判成成功。
+            let suggestionGenerated = await PromptSuggestionEngine.shared.forceRefresh()
+            // 信号不足（<3 条日记）走的也是 false，但这是预期行为不算失败——拿 writingStats 兜底判定一次。
+            let stats = await InsightsEngine.shared.writingStats()
+            let suggestionOk = suggestionGenerated || stats.totalEntries < 3
 
-        let themeFailed = themeService.progress.failed
-        let embeddingFailed = embeddingService.progress.failed
+            let themeFailed = themeService.progress.failed
+            let embeddingFailed = embeddingService.progress.failed
 
-        if themeFailed == 0, embeddingFailed == 0, suggestionOk {
-            stage = .done
-        } else {
-            var parts: [String] = []
-            if themeFailed > 0 { parts.append(String(format: NSLocalizedString("主题 %d 失败", comment: ""), themeFailed)) }
-            if embeddingFailed > 0 { parts.append(String(format: NSLocalizedString("向量 %d 失败", comment: ""), embeddingFailed)) }
-            if !suggestionOk { parts.append(NSLocalizedString("提示词未生成", comment: "")) }
-            stage = .failed(parts.joined(separator: "，"))
+            if themeFailed == 0, embeddingFailed == 0, suggestionOk {
+                stage = .done
+            } else {
+                var parts: [String] = []
+                if themeFailed > 0 { parts.append(String(format: NSLocalizedString("主题 %d 失败", comment: ""), themeFailed)) }
+                if embeddingFailed > 0 { parts.append(String(format: NSLocalizedString("向量 %d 失败", comment: ""), embeddingFailed)) }
+                if !suggestionOk { parts.append(NSLocalizedString("提示词未生成", comment: "")) }
+                stage = .failed(parts.joined(separator: "，"))
+            }
+
+            // 跑完后回到 idle 之前刷一遍 pending —— 用户立刻能看到"已是最新 ✓"。
+            await refreshPendingCount()
         }
     }
 }
@@ -667,6 +750,17 @@ private struct OneClickRebuildRow: View {
 
 private struct EmbeddingBackfillRow: View {
     @StateObject private var service = EmbeddingBackfillService.shared
+    // OneClickRow / ThemeBackfillRow / suggestion refresh 在跑时禁用本按钮,
+    // 避免与 `.shared.runningTask` 的非 actor-safe 入队撞 race。
+    @StateObject private var themeService = ThemeBackfillService.shared
+    @StateObject private var suggestionEngine = PromptSuggestionEngine.shared
+    @StateObject private var coordinator = BackfillCoordinator.shared
+
+    private var isOtherBackfillActive: Bool {
+        coordinator.isOneClickRunning
+            || themeService.progress.isRunning
+            || suggestionEngine.isRefreshing
+    }
 
     var body: some View {
         HStack {
@@ -696,12 +790,9 @@ private struct EmbeddingBackfillRow: View {
                 Button(action: start) {
                     Text(NSLocalizedString("开始", comment: "Start"))
                         .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
-                        .foregroundColor(.accentColor)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.glass)
+                .disabled(isOtherBackfillActive)
             }
         }
     }
@@ -733,7 +824,18 @@ private struct EmbeddingBackfillRow: View {
 
 private struct ThemeBackfillRow: View {
     @StateObject private var service = ThemeBackfillService.shared
+    // 同样的 `.shared.runningTask` race —— OneClick / Embedding / Suggestion 路径在跑时
+    // 禁用本菜单。
+    @StateObject private var embeddingService = EmbeddingBackfillService.shared
+    @StateObject private var suggestionEngine = PromptSuggestionEngine.shared
+    @StateObject private var coordinator = BackfillCoordinator.shared
     @State private var showAllConfirm = false
+
+    private var isOtherBackfillActive: Bool {
+        coordinator.isOneClickRunning
+            || embeddingService.progress.isRunning
+            || suggestionEngine.isRefreshing
+    }
 
     var body: some View {
         HStack {
@@ -774,11 +876,9 @@ private struct ThemeBackfillRow: View {
                 } label: {
                     Text(NSLocalizedString("开始", comment: "Start"))
                         .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
-                        .foregroundColor(.accentColor)
                 }
+                .buttonStyle(.glass)
+                .disabled(isOtherBackfillActive)
             }
         }
         .alert(NSLocalizedString("重抽所有日记的主题？", comment: "Backfill all confirm title"),
@@ -813,100 +913,3 @@ private struct ThemeBackfillRow: View {
     }
 }
 
-// MARK: - Sample data generator row (DEBUG only)
-
-#if DEBUG
-private struct SampleDataGeneratorRow: View {
-    @StateObject private var generator = SampleDataGenerator.shared
-    @State private var includeEmbeddings: Bool = true
-    @State private var showRemoveConfirm = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(NSLocalizedString("样本日记", comment: "Sample diary entries"))
-                    Text(statusText)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            } icon: {
-                Image(systemName: "square.stack.3d.up")
-                    .imageScale(.large)
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundColor(.accentColor)
-                    .frame(width: 24)
-            }
-
-            Toggle(isOn: $includeEmbeddings) {
-                Text(NSLocalizedString("顺便生成 embedding（需要网络）", comment: "Include embeddings toggle"))
-                    .font(.caption)
-            }
-            .disabled(generator.isRunning)
-
-            HStack(spacing: 12) {
-                Button {
-                    Task { await generator.generateSamples(includeEmbeddings: includeEmbeddings) }
-                } label: {
-                    Text(generator.isRunning
-                         ? NSLocalizedString("生成中…", comment: "Generating...")
-                         : NSLocalizedString("生成样本", comment: "Generate samples"))
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
-                        .foregroundColor(.accentColor)
-                }
-                .buttonStyle(.plain)
-                .disabled(generator.isRunning)
-
-                Button(role: .destructive) {
-                    showRemoveConfirm = true
-                } label: {
-                    Text(NSLocalizedString("清除样本", comment: "Remove samples"))
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.red.opacity(0.12)))
-                        .foregroundColor(.red)
-                }
-                .buttonStyle(.plain)
-                .disabled(generator.isRunning)
-
-                if generator.isRunning {
-                    ProgressView()
-                }
-            }
-        }
-        .confirmationDialog(
-            NSLocalizedString("清除所有样本日记？", comment: "Remove sample entries prompt"),
-            isPresented: $showRemoveConfirm,
-            titleVisibility: .visible
-        ) {
-            Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
-                Task { await generator.removeAllSamples() }
-            }
-            Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }
-        } message: {
-            Text(NSLocalizedString("只删除 summary 以『【样本】』开头的条目，你的真实日记不受影响。", comment: "Remove samples footnote"))
-        }
-    }
-
-    private var statusText: String {
-        if generator.isRunning {
-            return String(
-                format: NSLocalizedString("进度 %d / %d", comment: "Sample gen progress"),
-                generator.generated,
-                generator.total
-            )
-        }
-        if let error = generator.lastError {
-            return String(format: NSLocalizedString("上次失败：%@", comment: "Sample gen last error"), error)
-        }
-        if generator.total > 0 {
-            return String(format: NSLocalizedString("上次生成 %d 条", comment: "Sample gen last count"), generator.generated)
-        }
-        return NSLocalizedString("一键生成 40 条覆盖近 90 天的样本", comment: "Sample gen subtitle")
-    }
-}
-#endif

@@ -17,7 +17,7 @@ struct MoodSpectrumBar: View {
     @State private var breathPhase: CGFloat = 0
     @State private var revealProgress: CGFloat = 0
     @State private var glowPulse: CGFloat = 0
-    @State private var animatedOpacity: CGFloat = 0.55
+    @State private var animatedOpacity: CGFloat = 0.32
     @State private var isAnimating: Bool = false
     // 反复开/关动画的 Task 必须能取消——不然延迟启动的 `repeatForever` 会在状态已经切走后启动，
     // 进入无法被 stopAllAnimations 终止的"幽灵动画"态（pulse 永不停）。
@@ -44,7 +44,13 @@ struct MoodSpectrumBar: View {
                     breathingGlow
                 }
             }
-            .liquidGlassCapsule()
+            // 玻璃材质带 18% 白 tint —— 让胶囊整体偏白透,边缘的玻璃折射感更明显。
+            .liquidGlassCapsule(tint: .white)
+            // 0.5pt 白 inset 描边 —— 给胶囊一个清晰的边缘高光,玻璃片"翘起来"的感觉更强。
+            .overlay {
+                Capsule()
+                    .strokeBorder(Color.white.opacity(0.55), lineWidth: 0.5)
+            }
         }
         .frame(height: barHeight)
         .onAppear {
@@ -65,9 +71,12 @@ struct MoodSpectrumBar: View {
 
     // MARK: - 目标透明度
 
+    /// idle 态故意压低饱和度,让外层 liquidGlassCapsule 的材质主导视觉,
+    /// 和 Insights 的玻璃元素气质对齐;analyzing/revealed 仍保持饱满,因为
+    /// 情绪反馈那一下需要视觉冲击。
     private var targetOpacity: Double {
         switch displayState {
-        case .idle:       return 0.55
+        case .idle:       return 0.32
         case .analyzing:  return 0.85
         case .revealed:   return 1.0
         }
@@ -94,7 +103,7 @@ struct MoodSpectrumBar: View {
                 Capsule()
                     .fill(
                         LinearGradient(
-                            colors: [.white.opacity(0.15), .white.opacity(0.0)],
+                            colors: [.white.opacity(0.06), .white.opacity(0.0)],
                             startPoint: .top,
                             endPoint: .center
                         )
@@ -213,7 +222,7 @@ struct MoodSpectrumBar: View {
             stopAllAnimations()
             revealProgress = 0
             withAnimation(.easeInOut(duration: 1.2)) {
-                animatedOpacity = 0.55
+                animatedOpacity = 0.32
             }
         }
     }

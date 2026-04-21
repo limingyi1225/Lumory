@@ -115,6 +115,18 @@ final class EmbeddingBackfillService: ObservableObject {
         await publish(Progress(processed: processed, total: missingIDs.count, failed: failed, isRunning: false))
     }
 
+    // MARK: Public count
+
+    /// 当前缺 embedding 的条目数。用 count 而不是 fetch + count,扫一遍主键索引就出来,
+    /// 不会把 NSManagedObject 实例化进 context,Settings 页面随手调安全。
+    func pendingCount() async -> Int {
+        await persistence.container.performBackgroundTask { context -> Int in
+            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            request.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
+            return (try? context.count(for: request)) ?? 0
+        }
+    }
+
     // MARK: DB helpers
 
     private func fetchMissingObjectIDs() async -> [NSManagedObjectID] {

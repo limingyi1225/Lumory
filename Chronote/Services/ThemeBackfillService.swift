@@ -127,6 +127,33 @@ final class ThemeBackfillService: ObservableObject {
         await publish(Progress(processed: processed, total: objectIDs.count, failed: failed, isRunning: false))
     }
 
+    // MARK: Public count
+
+    /// 当前"主题为空 OR 含 banned 词"的待修条目数。Settings 用来判断"需要重建"。
+    /// 不能纯靠 SQL count —— banned 检测要走 Swift 字符串集合,所以还是 fetch 一遍 themes 字符串
+    /// 但 propertiesToFetch 限定只读 themes 一列,代价远小于实例化整个 entry。
+    func pendingCount() async -> Int {
+        await persistence.container.performBackgroundTask { context -> Int in
+            let request: NSFetchRequest<NSDictionary> = NSFetchRequest(entityName: "DiaryEntry")
+            request.predicate = NSPredicate(format: "text != nil AND text != %@", "")
+            request.resultType = .dictionaryResultType
+            request.propertiesToFetch = ["themes"]
+            guard let rows = try? context.fetch(request) else { return 0 }
+            var count = 0
+            for row in rows {
+                let themesCSV = row["themes"] as? String ?? ""
+                let themes = themesCSV
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                if themes.isEmpty || themes.contains(where: { InsightsEngine.isBannedTheme($0) }) {
+                    count += 1
+                }
+            }
+            return count
+        }
+    }
+
     // MARK: DB helpers
 
     private func fetchCandidates(mode: Mode) async -> [NSManagedObjectID] {

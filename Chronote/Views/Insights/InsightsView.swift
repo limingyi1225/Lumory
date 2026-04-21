@@ -133,49 +133,27 @@ struct InsightsView: View {
 
     // MARK: Range selector
 
+    /// iOS 26 原生 segmented Picker:自动获得液态玻璃材质 + 拖拽切换 + 系统触觉。
+    /// 不再自绘 capsule + matchedGeometryEffect,代码量从 ~40 行降到 ~10 行。
     private var rangeSelector: some View {
-        HStack(spacing: 6) {
+        Picker(NSLocalizedString("时间范围", comment: "Time range picker"), selection: $range) {
             ForEach(TimeRange.allCases) { tr in
-                rangeButton(tr)
+                // 视觉上是 shortLabel("月"),但 VoiceOver 读 label 的全文("最近 30 天")。
+                // 不加 a11y label 的话 VoiceOver 只会读"月"用户根本听不懂。
+                Text(tr.shortLabel)
+                    .tag(tr)
+                    .accessibilityLabel(tr.label)
             }
         }
-        .padding(4)
-        .liquidGlassCapsule()
-        .accessibilityElement(children: .contain)
-    }
-
-    @ViewBuilder
-    private func rangeButton(_ tr: TimeRange) -> some View {
-        let isSelected = range == tr
-        Button {
-            guard range != tr else { return }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .accessibilityLabel(NSLocalizedString("时间范围", comment: "Time range picker"))
+        .onChange(of: range) { _, _ in
             #if canImport(UIKit)
             UIImpactFeedbackGenerator(style: .soft).impactOccurred()
             #endif
-            withAnimation(.interpolatingSpring(stiffness: 320, damping: 26)) {
-                range = tr
-            }
-        } label: {
-            Text(tr.shortLabel)
-                .font(.subheadline.weight(isSelected ? .semibold : .regular))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                .background {
-                    if isSelected {
-                        Capsule()
-                            .fill(Color.primary.opacity(0.12))
-                            .matchedGeometryEffect(id: "rangePill", in: rangeNamespace)
-                    }
-                }
-                .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(tr.label)
-        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
-
-    @Namespace private var rangeNamespace
 
     // MARK: Narrative CTA
 
@@ -320,11 +298,20 @@ private struct ThemeFilteredEntriesView: View {
                             .foregroundColor(.secondary)
                     }
                 } else {
-                    List(entries, id: \.objectID) { entry in
-                        NavigationLink(value: entry) {
-                            DiaryEntryRow(entry: entry)
+                    // .plain + 透明 row + 清空 List 背景 → DiaryEntryRow 自带的 liquidGlassCard
+                    // 才能干净地浮在系统的玻璃 sheet 背景上,不被 insetGrouped 的灰底压住。
+                    List {
+                        ForEach(entries, id: \.objectID) { entry in
+                            NavigationLink(value: entry) {
+                                DiaryEntryRow(entry: entry)
+                            }
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                         }
                     }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
                     .navigationDestination(for: DiaryEntry.self) { entry in
                         DiaryDetailView(entry: entry, startInEditMode: false)
                     }
@@ -361,11 +348,18 @@ private struct PointDetailSheet: View {
 
     var body: some View {
         NavigationStack {
-            List(entries, id: \.objectID) { entry in
-                NavigationLink(value: entry) {
-                    DiaryEntryRow(entry: entry)
+            List {
+                ForEach(entries, id: \.objectID) { entry in
+                    NavigationLink(value: entry) {
+                        DiaryEntryRow(entry: entry)
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                 }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
             .overlay {
                 if entries.isEmpty {
                     Text(NSLocalizedString("该时段没有日记", comment: "No entries for bucket"))

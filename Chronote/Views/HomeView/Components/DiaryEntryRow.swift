@@ -101,10 +101,7 @@ struct DiaryEntryRow: View {
             }
         }
         .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color.secondary.opacity(0.1))
-        )
+        .liquidGlassCard(cornerRadius: 16, interactive: true)
         .onAppear {
             loadThumbnail()
             if isSummaryLoading {

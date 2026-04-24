@@ -1,21 +1,20 @@
 import Foundation
 import CoreData
 import CloudKit
-import SQLite3
 #if canImport(UIKit)
 import UIKit
 #endif
 
 final class DatabaseRecoveryService {
     static let shared = DatabaseRecoveryService()
-    
+
     private init() {}
-    
+
     enum RecoveryError: LocalizedError {
         case backupFailed
         case recoveryFailed
         case noBackupAvailable
-        
+
         var errorDescription: String? {
             switch self {
             case .backupFailed:
@@ -27,44 +26,11 @@ final class DatabaseRecoveryService {
             }
         }
     }
-    
-    func checkDatabaseHealth(at url: URL) -> Bool {
-        let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: url.path) else {
-            return false
-        }
-        
-        // Basic integrity check using SQLite
-        var db: OpaquePointer?
-        let result = sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil)
-        defer { 
-            if let db = db {
-                sqlite3_close(db)
-            }
-        }
-        
-        if result != SQLITE_OK || db == nil {
-            return false
-        }
-        
-        // Run integrity check
-        var statement: OpaquePointer?
-        let sql = "PRAGMA integrity_check;"
-        
-        if sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK {
-            defer { sqlite3_finalize(statement) }
-            
-            if sqlite3_step(statement) == SQLITE_ROW {
-                if let result = sqlite3_column_text(statement, 0) {
-                    let resultString = String(cString: result)
-                    return resultString == "ok"
-                }
-            }
-        }
-        
-        return false
-    }
-    
+
+    // 注：以前这里有 checkDatabaseHealth(at:) 跑 `PRAGMA integrity_check`，
+    // 但 WAL 模式下 SQLite 打开被 CoreData 锁住的 store 很容易误报 corrupt，
+    // 且启动路径的 integrity_check 本身成本高，已经从启动流程移除，函数也随之删除。
+
     func performRecovery(for container: NSPersistentCloudKitContainer, completion: @escaping (Result<Void, Error>) -> Void) {
         guard let storeURL = container.persistentStoreDescriptions.first?.url else {
             completion(.failure(RecoveryError.recoveryFailed))
@@ -191,29 +157,16 @@ final class DatabaseRecoveryService {
     }
     
     private func triggerCloudKitSync(container: NSPersistentCloudKitContainer) {
-        // 以前直接在 viewContext 上插+删，如果第二次 save（delete）失败，会留下一条空 DiaryEntry
-        // 同步到 CloudKit，所有设备上多出一条白板日记。
-        // 改到 background context + `perform`，任何步骤失败就 rollback，**不让脏数据走向 CloudKit**。
-        let bg = container.newBackgroundContext()
-        bg.perform {
-            guard let entity = NSEntityDescription.entity(forEntityName: "DiaryEntry", in: bg) else {
-                Log.error("[DatabaseRecovery] 无法获取 DiaryEntry entity", category: .persistence)
-                return
-            }
-            let entry = NSManagedObject(entity: entity, insertInto: bg)
-            entry.setValue(UUID(), forKey: "id")
-            entry.setValue(Date(), forKey: "date")
-            entry.setValue("", forKey: "text")
-            entry.setValue(0.5, forKey: "moodValue")
-
-            do {
-                try bg.save()
-                bg.delete(entry)
-                try bg.save()
-                Log.info("[DatabaseRecovery] Triggered CloudKit sync", category: .persistence)
-            } catch {
-                Log.error("[DatabaseRecovery] Failed to trigger sync, rolling back: \(error)", category: .persistence)
-                bg.rollback()
+        // 历史版本用"插一条空 DiaryEntry 再 delete"来戳 CloudKit，
+        // 第二次 save（delete）失败时会让空白日记同步到所有设备。
+        // 现在改成只读地让 CKContainer 拉一次 zone 列表 —— `NSPersistentCloudKitContainer`
+        // 的 mirror 会顺势检查 pending changes，达到同样的"戳一下"效果，零脏数据风险。
+        let ckContainer = CKContainer(identifier: "iCloud.com.Mingyi.Lumory")
+        ckContainer.privateCloudDatabase.fetchAllRecordZones { zones, error in
+            if let error {
+                Log.error("[DatabaseRecovery] CloudKit zone fetch failed: \(error)", category: .persistence)
+            } else {
+                Log.info("[DatabaseRecovery] Triggered CloudKit sync — zones=\(zones?.count ?? 0)", category: .persistence)
             }
         }
     }

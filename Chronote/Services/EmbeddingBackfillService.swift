@@ -40,7 +40,10 @@ final class EmbeddingBackfillService: ObservableObject {
     private let batchSize: Int
     private let throttleNanos: UInt64
 
-    private var runningTask: Task<Void, Never>?
+    // runningTask 加 @MainActor 隔离：所有 start / cancel 入口都要 await 到 MainActor 才能读写，
+    // 从而保证 Settings「一键重建」按钮、自动路径、未来的 auto-backfill 任何多入口都在同一条线上排队。
+    // 以前是裸 `var`，不 actor-safe，多入口 race 会让两份 run() 同时跑、progress 串号。
+    @MainActor private var runningTask: Task<Void, Never>?
 
     init(
         persistence: PersistenceController = .shared,
@@ -60,6 +63,7 @@ final class EmbeddingBackfillService: ObservableObject {
     // MARK: Public API
 
     /// 全量回填缺失 embedding 的条目。再次调用时若已在跑则忽略。
+    @MainActor
     @discardableResult
     func backfillAll() async -> Progress {
         if runningTask != nil {
@@ -78,6 +82,7 @@ final class EmbeddingBackfillService: ObservableObject {
         return progress
     }
 
+    @MainActor
     func cancel() {
         runningTask?.cancel()
         runningTask = nil

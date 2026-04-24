@@ -17,10 +17,16 @@ struct NetworkRetryHelper {
         var lastError: Error?
 
         for attempt in 0..<maxRetries {
+            // 入 attempt 前先看一眼 cancel。Task.sleep 自身能响应取消，但 operation() 内部
+            // 可能正在吃 30s URL timeout；用户切视图导致 Task cancel 时这里能立刻退出。
+            try Task.checkCancellation()
             do {
                 return try await operation()
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 lastError = error
+                try Task.checkCancellation()
 
                 // Check if it's a retryable error
                 if isRetryableError(error) && attempt < maxRetries - 1 {

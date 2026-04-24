@@ -15,6 +15,7 @@ struct DiaryDetailView: View {
     var showUnifiedToolbar: Bool = false
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.aiService) private var aiService
     @State private var showDeleteAlert = false
     @StateObject private var audioPlaybackController = AudioPlaybackController() // 新的控制器
     @State private var displayableAudioDuration: TimeInterval = 0.0 // State for fetched duration
@@ -747,10 +748,13 @@ struct DiaryDetailView: View {
             #endif
 
             if textChanged {
-                // 快照捕获：Task.detached 是 @Sendable，View struct 不能整个跨线程传
+                // 快照捕获：Task.detached 是 @Sendable，View struct 不能整个跨线程传。
+                // aiService 从 Environment 取，这里捕一个 Sendable 引用传进 static 方法，
+                // 便于测试 / Preview 通过 `.environment(\.aiService, MockAIService())` 替换。
                 let textSnapshot = editedText
+                let ai = aiService
                 Task.detached(priority: .utility) {
-                    await Self.refreshAIIndex(for: entryObjectID, newText: textSnapshot)
+                    await Self.refreshAIIndex(for: entryObjectID, newText: textSnapshot, ai: ai)
                 }
             }
         } catch {
@@ -770,7 +774,7 @@ struct DiaryDetailView: View {
     /// `setThemes(v1)` 会覆盖快的 `setThemes(v2)`，entry.text 是 v2 但 themes/embedding 是 v1，
     /// 静默污染语义检索。比较 `entry.wrappedText == newText`：只有当前 text 还等于我们当初快照的
     /// 那条才写。
-    private static func refreshAIIndex(for objectID: NSManagedObjectID, newText: String) async {
+    private static func refreshAIIndex(for objectID: NSManagedObjectID, newText: String, ai: AIServiceProtocol) async {
         let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let themes: [String]
@@ -780,8 +784,6 @@ struct DiaryDetailView: View {
             themes = []
             embedding = nil
         } else {
-            // 使用共享的 service 实例，避免每次编辑都重 new 一个。
-            let ai: AIServiceProtocol = OpenAIService.shared
             async let themesTask = ai.extractThemes(text: trimmed)
             async let embeddingTask = ai.embed(text: trimmed)
             (themes, embedding) = await (themesTask, embeddingTask)

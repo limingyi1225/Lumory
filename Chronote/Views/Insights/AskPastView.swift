@@ -20,6 +20,13 @@ struct AskPastView: View {
         var text: String
         var citedEntryIds: [UUID]
         var isStreaming: Bool
+        /// AI 流被中断但已产出部分内容 —— UI 在气泡下渲染提示条,并不把截断文案
+        /// 当正文 append。默认 false,保持旧行为不受影响。
+        var isIncomplete: Bool = false
+        /// AI 流彻底失败(零内容产出) —— UI 在气泡里直接显示这条 errorText
+        /// (localizedDescription),用户能看到"是网络问题还是认证问题"而不是空白 + 通用提示。
+        /// 和 `isIncomplete` 互斥:isIncomplete 是"断在中间",errorText 是"根本没开始"。
+        var errorText: String? = nil
     }
 
     @Environment(\.managedObjectContext) private var viewContext
@@ -241,6 +248,12 @@ struct AskPastView: View {
                             .fill(Color.primary.opacity(0.5))
                             .frame(width: 6, height: 6)
                     }
+                    if message.isIncomplete {
+                        incompleteBanner
+                    }
+                    if let err = message.errorText, !err.isEmpty {
+                        errorRow(message: err)
+                    }
                 }
             }
             if !message.citedEntryIds.isEmpty {
@@ -250,6 +263,45 @@ struct AskPastView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.trailing, 40)
+    }
+
+    /// 完全失败时在气泡内渲染错误原文(不是通用文案)。用户需要看到是 "The Internet
+    /// connection appears to be offline" 还是 "unauthorized" 才能判断下一步。
+    private func errorRow(message err: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "xmark.octagon.fill")
+                .foregroundStyle(.red)
+                .font(.caption)
+            Text(err)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.red.opacity(0.08))
+        )
+    }
+
+    /// 对话气泡里的"内容不完整"提示条 —— 取代早先把 `⚠️ 回答未完整…` 当文本 append 的做法。
+    /// 用户明确知道这是系统说的,不是 AI 的句号。
+    private var incompleteBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.caption)
+            Text(NSLocalizedString("stream.incomplete.banner", comment: "Stream truncated hint"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.orange.opacity(0.12))
+        )
     }
 
     // MARK: Citations — stacked fold
@@ -391,6 +443,14 @@ struct AskPastView: View {
                             msg.citedEntryIds = chunk.citedEntryIds
                         case .text:
                             msg.text += chunk.text
+                        case .truncated:
+                            // 流中断(已有部分正文) —— 不把 `⚠️…` 当正文 append,set flag,
+                            // UI 渲染独立提示条 + "重新生成"按钮。
+                            msg.isIncomplete = true
+                        case .failed:
+                            // 流完全失败 —— 把 localized error 塞进 errorText,
+                            // 气泡里直接显示 "Error: <原因>",用户能区分离线/认证/5xx。
+                            msg.errorText = chunk.text
                         }
                     }
                 }

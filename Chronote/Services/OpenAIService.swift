@@ -1,5 +1,6 @@
 import Foundation
 import CoreData
+import CryptoKit
 
 @available(iOS 15.0, macOS 12.0, *)
 final class OpenAIService: AIServiceProtocol {
@@ -22,7 +23,11 @@ final class OpenAIService: AIServiceProtocol {
 
     // MARK: - Public
     func summarize(text: String) async -> String? {
-        let requestKey = "summarize-\(text.hashValue)"
+        // SHA256 前缀做 debounce key：hashValue 碰撞概率虽低但不为零，且不稳定；SHA256 前 16 hex
+        // 对 debounce 场景足够（碰撞概率 <2^-64），一次改干净。
+        let digest = SHA256.hash(data: Data(text.utf8))
+        let shortHash = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        let requestKey = "summarize-\(shortHash)"
         return await debouncedRequest(key: requestKey, cancelledFallback: nil) {
             let prompt: String
             if text.containsChinese {
@@ -85,7 +90,7 @@ final class OpenAIService: AIServiceProtocol {
             return Double(number) / 100.0
         }
 
-        Log.error("[analyzeMood] 无法解析情绪分数，原始响应: \(resultStr.prefix(200)) —— 回退中性 0.5", category: .ai)
+        Log.error("[analyzeMood] 无法解析情绪分数，bodyLen=\(resultStr.count) —— 回退中性 0.5", category: .ai)
         return 0.5
     }
 
@@ -214,9 +219,35 @@ Diary Entries:
     /// 根据安全数据结构生成情绪报告（流式版本），避免CloudKit同步冲突
     /// `onChunk` 标 `@MainActor`：所有调用方都要更新 `@Published` / SwiftUI state，
     /// 如果闭包在后台线程触发 UI 更新，strict concurrency 会直接崩。
+    ///
+    /// 向下兼容形态：保留两参数 (entries:onChunk:) 调用点,但内部升级为 StreamEvent 引擎。
+    /// 需要感知"断流"的 caller 请用下面的 `(entries:onEvent:)` 版本。
     func generateReportFromData(entries: [DiaryEntryData], onChunk: @escaping @MainActor (String) -> Void) async {
+        await generateReportFromData(entries: entries) { @MainActor event in
+            switch event {
+            case .chunk(let text):
+                onChunk(text)
+            case .truncated(let reason):
+                // 旧 API 没有"区分 truncation"的能力:把本地化的截断说明继续当 chunk 发出去,保持原行为。
+                // 需要 UI 单独渲染 banner 的 caller 应改用 onEvent 版本。
+                onChunk("\n\n" + reason)
+            case .failed(let error):
+                let msg = Self.localizedReportError(error)
+                onChunk(msg)
+            case .done:
+                break
+            }
+        }
+    }
+
+    /// 结构化事件版本 —— NarrativeReader / InsightsEngine 用这个,可以区分 chunk vs truncated vs failed。
+    /// 所有事件都在 MainActor 上投递,和旧 onChunk 签名一致。
+    func generateReportFromData(entries: [DiaryEntryData], onEvent: @escaping @MainActor (StreamEvent) -> Void) async {
         Log.info("[OpenAIService] 开始从安全数据生成流式情绪报告，条目数量: \(entries.count)", category: .ai)
-        guard !entries.isEmpty else { return }
+        guard !entries.isEmpty else {
+            await MainActor.run { onEvent(.done) }
+            return
+        }
 
         // **用户真正的语言**：从日记原文里测。之前用 `prompt.contains("中文")` 判定，但 prompt
         // 模板里本身就硬写了"如果日记是中文的…"这种中文字样 → `contains("中文")` 恒真，英文
@@ -226,7 +257,7 @@ Diary Entries:
         let textBlock = entries.map { entry in
             "日期: \(entry.date)\n心情分数: \(Int(entry.moodValue * 100))\n摘要: \(entry.summary)\n正文: \(entry.text)"
         }.joined(separator: "\n---\n")
-        
+
         Log.info("[OpenAIService] 安全数据流式文本块长度: \(textBlock.count) 字符", category: .ai)
 
         let prompt = """
@@ -245,7 +276,7 @@ Diary Entries:
 Diary Entries:
 \(textBlock)
 """
-        
+
         struct Message: Codable { let role: String; let content: String }
         struct RequestBody: Codable {
             let model: String
@@ -261,18 +292,19 @@ Diary Entries:
             stream: true,
             reasoning_effort: "low"
         )
-        
+
         let url = backendURL
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // 后端鉴权用 shared secret；后端 middleware `requireAppSecret` 会 time-safe compare。
         request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
+        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("keep-alive", forHTTPHeaderField: "Connection")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         request.httpBody = try? jsonEncoder.encode(requestBody)
-        
+
         Log.info("[OpenAIService] 发送流式请求，模型: \(requestBody.model), stream: \(requestBody.stream)", category: .ai)
 
         // **与 streamChat 相同的去重保护**：NarrativeReader 直接把每个 onChunk 累加进 buffer，
@@ -284,7 +316,7 @@ Diary Entries:
             try await NetworkRetryHelper.performWithRetry {
                 Log.info("[OpenAIService] 开始安全数据流式请求...", category: .ai)
                 let (bytes, response) = try await URLSession.sslTolerantSession.bytes(for: request)
-                
+
                 if let http = response as? HTTPURLResponse {
                     Log.info("[OpenAIService] 响应状态码: \(http.statusCode)", category: .ai)
                     // 不再打印整个 allHeaderFields —— 可能含 Set-Cookie / Authorization / X-Request-Id
@@ -296,89 +328,95 @@ Diary Entries:
                         }
                     }
                 }
-                
+
                 guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                     let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
                     Log.error("[OpenAIService] 安全数据流式请求失败，状态码: \(statusCode)", category: .ai)
-                    
-                    let errorMessage: String
-                    switch statusCode {
-                    case 502:
-                        errorMessage = "后端网关错误(502)，服务器可能临时不可用，请稍后再试。"
-                    case 503:
-                        errorMessage = "后端服务暂时不可用(503)，请稍后再试。"
-                    case 504:
-                        errorMessage = "后端网关超时(504)，请稍后再试。"
-                    case 500...599:
-                        errorMessage = "后端服务器错误(\(statusCode))，请稍后再试。"
-                    default:
-                        errorMessage = "后端代理错误: \(statusCode)"
-                    }
-                    
-                    throw NSError(domain: "OpenAIService", code: statusCode, userInfo: [NSLocalizedDescriptionKey: errorMessage])
+                    throw Self.errorForStatus(statusCode)
                 }
                 Log.info("[OpenAIService] 流式请求响应正常，开始处理字节流...", category: .ai)
-                
-                struct StreamChoice: Codable { struct Delta: Codable { let content: String? }; let delta: Delta }
-                struct StreamResponse: Codable { let choices: [StreamChoice] }
 
-                // 处理真正的流式响应
+                // 统一经 SSEParser 解析 —— 不再 inline 重复实现。
                 var chunkCount = 0
-
                 do {
-                    for try await line in bytes.lines {
-                        if line.isEmpty { continue }
-                        if line.hasPrefix(":") { continue }
-                        if line.hasPrefix("data:") {
-                            let dataString = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-                            if dataString == "[DONE]" {
-                                Log.info("[OpenAIService] 安全数据流式响应完成，总共收到 \(chunkCount) 个内容块", category: .ai)
-                                return
-                            }
-                            if let jsonData = dataString.data(using: .utf8) {
-                                do {
-                                    let streamResp = try self.jsonDecoder.decode(StreamResponse.self, from: jsonData)
-                                    if let content = streamResp.choices.first?.delta.content, !content.isEmpty {
-                                        chunkCount += 1
-                                        hasEmittedAnyChunk = true
-                                        // `onChunk` 需要在 MainActor 上跑：所有调用方都更新 @Published state
-                                        await MainActor.run { onChunk(content) }
-                                    }
-                                } catch {
-                                    Log.error("[OpenAIService] JSON解析失败: \(error)", category: .ai)
-                                    // 原始 `dataString` 可能是部分 AI 生成文本（用户隐私），不落日志。
-                                    Log.info("[OpenAIService] 问题数据长度: \(dataString.count) 字符", category: .ai)
-                                }
-                            }
+                    for try await streamResp in SSEParser.parse(
+                        bytes: bytes,
+                        type: OpenAIStreamResponse.self,
+                        decoder: self.jsonDecoder
+                    ) {
+                        if let content = streamResp.choices.first?.delta.content, !content.isEmpty {
+                            chunkCount += 1
+                            hasEmittedAnyChunk = true
+                            await MainActor.run { onEvent(.chunk(content)) }
                         }
                     }
                     Log.info("[OpenAIService] 字节流处理完成，总共收到 \(chunkCount) 个内容块", category: .ai)
                 } catch {
-                    // 中途断流：已发过 chunk 就不重试（避免叙事正文前缀重复）；吐截断标记后正常返回
+                    // 中途断流：已发过 chunk 就不重试（避免叙事正文前缀重复）；发 truncated 事件后正常返回
                     if hasEmittedAnyChunk {
-                        Log.error("[OpenAIService] 报告流式中断; emitting truncation marker: \(error)", category: .ai)
-                        let truncMarker = isChinese
-                            ? "\n\n⚠️ 报告未完整（网络中断），请重新生成。"
-                            : "\n\n⚠️ Report incomplete (connection interrupted). Please regenerate."
-                        await MainActor.run { onChunk(truncMarker) }
+                        Log.error("[OpenAIService] 报告流式中断; emitting truncation event: \(error)", category: .ai)
+                        let reason = isChinese
+                            ? NSLocalizedString("stream.truncated.report.zh", comment: "Report truncated marker")
+                            : NSLocalizedString("stream.truncated.report.en", comment: "Report truncated marker")
+                        await MainActor.run { onEvent(.truncated(reason: reason)) }
                         return
                     }
                     throw error
                 }
             }
+            await MainActor.run { onEvent(.done) }
         } catch {
             Log.error("[OpenAIService] 安全数据流式请求错误: \(error)", category: .ai)
-            let errorMessage = isChinese ?
-                "生成报告时遇到错误：\(error.localizedDescription)" :
-                "Error generating report: \(error.localizedDescription)"
-            await MainActor.run { onChunk(errorMessage) }
+            if hasEmittedAnyChunk {
+                // 已经吐过内容才断 —— 依然归到 truncated（不是致命 failure）
+                let reason = isChinese
+                    ? NSLocalizedString("stream.truncated.report.zh", comment: "Report truncated marker")
+                    : NSLocalizedString("stream.truncated.report.en", comment: "Report truncated marker")
+                await MainActor.run { onEvent(.truncated(reason: reason)) }
+            } else {
+                await MainActor.run { onEvent(.failed(error)) }
+            }
         }
+    }
+
+    /// 从 Error 生成一个"面向用户"的本地化报告错误文案（保持旧 onChunk API 行为不变所用）。
+    fileprivate static func localizedReportError(_ error: Error) -> String {
+        let desc = error.localizedDescription
+        if desc.contains("Could not connect to the server") ||
+           desc.contains("The Internet connection appears to be offline") ||
+           desc.contains("The request timed out") {
+            return String(format: NSLocalizedString("error.stream.noConnection", comment: "Cannot connect to AI service"), "")
+        }
+        return String(format: NSLocalizedString("error.stream.reportGeneric", comment: "Generic error generating report"), desc)
+    }
+
+    /// 状态码 → 本地化 NSError(domain: OpenAIService)。统一替换散落各处的硬编码中文错误。
+    fileprivate static func errorForStatus(_ statusCode: Int) -> NSError {
+        let message: String
+        switch statusCode {
+        case 401:
+            message = NSLocalizedString("error.backend.auth", comment: "Backend auth failed")
+        case 404:
+            message = String(format: NSLocalizedString("error.backend.notFound", comment: "Backend endpoint not found"), AppSecrets.backendURL)
+        case 429:
+            message = NSLocalizedString("error.backend.rateLimited", comment: "Rate limited")
+        case 502:
+            message = NSLocalizedString("error.backend.badGateway", comment: "502 bad gateway")
+        case 503:
+            message = NSLocalizedString("error.backend.unavailable", comment: "503 unavailable")
+        case 504:
+            message = NSLocalizedString("error.backend.timeout", comment: "504 timeout")
+        case 500...599:
+            message = String(format: NSLocalizedString("error.backend.server5xx", comment: "Generic 5xx"), statusCode)
+        default:
+            message = String(format: NSLocalizedString("error.backend.generic", comment: "Generic backend error"), statusCode)
+        }
+        return NSError(domain: "OpenAIService", code: statusCode, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     func generateReport(entries: [DiaryEntry], onChunk: @escaping @MainActor (String) -> Void) async {
         guard !entries.isEmpty else { return }
-        // 同 generateReportFromData：从原文测语言，不从 prompt 模板测（模板恒含"中文"字样）
-        let isChinese = entries.contains { ($0.text ?? "").containsChinese }
+        // 错误文案走 Localizable.strings,会跟随系统 / App 语言,不再从日记原文判定中/英。
         let textBlock = entries.compactMap { entry in
             // 安全访问Core Data属性，避免CloudKit同步时的编码问题
             let entryDate = entry.date ?? Date()
@@ -427,6 +465,7 @@ Diary Entries:
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // 后端鉴权用 shared secret；后端 middleware `requireAppSecret` 会 time-safe compare。
         request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
+        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
         request.httpBody = try? jsonEncoder.encode(requestBody)
 
         do {
@@ -439,57 +478,23 @@ Diary Entries:
                     Log.info("  URL path: \(request.url?.path ?? "unknown")", category: .ai)
                     Log.info("  Status Code: \(statusCode)", category: .ai)
                     // 不再 dump allHeaderFields —— 可能含 Set-Cookie / X-Request-Id 等内部信息。
-                    
-                    let errorMessage: String
-                    switch statusCode {
-                    case 502:
-                        errorMessage = "后端网关错误(502)，服务器可能临时不可用，请稍后再试。"
-                    case 503:
-                        errorMessage = "后端服务暂时不可用(503)，请稍后再试。"
-                    case 504:
-                        errorMessage = "后端网关超时(504)，请稍后再试。"
-                    case 500...599:
-                        errorMessage = "后端服务器错误(\(statusCode))，请稍后再试。"
-                    default:
-                        errorMessage = "后端代理错误: \(statusCode)"
-                    }
-                    
-                    throw NSError(domain: "OpenAIService", code: statusCode, userInfo: [NSLocalizedDescriptionKey: errorMessage])
+                    throw Self.errorForStatus(statusCode)
                 }
-                struct StreamChoice: Codable { struct Delta: Codable { let content: String? }; let delta: Delta }
-                struct StreamResponse: Codable { let choices: [StreamChoice] }
-
-                // 处理真正的流式响应
-                for try await line in bytes.lines {
-                    if line.isEmpty || line.hasPrefix(":") {
-                        continue
-                    }
-                    
-                    if line.hasPrefix("data:") {
-                        let dataString = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-                        if dataString == "[DONE]" { return }
-                        if let jsonData = dataString.data(using: .utf8), let streamResp = try? self.jsonDecoder.decode(StreamResponse.self, from: jsonData), let content = streamResp.choices.first?.delta.content {
-                            await MainActor.run { onChunk(content) }
-                        }
+                // 统一走 SSEParser —— 不再 inline `for try await line in bytes.lines`
+                for try await streamResp in SSEParser.parse(
+                    bytes: bytes,
+                    type: OpenAIStreamResponse.self,
+                    decoder: self.jsonDecoder
+                ) {
+                    if let content = streamResp.choices.first?.delta.content, !content.isEmpty {
+                        await MainActor.run { onChunk(content) }
                     }
                 }
             }
         } catch {
             Log.error("[OpenAIService] Streaming error after retries: \(error)", category: .ai)
-            // Send error message to user in their language — 不泄露内部 IP 给用户 UI。
-            let errorMessage: String
-            if error.localizedDescription.contains("Could not connect to the server") ||
-               error.localizedDescription.contains("The Internet connection appears to be offline") ||
-               error.localizedDescription.contains("The request timed out") {
-                errorMessage = isChinese ?
-                    "无法连接到 AI 服务，请检查网络连接或稍后再试。" :
-                    "Cannot connect to AI service. Please check network or try again later."
-            } else {
-                errorMessage = isChinese ?
-                    "生成报告时遇到错误：\(error.localizedDescription)" :
-                    "Error generating report: \(error.localizedDescription)"
-            }
-            await MainActor.run { onChunk(errorMessage) }
+            // 走本地化 —— 不再按日记内容判中/英,Localizable.strings 自己会跟随 App 语言。
+            await MainActor.run { onChunk(Self.localizedReportError(error)) }
         }
     }
 
@@ -538,6 +543,7 @@ Diary Entries:
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // 后端鉴权用 shared secret；后端 middleware `requireAppSecret` 会 time-safe compare。
         request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
+        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
         request.httpBody = try? jsonEncoder.encode(requestBody)
 
         // 新增：支持流式响应
@@ -549,31 +555,17 @@ Diary Entries:
                     guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
                         Log.info("[OpenAIService] Bad response. Status code: \(statusCode)", category: .ai)
-                        throw NSError(domain: "OpenAIService", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Bad response code"])
-                    }
-                    struct StreamResponse: Codable {
-                        struct Choice: Codable {
-                            struct Delta: Codable { let content: String? }
-                            let delta: Delta
-                        }
-                        let choices: [Choice]
+                        throw Self.errorForStatus(statusCode)
                     }
                     var result = ""
-                    
-                    // 处理真正的流式响应
-                    for try await line in bytes.lines {
-                        if line.isEmpty || line.hasPrefix(":") {
-                            continue
-                        }
-                        
-                        if line.hasPrefix("data:") {
-                            let dataString = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-                            if dataString == "[DONE]" { break }
-                            if let jsonData = dataString.data(using: .utf8),
-                               let streamResp = try? self.jsonDecoder.decode(StreamResponse.self, from: jsonData),
-                               let content = streamResp.choices.first?.delta.content {
-                                result.append(content)
-                            }
+                    // 统一 SSE 解析
+                    for try await streamResp in SSEParser.parse(
+                        bytes: bytes,
+                        type: OpenAIStreamResponse.self,
+                        decoder: self.jsonDecoder
+                    ) {
+                        if let content = streamResp.choices.first?.delta.content {
+                            result.append(content)
                         }
                     }
                     return result  // 保留换行符，不要trim
@@ -598,41 +590,26 @@ Diary Entries:
                     guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                         if let httpResponse = response as? HTTPURLResponse {
                             let statusCode = httpResponse.statusCode
-                            let responseBody = String(data: data, encoding: .utf8) ?? "<no body>"
                             _ = httpResponse // 避免 warning
-                            // 诊断用最小信息：只 URL path + status + body 前 200 字符（截断避免泄日记/错误内容）
-                            Log.error("[OpenAIService] Backend request failed — path=\(request.url?.path ?? "?") status=\(statusCode) bodyPrefix=\(responseBody.prefix(200))", category: .ai)
-                            
-                            // Handle specific error codes with user-friendly messages
-                            let errorMessage: String
-                            switch statusCode {
-                            case 401:
-                                errorMessage = "后端代理认证失败，请联系开发者。"
-                            case 404:
-                                errorMessage = "后端代理端点未找到(\(AppSecrets.backendURL))，请联系开发者。"
-                            case 429:
-                                errorMessage = "API调用频率限制，请稍后再试。"
-                            case 502:
-                                errorMessage = "后端网关错误(502)，服务器可能临时不可用，请稍后再试。"
-                            case 503:
-                                errorMessage = "后端服务暂时不可用(503)，请稍后再试。"
-                            case 504:
-                                errorMessage = "后端网关超时(504)，请稍后再试。"
-                            case 500...599:
-                                errorMessage = "后端服务器错误(\(statusCode))，请稍后再试。"
-                            default:
-                                errorMessage = "后端代理错误: \(statusCode) - \(responseBody.prefix(100))"
-                            }
-                            
-                            throw NSError(domain: "OpenAIService", code: statusCode, userInfo: [NSLocalizedDescriptionKey: errorMessage])
+                            // 诊断用最小信息：只 URL path + status + body 长度，不把 body 打进日志（避免泄日记/PII）
+                            Log.error("[OpenAIService] Backend request failed — path=\(request.url?.path ?? "?") status=\(statusCode) bodyLen=\(data.count)", category: .ai)
+                            throw Self.errorForStatus(statusCode)
                         } else {
                             Log.info("[OpenAIService] Bad response. Not an HTTPURLResponse. Response: \(response)", category: .ai)
-                            throw NSError(domain: "OpenAIService", code: -1, userInfo: [NSLocalizedDescriptionKey: "从后端代理接收到无效响应"])
+                            throw NSError(
+                                domain: "OpenAIService",
+                                code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: NSLocalizedString("error.backend.invalidResponse", comment: "Invalid response from backend")]
+                            )
                         }
                     }
                     let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
                     guard let content = decoded.choices.first?.message.content.trimmingCharacters(in: .whitespacesAndNewlines) else {
-                        throw NSError(domain: "OpenAIService", code: -1, userInfo: [NSLocalizedDescriptionKey: "No content in response"])
+                        throw NSError(
+                            domain: "OpenAIService",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: NSLocalizedString("error.backend.emptyContent", comment: "No content in response")]
+                        )
                     }
                     return content
                 }
@@ -746,7 +723,7 @@ extension OpenAIService {
     ) async {
         let safe = await Self.extractDataSafely(from: entries, dateRange: dateRange)
         guard !safe.isEmpty else {
-            await MainActor.run { onChunk("没有找到有效的日记数据用于分析。") }
+            await MainActor.run { onChunk(NSLocalizedString("error.report.noValidEntries", comment: "No valid entries found to analyze")) }
             return
         }
         await Task.detached(priority: .userInitiated) { [weak self] in
@@ -784,6 +761,95 @@ extension String {
     var containsChinese: Bool {
         return range(of: "[\u{4E00}-\u{9FFF}]", options: .regularExpression) != nil
     }
+}
+
+// MARK: - SSE parsing
+//
+// 统一的 Server-Sent Events 解析器。三个历史流式入口
+// (streamChat / generateReportFromData-onChunk / generateReport-onChunk / chat-stream)
+// 都曾 inline 实现 `for try await line in bytes.lines`,规范执行不一致、`[DONE]`
+// 识别和截断处理都各搞各的。现在集中到这一处。
+//
+// 支持 SSE 规范:
+//   - `data:` 开头的行累加到当前 event,多条 data 行按 `\n` 拼接
+//   - `:` 开头是注释,跳过
+//   - `data:` 之后可选一个空格 (规范要求)
+//   - 空行 -> dispatch 当前累加的 data
+//   - 载荷字面量 `[DONE]` -> 正常结束
+//
+// 泛型 `T` 是当条 data 的 JSON 结构 (目前都是 OpenAI 的 StreamResponse)。
+// 调用方负责把 bytes 喂给我,我负责拆出 Decodable 对象流。
+@available(iOS 15.0, macOS 12.0, *)
+enum SSEParser {
+    /// 解析 SSE 字节流到 Decodable 对象流。遇到 `[DONE]` 或自然结束就 finish;
+    /// 网络异常会 throw (caller 自己决定重试 / 吐 truncated 标记)。
+    static func parse<T: Decodable>(
+        bytes: URLSession.AsyncBytes,
+        type: T.Type,
+        decoder: JSONDecoder
+    ) -> AsyncThrowingStream<T, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var buffer = ""  // 当前 event 的 data 累加
+                    for try await line in bytes.lines {
+                        if Task.isCancelled { break }
+                        // 注释行 -> 跳过
+                        if line.hasPrefix(":") { continue }
+                        // 空行 -> dispatch 当前 event
+                        if line.isEmpty {
+                            if !buffer.isEmpty {
+                                if buffer == "[DONE]" {
+                                    continuation.finish()
+                                    return
+                                }
+                                if let data = buffer.data(using: .utf8),
+                                   let decoded = try? decoder.decode(T.self, from: data) {
+                                    continuation.yield(decoded)
+                                }
+                                buffer = ""
+                            }
+                            continue
+                        }
+                        // `data:` 开头 -> 追加载荷。规范允许 `data:` 后一个可选空格,
+                        // 多行 data 用 `\n` 拼接。
+                        if line.hasPrefix("data:") {
+                            var payload = Substring(line.dropFirst(5))
+                            if payload.first == " " { payload = payload.dropFirst() }
+                            if !buffer.isEmpty { buffer += "\n" }
+                            buffer += String(payload)
+                            // 兼容 "data: [DONE]" 单行无空行收尾的实现
+                            if buffer == "[DONE]" {
+                                continuation.finish()
+                                return
+                            }
+                        }
+                        // 其他字段 (id: / event: / retry:) 忽略 —— 目前不需要
+                    }
+                    // 流正常结束 (到 EOF) 前还有未 flush 的 buffer:尝试 decode 一次
+                    if !buffer.isEmpty && buffer != "[DONE]",
+                       let data = buffer.data(using: .utf8),
+                       let decoded = try? decoder.decode(T.self, from: data) {
+                        continuation.yield(decoded)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+// MARK: - SSE stream response (OpenAI Chat Completions)
+@available(iOS 15.0, macOS 12.0, *)
+private struct OpenAIStreamResponse: Decodable {
+    struct Choice: Decodable {
+        struct Delta: Decodable { let content: String? }
+        let delta: Delta
+    }
+    let choices: [Choice]
 }
 
 // MARK: - Phase 0: AI × 统计融合地基（主题 / 向量 / 对话 / 统一流式）
@@ -917,13 +983,9 @@ extension OpenAIService {
     ) -> SuggestionBundle? {
         guard let data = rawJSON.data(using: .utf8) else { return nil }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            // 新 prompt 明确要求模型引用具体人名 / 事件 / 原文片段。一旦解析失败,rawJSON 的
-            // 前 200 字极大概率含 PII。生产构建只记长度与是否疑似空回复,DEBUG 保留原片段便于排查。
-            #if DEBUG
-            Log.error("[composeSuggestions] JSON parse 失败，原始片段: \(rawJSON.prefix(200))", category: .ai)
-            #else
+            // 新 prompt 明确要求模型引用具体人名 / 事件 / 原文片段。rawJSON 极大概率含 PII,
+            // 无论 build 都只记长度 / 是否空;需要排查本地换 DEBUG 临时加 dump,不入日志/crashlog。
             Log.error("[composeSuggestions] JSON parse 失败 (len=\(rawJSON.count), empty=\(rawJSON.isEmpty))", category: .ai)
-            #endif
             return nil
         }
 
@@ -1164,6 +1226,7 @@ extension OpenAIService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
+        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
         let body = RequestBody(model: "text-embedding-3-small", input: trimmed)
         request.httpBody = try? jsonEncoder.encode(body)
 
@@ -1181,9 +1244,9 @@ extension OpenAIService {
                     throw NSError(domain: "OpenAIService", code: -1)
                 }
                 guard (200...299).contains(http.statusCode) else {
-                    // 把 body 前 200 字节也带上——backend 返 {error: "..."} 时能直接看原因
-                    let bodySnippet = String(data: data.prefix(200), encoding: .utf8) ?? "<non-utf8>"
-                    Log.error("[OpenAIService] Embed request failed: http=\(http.statusCode) body=\(bodySnippet)", category: .ai)
+                    // 只记 status + body 长度;body 内容可能夹带 embedding input(用户日记原文)或上游
+                    // error payload,不进日志。需要原因的话在 backend 端按 req-id 反查。
+                    Log.error("[OpenAIService] Embed request failed: status=\(http.statusCode) bodyLen=\(data.count)", category: .ai)
                     throw NSError(domain: "OpenAIService", code: http.statusCode)
                 }
                 let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
@@ -1197,6 +1260,33 @@ extension OpenAIService {
 
     // MARK: Ask (RAG)
     func ask(question: String, context entries: [DiaryEntryData]) -> AsyncStream<String> {
+        // 向下兼容:把事件流平成 String 流,旧 caller 继续好用。
+        // `.truncated` / `.failed` 直接被 streamChat wrapper 转为 `⚠️ ...` 文本附加。
+        AsyncStream { continuation in
+            let task = Task {
+                for await event in self.askEvents(question: question, context: entries) {
+                    switch event {
+                    case .chunk(let text):
+                        continuation.yield(text)
+                    case .truncated(let reason):
+                        continuation.yield("\n\n⚠️ " + reason)
+                    case .failed(let error):
+                        let msg = question.containsChinese
+                            ? String(format: NSLocalizedString("error.stream.answerGeneric.zh", comment: ""), error.localizedDescription)
+                            : String(format: NSLocalizedString("error.stream.answerGeneric.en", comment: ""), error.localizedDescription)
+                        continuation.yield("\n\n⚠️ " + msg)
+                    case .done:
+                        break
+                    }
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// 结构化事件版 RAG 问答流。UI 想区分"中断 / 失败 / 正常"直接消费这个。
+    func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
         AsyncStream { continuation in
             let task = Task {
                 let isZh = question.containsChinese
@@ -1230,8 +1320,9 @@ extension OpenAIService {
                     """
                 }
 
-                await self.streamChat(prompt: prompt, model: "gpt-5.4", reasoningEffort: "low") { chunk in
-                    continuation.yield(chunk)
+                for await event in self.streamChatEvents(prompt: prompt, model: "gpt-5.4", reasoningEffort: "low") {
+                    if Task.isCancelled { break }
+                    continuation.yield(event)
                 }
                 continuation.finish()
             }
@@ -1261,97 +1352,149 @@ extension OpenAIService {
         return f.string(from: date)
     }
 
-    /// 低层流式 chat：把 SSE 解析成 async 回调。用于 ask / 任意长文流式生成。
-    /// `maxTokens` 必传——之前 RequestBody 没有 `max_completion_tokens` 字段，
-    /// ask / streamReport 每次调用 token 完全不封顶，单次能烧上万 token + 转圈几分钟。
+    /// 低层流式 chat（**结构化事件版本**）：把 SSE 解析成 `StreamEvent` 流。
+    /// 三类事件:`.chunk` / `.truncated` / `.failed` / `.done`,caller 自己决定怎么渲染。
+    /// 这是内部真正干活的实现；下面 `streamChat(... onChunk:)` 是兼容 wrapper。
+    fileprivate func streamChatEvents(prompt: String,
+                                      model: String,
+                                      reasoningEffort: String?,
+                                      maxTokens: Int = 4096) -> AsyncStream<StreamEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                struct Message: Codable { let role: String; let content: String }
+                struct RequestBody: Codable {
+                    let model: String
+                    let messages: [Message]
+                    let stream: Bool
+                    let reasoning_effort: String?
+                    let maxCompletionTokens: Int?
+
+                    enum CodingKeys: String, CodingKey {
+                        case model, messages, stream, reasoning_effort
+                        case maxCompletionTokens = "max_completion_tokens"
+                    }
+                }
+                let body = RequestBody(
+                    model: model,
+                    messages: [Message(role: "user", content: prompt)],
+                    stream: true,
+                    reasoning_effort: reasoningEffort,
+                    maxCompletionTokens: maxTokens
+                )
+
+                guard let url = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions") else {
+                    Log.error("[OpenAIService] Invalid chat-completions URL", category: .ai)
+                    continuation.yield(.failed(NSError(
+                        domain: "OpenAIService",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: NSLocalizedString("error.backend.invalidResponse", comment: "Invalid response from backend")]
+                    )))
+                    continuation.finish()
+                    return
+                }
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
+                request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
+                request.httpBody = try? self.jsonEncoder.encode(body)
+
+                // 重试保护：一旦已经向 caller yield 过任意 chunk，就不允许再重试——
+                // 否则 NetworkRetryHelper 会把整个请求从头回放，caller 把新 chunk 累加进
+                // 同一条 message，用户看到 "你好你好我今天…" 这种前缀重复。
+                var hasEmittedAnyChunk = false
+                do {
+                    try await NetworkRetryHelper.performWithRetry {
+                        let (bytes, response) = try await URLSession.sslTolerantSession.bytes(for: request)
+                        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                            throw Self.errorForStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+                        }
+                        do {
+                            for try await streamResp in SSEParser.parse(
+                                bytes: bytes,
+                                type: OpenAIStreamResponse.self,
+                                decoder: self.jsonDecoder
+                            ) {
+                                if Task.isCancelled { return }
+                                if let content = streamResp.choices.first?.delta.content, !content.isEmpty {
+                                    hasEmittedAnyChunk = true
+                                    continuation.yield(.chunk(content))
+                                }
+                            }
+                        } catch {
+                            if hasEmittedAnyChunk {
+                                Log.error("[OpenAIService] streamChat interrupted mid-stream; emitting truncated event: \(error)", category: .ai)
+                                let reason = prompt.containsChinese
+                                    ? NSLocalizedString("stream.truncated.answer.zh", comment: "Answer truncated marker")
+                                    : NSLocalizedString("stream.truncated.answer.en", comment: "Answer truncated marker")
+                                continuation.yield(.truncated(reason: reason))
+                                return
+                            }
+                            throw error
+                        }
+                    }
+                    continuation.yield(.done)
+                } catch {
+                    Log.error("[OpenAIService] streamChat error: \(error)", category: .ai)
+                    if hasEmittedAnyChunk {
+                        let reason = prompt.containsChinese
+                            ? NSLocalizedString("stream.truncated.answer.zh", comment: "Answer truncated marker")
+                            : NSLocalizedString("stream.truncated.answer.en", comment: "Answer truncated marker")
+                        continuation.yield(.truncated(reason: reason))
+                    } else {
+                        continuation.yield(.failed(error))
+                    }
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// 兼容 wrapper —— 旧 caller 传 `onChunk: (String) -> Void` 仍可用。
+    /// 行为保持和历史版本一致:`.chunk` → onChunk;`.truncated` / `.failed` → 把本地化提示
+    /// 当 chunk 发出 (带 ⚠️ 前缀 + 换行)。新 caller 请直接消费 `streamChatEvents`。
     fileprivate func streamChat(prompt: String,
                                 model: String,
                                 reasoningEffort: String?,
                                 maxTokens: Int = 4096,
                                 onChunk: @escaping (String) -> Void) async {
-        struct Message: Codable { let role: String; let content: String }
-        struct RequestBody: Codable {
-            let model: String
-            let messages: [Message]
-            let stream: Bool
-            let reasoning_effort: String?
-            let maxCompletionTokens: Int?
-
-            enum CodingKeys: String, CodingKey {
-                case model, messages, stream, reasoning_effort
-                case maxCompletionTokens = "max_completion_tokens"
-            }
-        }
-        let body = RequestBody(
+        for await event in streamChatEvents(
+            prompt: prompt,
             model: model,
-            messages: [Message(role: "user", content: prompt)],
-            stream: true,
-            reasoning_effort: reasoningEffort,
-            maxCompletionTokens: maxTokens
-        )
-
-        guard let url = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions") else {
-            Log.error("[OpenAIService] Invalid chat-completions URL", category: .ai)
-            return
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
-        request.httpBody = try? jsonEncoder.encode(body)
-
-        struct StreamChoice: Codable { struct Delta: Codable { let content: String? }; let delta: Delta }
-        struct StreamResponse: Codable { let choices: [StreamChoice] }
-
-        // 重试保护：一旦已经向 caller yield 过任意 chunk，就不允许再重试——
-        // 否则 NetworkRetryHelper 会把整个请求从头回放，caller 把新 chunk 累加进
-        // 同一条 message，用户看到 "你好你好我今天…" 这种前缀重复。
-        var hasEmittedAnyChunk = false
-        do {
-            // 不用 [weak self]：见 embed() 上方注释
-            try await NetworkRetryHelper.performWithRetry {
-                let (bytes, response) = try await URLSession.sslTolerantSession.bytes(for: request)
-                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                    throw NSError(domain: "OpenAIService", code: (response as? HTTPURLResponse)?.statusCode ?? -1)
-                }
-                do {
-                    for try await line in bytes.lines {
-                        if Task.isCancelled { return }
-                        if line.isEmpty || line.hasPrefix(":") { continue }
-                        guard line.hasPrefix("data:") else { continue }
-                        let payload = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-                        if payload == "[DONE]" { return }
-                        if let data = payload.data(using: .utf8),
-                           let decoded = try? self.jsonDecoder.decode(StreamResponse.self, from: data),
-                           let content = decoded.choices.first?.delta.content, !content.isEmpty {
-                            hasEmittedAnyChunk = true
-                            onChunk(content)
-                        }
-                    }
-                } catch {
-                    // 中途断流：已 yield 过 chunk 就**吐一个可见截断标记**后正常返回，
-                    // 不能再重试（重试会让 caller 前缀重复）。caller 必须向用户明确显示"回答不完整"，
-                    // 否则他会以为那就是完整答案。标记用中/英两种，跟错误提示选择同一语言判定。
-                    if hasEmittedAnyChunk {
-                        Log.error("[OpenAIService] streamChat interrupted mid-stream; emitting truncation marker: \(error)", category: .ai)
-                        let truncMarker = (prompt.containsChinese)
-                            ? "\n\n⚠️ 回答未完整（网络中断），请重试。"
-                            : "\n\n⚠️ Response incomplete (connection interrupted). Please retry."
-                        onChunk(truncMarker)
-                        return
-                    }
-                    throw error
-                }
+            reasoningEffort: reasoningEffort,
+            maxTokens: maxTokens
+        ) {
+            switch event {
+            case .chunk(let text):
+                onChunk(text)
+            case .truncated(let reason):
+                // UI 侧 MarkdownText 渲染 `⚠️` 前缀就能一眼辨认为警告。
+                onChunk("\n\n⚠️ " + reason)
+            case .failed(let error):
+                let msg = prompt.containsChinese
+                    ? String(format: NSLocalizedString("error.stream.answerGeneric.zh", comment: "Error answering zh"), error.localizedDescription)
+                    : String(format: NSLocalizedString("error.stream.answerGeneric.en", comment: "Error answering en"), error.localizedDescription)
+                onChunk("\n\n⚠️ " + msg)
+            case .done:
+                return
             }
-        } catch {
-            Log.error("[OpenAIService] streamChat error: \(error)", category: .ai)
-            // 以前直接把错误文案当 content yield，UI 把它当正文末尾渲染（"今天还好 + Error answering: ..."）
-            // 看起来像答案的一部分。统一带 `⚠️` 前缀 + 换行，让 UI（MarkdownText）和用户一眼识别为错误。
-            let msg = prompt.containsChinese
-                ? "\n\n⚠️ 回答时出错：\(error.localizedDescription)"
-                : "\n\n⚠️ Error answering: \(error.localizedDescription)"
-            onChunk(msg)
+        }
+    }
+
+    // MARK: - Structured stream events (protocol conformance)
+
+    /// 事件流版本的 streamReport —— AIServiceProtocol 要求。
+    func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                await self.generateReportFromData(entries: entries) { @MainActor event in
+                    continuation.yield(event)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 }

@@ -40,7 +40,9 @@ final class ThemeBackfillService: ObservableObject {
     private let batchSize: Int
     private let throttleNanos: UInt64
 
-    private var runningTask: Task<Void, Never>?
+    // runningTask 加 @MainActor 隔离：任何 start/cancel 都要到 MainActor 读写，
+    // 多入口（Settings 一键重建、manual 按钮、未来 auto）race 下不会出现两份 run 同时跑。
+    @MainActor private var runningTask: Task<Void, Never>?
 
     init(
         persistence: PersistenceController = .shared,
@@ -60,17 +62,20 @@ final class ThemeBackfillService: ObservableObject {
     // MARK: Public API
 
     /// 回填有问题的条目：themes 为空 或 含有被禁用元描述（比如"情绪"）。
+    @MainActor
     @discardableResult
     func backfillProblems() async -> Progress {
         await run(mode: .problemsOnly)
     }
 
     /// 全量重新抽取所有条目的主题。用户主动选择时再用，贵。
+    @MainActor
     @discardableResult
     func backfillAll() async -> Progress {
         await run(mode: .all)
     }
 
+    @MainActor
     func cancel() {
         runningTask?.cancel()
         runningTask = nil
@@ -80,6 +85,7 @@ final class ThemeBackfillService: ObservableObject {
 
     private enum Mode { case problemsOnly, all }
 
+    @MainActor
     private func run(mode: Mode) async -> Progress {
         if runningTask != nil {
             Log.info("[ThemeBackfill] 已在运行，忽略重复调用", category: .migration)

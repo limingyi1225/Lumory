@@ -292,4 +292,31 @@
 "共 %d 篇日记" = "Total: %d entries";
 "心情: %@" = "Mood: %@";
 "摘要: %@" = "Summary: %@";
+
+/* Backend / AI errors — surfaced to the user via NSError.localizedDescription or onChunk fallback */
+"error.backend.auth" = "Service authentication failed. Please contact the developer.";
+"error.backend.notFound" = "Service endpoint not found (%@). Please contact the developer.";
+"error.backend.rateLimited" = "AI request rate limit reached. Please try again shortly.";
+"error.backend.badGateway" = "The AI service is temporarily unreachable (502). Please try again later.";
+"error.backend.unavailable" = "The AI service is temporarily unavailable (503). Please try again later.";
+"error.backend.timeout" = "The AI service timed out (504). Please try again later.";
+"error.backend.server5xx" = "The AI service returned an error (%d). Please try again later.";
+"error.backend.generic" = "AI service error: %d. Please try again later.";
+"error.backend.invalidResponse" = "Received an invalid response from the AI service.";
+"error.backend.emptyContent" = "The AI service returned an empty response.";
+
+/* Streaming — truncation markers + fallback error text (reasoning-report and ask modes) */
+"stream.truncated.report.zh" = "⚠️ Report incomplete (connection interrupted). Please regenerate.";
+"stream.truncated.report.en" = "⚠️ Report incomplete (connection interrupted). Please regenerate.";
+"stream.truncated.answer.zh" = "Response incomplete (connection interrupted). Please retry.";
+"stream.truncated.answer.en" = "Response incomplete (connection interrupted). Please retry.";
+"error.stream.noConnection" = "Cannot connect to the AI service. Please check your network or try again later.%@";
+"error.stream.reportGeneric" = "Error generating report: %@";
+"error.stream.answerGeneric.zh" = "Error answering: %@";
+"error.stream.answerGeneric.en" = "Error answering: %@";
+"error.report.noValidEntries" = "No valid diary entries found for analysis.";
+
+/* Streaming banner shown above truncated AI output so users don't treat partial content as final */
+"stream.incomplete.banner" = "Content incomplete — you can regenerate.";
+"stream.incomplete.regenerate" = "Regenerate";
 "--- 导出结束 ---" = "--- End of Export ---";

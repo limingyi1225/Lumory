@@ -1,9 +1,31 @@
 import Foundation
+import SwiftUI
 
 // MARK: - AI Service Contract
 //
 // 语音转录已从本协议中移除，由独立的 `AppleSpeechRecognizer` 承担。
 // 这里只定义"文本理解/生成"层面的 AI 能力（摘要、情绪、报告、主题、向量、问答）。
+
+// MARK: - Structured stream event
+//
+// 流式 AI 输出的结构化事件。用来替代早先"把中文警告当普通 chunk 吐回去"的做法——
+// 调用方看到的 `.chunk` 就是真正的 AI 正文；`.truncated` 表示流被非致命地中断
+// (典型：已 yield 过内容后断网)，UI 应该提示"内容不完整、可重新生成"；
+// `.failed` 表示错误到未能产出任何内容；`.done` 是自然结束。
+//
+// 旧的 `AsyncThrowingStream<String>` / `(onChunk: (String) -> Void)` API 继续保留，
+// 内部包装新的事件流做兼容。
+@available(iOS 15.0, macOS 12.0, *)
+enum StreamEvent: Sendable {
+    /// 正常 content chunk (来自 delta.content)
+    case chunk(String)
+    /// 流被中断但先前已产出部分内容 —— UI 应显示"内容不完整"提示,允许重新生成
+    case truncated(reason: String)
+    /// 流彻底失败未产出任何内容
+    case failed(Error)
+    /// 正常结束 (收到 [DONE])
+    case done
+}
 
 protocol AIServiceProtocol {
     /// 根据文本生成简要摘要
@@ -37,9 +59,19 @@ protocol AIServiceProtocol {
     /// 实现方负责 prompt 组装；调用方负责先做检索把 `context` 限制在合理数量内。
     func ask(question: String, context entries: [DiaryEntryData]) -> AsyncStream<String>
 
+    /// 结构化事件版回顾流 —— 能区分 `.chunk` / `.truncated` / `.failed`。
+    /// 旧 `ask` 保留作 wrapper;新 UI 用这个,才能显示"回答不完整"条。
+    @available(iOS 15.0, macOS 12.0, *)
+    func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent>
+
     /// 统一的流式报告 API（AsyncStream 封装，取代回调式 onChunk）。
     /// 用于 Insights Dashboard 的叙事面板、Ask 之外的长文生成等场景。
     func streamReport(entries: [DiaryEntryData]) -> AsyncStream<String>
+
+    /// 结构化流式报告事件 —— 内部实现发的是 `StreamEvent`,UI 想区分"断流"和"正常"
+    /// 可以直接消费这个流。旧 `streamReport` 仍可用,行为上只吐 `.chunk` 的文本。
+    @available(iOS 15.0, macOS 12.0, *)
+    func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent>
 
     /// 根据 grounding context（主题/情绪/近期条目）**用 LLM 原创**一批给用户的
     /// 提问和输入框占位语。返回 nil 表示失败或内容不可用，调用方应 fallback。
@@ -132,6 +164,15 @@ struct MockAIService: AIServiceProtocol {
         }
     }
 
+    @available(iOS 15.0, macOS 12.0, *)
+    func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        AsyncStream { continuation in
+            continuation.yield(.chunk("Mock 回答：你问了『\(question)』，基于 \(entries.count) 条日记。"))
+            continuation.yield(.done)
+            continuation.finish()
+        }
+    }
+
     func streamReport(entries: [DiaryEntryData]) -> AsyncStream<String> {
         AsyncStream { continuation in
             Task {
@@ -139,6 +180,20 @@ struct MockAIService: AIServiceProtocol {
                 let avg = entries.isEmpty ? 0.5 : entries.map { $0.moodValue }.reduce(0, +) / Double(total)
                 continuation.yield("共 \(total) 条日记，")
                 continuation.yield("平均情绪 \(String(format: "%.0f", avg * 100))/100。")
+                continuation.finish()
+            }
+        }
+    }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        AsyncStream { continuation in
+            Task {
+                let total = entries.count
+                let avg = entries.isEmpty ? 0.5 : entries.map { $0.moodValue }.reduce(0, +) / Double(total)
+                continuation.yield(.chunk("共 \(total) 条日记，"))
+                continuation.yield(.chunk("平均情绪 \(String(format: "%.0f", avg * 100))/100。"))
+                continuation.yield(.done)
                 continuation.finish()
             }
         }
@@ -161,6 +216,28 @@ struct MockAIService: AIServiceProtocol {
             fingerprint: context.makeFingerprint(),
             language: context.language
         )
+    }
+}
+
+// MARK: - SwiftUI Environment 注入
+//
+// 以前 View 里直接写 `OpenAIService.shared`，测试 / Preview 没办法替换成 MockAIService。
+// 现在暴露成 Environment value，UI 层用 `@Environment(\.aiService) private var aiService`
+// 就能透过 `.environment(\.aiService, MockAIService())` 做替换。
+//
+// 默认值仍然指向 `OpenAIService.shared`，生产路径零行为变化;ChronoteApp 在 WindowGroup
+// 顶层显式注入一次，保证启动后 `@Environment(\.aiService)` 能拿到 singleton。
+
+@available(iOS 15.0, macOS 12.0, *)
+private struct AIServiceEnvironmentKey: EnvironmentKey {
+    static let defaultValue: AIServiceProtocol = OpenAIService.shared
+}
+
+@available(iOS 15.0, macOS 12.0, *)
+extension EnvironmentValues {
+    var aiService: AIServiceProtocol {
+        get { self[AIServiceEnvironmentKey.self] }
+        set { self[AIServiceEnvironmentKey.self] = newValue }
     }
 }
 

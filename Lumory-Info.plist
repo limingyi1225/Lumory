@@ -18,20 +18,5 @@
 	<string>Lumory uses the microphone to record your voice notes for diary entries. This is only enabled when you press the speak button.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Lumory uses speech recognition to automatically convert your voice recordings into text for your diary entries when you hold the speak button. </string>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSExceptionDomains</key>
-		<dict>
-			<key>64.176.209.155</key>
-			<dict>
-				<key>NSIncludesSubdomains</key>
-				<true/>
-				<key>NSTemporaryExceptionAllowsInsecureHTTPLoads</key>
-				<true/>
-				<key>NSExceptionRequiresForwardSecrecy</key>
-				<false/>
-			</dict>
-		</dict>
-	</dict>
 </dict>
 </plist>

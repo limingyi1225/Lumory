@@ -291,4 +291,31 @@
 "共 %d 篇日记" = "共 %d 篇日记";
 "心情: %@" = "心情: %@";
 "摘要: %@" = "摘要: %@";
+
+/* 后端/AI 错误 —— 透过 NSError.localizedDescription 或 onChunk 兜底显示给用户 */
+"error.backend.auth" = "后端代理认证失败，请联系开发者。";
+"error.backend.notFound" = "后端代理端点未找到（%@），请联系开发者。";
+"error.backend.rateLimited" = "AI 调用频率已达上限，请稍后再试。";
+"error.backend.badGateway" = "后端网关错误 (502)，服务器可能临时不可用，请稍后再试。";
+"error.backend.unavailable" = "后端服务暂时不可用 (503)，请稍后再试。";
+"error.backend.timeout" = "后端网关超时 (504)，请稍后再试。";
+"error.backend.server5xx" = "后端服务器错误 (%d)，请稍后再试。";
+"error.backend.generic" = "后端代理错误：%d，请稍后再试。";
+"error.backend.invalidResponse" = "从后端代理接收到无效响应。";
+"error.backend.emptyContent" = "后端返回的内容为空。";
+
+/* 流式输出 —— 截断标记与错误兜底文案（报告、回顾两类场景） */
+"stream.truncated.report.zh" = "⚠️ 报告未完整（网络中断），请重新生成。";
+"stream.truncated.report.en" = "⚠️ 报告未完整（网络中断），请重新生成。";
+"stream.truncated.answer.zh" = "回答未完整（网络中断），请重试。";
+"stream.truncated.answer.en" = "回答未完整（网络中断），请重试。";
+"error.stream.noConnection" = "无法连接到 AI 服务，请检查网络或稍后再试。%@";
+"error.stream.reportGeneric" = "生成报告时遇到错误：%@";
+"error.stream.answerGeneric.zh" = "回答时出错：%@";
+"error.stream.answerGeneric.en" = "回答时出错：%@";
+"error.report.noValidEntries" = "没有找到有效的日记数据用于分析。";
+
+/* 流被中断时显示在 AI 输出上方的小横幅，避免用户把半截内容当完整结果 */
+"stream.incomplete.banner" = "内容不完整，可重新生成。";
+"stream.incomplete.regenerate" = "重新生成";
 "--- 导出结束 ---" = "--- 导出结束 ---";

@@ -8,12 +8,8 @@ import UIKit
 #endif
 
 // MARK: - Send Button State Machine
-enum SendButtonState {
-    case idle           // 蓝色（默认状态）
-    case sending        // 灰色loading（AI分析中）
-    case moodRevealing  // 情绪颜色+脉冲动画（1.2秒）
-    case completed      // 淡出回到蓝色
-}
+// `enum SendButtonState` 已 moved 到 Views/HomeView/HomeInputViewModel.swift,
+// 与发送按钮动画的 `@State` 一起收束。HomeView 内继续按原名引用,类型语义不变。
 
 // 全局辅助函数：格式化时长
 func formattedDuration(currentTime: TimeInterval, totalDuration: TimeInterval) -> String {
@@ -372,13 +368,17 @@ struct Recording: Identifiable {
 struct HomeView: View {
     // Core Data 相关
     @Environment(\.managedObjectContext) private var viewContext
+    // 注意：这里**故意不用** `animation: .default`。
+    // 历史上同时开 FetchRequest animation、List 原生 row-removal、`withAnimation { delete }`
+    // 三层动画时序会错开导致行错位。把 FetchRequest 的 animation 撤掉后，动画由 List + `withAnimation`
+    // 两层控制就够，且 `ForEach(entries, id: \.objectID)` 也能恢复正常 identity。
     @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)],
-        animation: .default
+        sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
     ) private var entries: FetchedResults<DiaryEntry>
     
-    // AI 服务（后端代理会处理认证）——走共享实例，避免 HomeView 每次 init 都新建一个。
-    private let aiService: AIServiceProtocol = OpenAIService.shared
+    // AI 服务从 SwiftUI Environment 注入，默认指向 `OpenAIService.shared`。
+    // 生产零行为变化；测试 / Preview 里可以 `.environment(\.aiService, MockAIService())` 替换。
+    @Environment(\.aiService) private var aiService
     // 语音转录（独立的服务，不和 AI 混在一起）
     private let transcriber: TranscriberProtocol = AppleSpeechRecognizer()
     
@@ -386,31 +386,21 @@ struct HomeView: View {
     @EnvironmentObject var importService: CoreDataImportService
     @EnvironmentObject var syncMonitor: CloudKitSyncMonitor
     
+    // MARK: - 拆分出的 3 个 @Observable ViewModel
+    // 原来 20+ 个 `@State` 按职责聚合到三个 VM(见 `Views/HomeView/`),每个 VM 字段变动只
+    // 会失效该 VM 的 tracking,不再让无关字段(比如单字输入 vs 录音计时)互相触发整个 body
+    // 重算。ObservableObject 类型(`AudioRecorder` / `AudioPlaybackController`)**没有**
+    // 搬进 VM —— 原因见 `HomeRecordingViewModel.swift` 文件头说明。
+    @State private var inputVM = HomeInputViewModel()
+    @State private var recordingVM = HomeRecordingViewModel()
+    @State private var photoVM = HomePhotoViewModel()
+
     @StateObject private var recorder = AudioRecorder()
     @StateObject private var audioPlaybackController = AudioPlaybackController() // 新的控制器
 
-    @State private var inputText: String = ""
-    @State private var isTranscribing = false
-    @State private var currentAudioFileName: String? = nil
-    @State private var showingDeleteAlert: Bool = false
-    @State private var moodValue: Double = 0.5
-    @State private var transcriptionTask: Task<Void, Never>? = nil
-    @State private var isSending: Bool = false
-    @State private var sendButtonState: SendButtonState = .idle
-    @State private var revealedMood: Double? = nil
-    @State private var showMoodReveal: Bool = false
-    @State private var spectrumDisplayState: SpectrumDisplayState = .idle
-    @State private var selectedEntry: DiaryEntry? = nil
-    @State private var selectedPhotos: [PhotosPickerItem] = []
-    /// 用 Button + .photosPicker(isPresented:) 弹 sheet,而不是 PhotosPicker 直接当
-    /// button 用 —— 后者在 HStack 里 hit area 会和隔壁按钮串,导致点照片触发录音。
-    @State private var photosPickerPresented: Bool = false
-    /// 上一次的 photo 压缩任务,选择变化时取消,防止旧任务回来覆盖新结果(F1 race fix)。
-    @State private var photoLoadTask: Task<Void, Never>?
-    @State private var selectedImages: [Data] = []
     private let cal = Calendar.current
     @Environment(\.colorScheme) private var colorScheme
-    
+
     // 简化的语言检测
     private static var defaultAppLanguage: String {
         let currentLocale = Locale.current.identifier
@@ -420,18 +410,16 @@ struct HomeView: View {
             return "en"
         }
     }
-    
+
     @AppStorage("appLanguage") private var appLanguage: String = HomeView.defaultAppLanguage
-    
-    @State private var audioRecordings: [Recording] = []
-    @State private var deleteTarget: String? = nil
+
+    // MARK: - View-level 路由 / 搜索 / 生命周期 state
+    // 这些**留在 HomeView**:和 NavigationStack / sheet / .searchable 生命周期耦合,
+    // 抽进 VM 反而要反向同步。
+    @State private var selectedEntry: DiaryEntry? = nil
     /// 现在直接驱动 `.sheet` —— 不再走自绘抽屉。
     @State private var isSettingsOpen: Bool = false
     @State private var isInsightsPresented: Bool = false
-    @State private var contextPrompts: [ContextPrompt] = []
-    /// 稳定的占位语——只在明确时刻更新（进入页面 / 发送完成 / AI 池刷新完成），
-    /// 避免 body 重评时反复换给人"抽风"的感觉。
-    @State private var stablePlaceholder: String = ""
     @State private var shouldStartEditing: Bool = false
     @State private var entryToDelete: DiaryEntry? = nil
     @State private var showDeleteConfirmation: Bool = false
@@ -655,15 +643,15 @@ struct HomeView: View {
     private var moodSliderSection: some View {
         VStack(alignment: .center, spacing: 4) {
             MoodSpectrumBar(
-                moodValue: revealedMood ?? moodValue,
-                displayState: spectrumDisplayState
+                moodValue: inputVM.revealedMood ?? inputVM.moodValue,
+                displayState: inputVM.spectrumDisplayState
             )
             .frame(maxWidth: .infinity)
             .frame(height: 32)
         }
         .frame(height: 80)
         .padding(.horizontal, 16)
-        .zIndex(spectrumDisplayState == .revealed ? 100 : 0)
+        .zIndex(inputVM.spectrumDisplayState == .revealed ? 100 : 0)
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
@@ -679,7 +667,7 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 10) {
                 textInputArea
                 recordingsSection
-                if !selectedImages.isEmpty { photosSection }
+                if !photoVM.selectedImages.isEmpty { photosSection }
                 // 卡内分隔线:把"内容区"和"动作区(工具栏)"隔开。
                 Capsule()
                     .fill(Color.primary.opacity(0.06))
@@ -708,9 +696,12 @@ struct HomeView: View {
             ? Color.secondary
             : Color.secondary.opacity(0.50)
 
+        // `@Observable` VM 拿 Binding 需要 `@Bindable` shadow —— iOS 17+ 标准写法。
+        @Bindable var inputVM = inputVM
+
         TextField(
             "",
-            text: $inputText,
+            text: $inputVM.inputText,
             prompt: Text(inputPlaceholder)
                 .font(.system(size: 16))
                 .foregroundColor(promptColor),
@@ -720,15 +711,15 @@ struct HomeView: View {
         .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
         .background(Color.clear)
         .font(.system(size: 17))
-        .onChange(of: inputText) { _, newValue in
+        .onChange(of: inputVM.inputText) { _, newValue in
             let hasContent = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            if hasContent && spectrumDisplayState == .idle {
+            if hasContent && inputVM.spectrumDisplayState == .idle {
                 withAnimation(.easeInOut(duration: 1.0)) {
-                    spectrumDisplayState = .analyzing
+                    inputVM.spectrumDisplayState = .analyzing
                 }
-            } else if !hasContent && spectrumDisplayState == .analyzing {
+            } else if !hasContent && inputVM.spectrumDisplayState == .analyzing {
                 withAnimation(.easeInOut(duration: 0.8)) {
-                    spectrumDisplayState = .idle
+                    inputVM.spectrumDisplayState = .idle
                 }
             }
         }
@@ -737,29 +728,31 @@ struct HomeView: View {
     
     @ViewBuilder
     private var recordingsSection: some View {
+        // alert(isPresented:) 要 Binding<Bool>,走 `@Bindable` shadow。
+        @Bindable var recordingVM = recordingVM
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(audioRecordings) { rec in
+            ForEach(recordingVM.audioRecordings) { rec in
                 RecordingRow(
                     recording: rec,
                     controller: audioPlaybackController,
-                    isTranscribing: isTranscribing,
+                    isTranscribing: recordingVM.isTranscribing,
                     onPlay: { playAudio(fileName: rec.fileName) },
                     onDelete: {
-                        deleteTarget = rec.fileName
-                        showingDeleteAlert = true
+                        recordingVM.deleteTarget = rec.fileName
+                        recordingVM.showingDeleteAlert = true
                     }
                 )
             }
         }
-        .frame(height: audioRecordings.isEmpty ? 0 : nil)
-        .alert(NSLocalizedString("删除录音？", comment: "Delete recording confirmation"), isPresented: $showingDeleteAlert) {
+        .frame(height: recordingVM.audioRecordings.isEmpty ? 0 : nil)
+        .alert(NSLocalizedString("删除录音？", comment: "Delete recording confirmation"), isPresented: $recordingVM.showingDeleteAlert) {
             Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
-                if let target = deleteTarget {
+                if let target = recordingVM.deleteTarget {
                     deleteRecording(target)
                 }
             }
             Button(NSLocalizedString("取消", comment: "Cancel button"), role: .cancel) {
-                deleteTarget = nil
+                recordingVM.deleteTarget = nil
             }
         }
     }
@@ -771,13 +764,13 @@ struct HomeView: View {
         deleteAudioFileFromDocuments(target)
         // 删除录音时使用动画
         withAnimation(AnimationConfig.stiffSpring) {
-            audioRecordings.removeAll { $0.fileName == target }
+            recordingVM.audioRecordings.removeAll { $0.fileName == target }
         }
         // 清掉对已删除文件的悬空引用，否则再发送会把不存在的文件名落库
-        if currentAudioFileName == target {
-            currentAudioFileName = nil
+        if recordingVM.currentAudioFileName == target {
+            recordingVM.currentAudioFileName = nil
         }
-        deleteTarget = nil
+        recordingVM.deleteTarget = nil
     }
 
     private func deleteAudioFileFromDocuments(_ fileName: String) {
@@ -836,13 +829,13 @@ struct HomeView: View {
         let images = successful.map(\.1)
 
         await MainActor.run {
-            selectedImages = images
+            photoVM.selectedImages = images
             // F2:把 selectedPhotos 也剪枝到只剩压缩成功的 items,保证两边长度严格对齐。
             // 等值检查避免触发自身的 .onChange 死循环 —— PhotosPickerItem 是 Equatable。
-            if selectedPhotos != prunedItems {
-                selectedPhotos = prunedItems
+            if photoVM.selectedPhotos != prunedItems {
+                photoVM.selectedPhotos = prunedItems
             }
-            Log.info("[HomeView] Total compressed images: \(selectedImages.count)", category: .ui)
+            Log.info("[HomeView] Total compressed images: \(photoVM.selectedImages.count)", category: .ui)
         }
     }
 
@@ -857,15 +850,15 @@ struct HomeView: View {
         // 重发双点防护：`hasSendableContent` 已包含 `!isSending`，但用户触到第二次 tap 的极端
         // race（SwiftUI tap dispatch + `isSending` 还没 flip）在 struct-copy 语义下仍可能穿透。
         // 这里再加一层 synchronous guard 作为底线：同一个 HomeView 实例里永远最多一个发送在跑。
-        guard !isSending else {
+        guard !inputVM.isSending else {
             Log.info("[HomeView SendButton] 已有发送在跑，忽略重复 tap", category: .ui)
             return
         }
         // **必须**同步置位。以前 `isSending = true` 写在下面 `Task { MainActor.run { ... } }`
         // 里，两次极速 tap 之间的 SwiftUI dispatch 窗口（第一次 Task 尚未跑进 MainActor.run）
         // 内，第二次 tap 照样能过上面的 guard —— 两条日记双发落库。
-        // handleSendAction 由 Button action 触发，天然在主线程，`@State` 同步写合法。
-        isSending = true
+        // handleSendAction 由 Button action 触发，天然在主线程，VM 字段同步写合法。
+        inputVM.isSending = true
 #if canImport(UIKit)
         HapticManager.shared.click()
 #endif
@@ -874,24 +867,24 @@ struct HomeView: View {
             //    情绪分析文本与落库文本错位，或新输入被后续清空吞掉。
             let snapshot = await MainActor.run { () -> SendSnapshot in
                 let captured = SendSnapshot(
-                    text: inputText,
-                    audio: currentAudioFileName,
-                    images: selectedImages,
-                    mood: moodValue
+                    text: inputVM.inputText,
+                    audio: recordingVM.currentAudioFileName,
+                    images: photoVM.selectedImages,
+                    mood: inputVM.moodValue
                 )
 
                 Log.info("[HomeView SendButton] Starting send action", category: .ui)
                 withAnimation(AnimationConfig.standardResponse) {
-                    sendButtonState = .sending
+                    inputVM.sendButtonState = .sending
                     // isSending 已在 Task 外同步置 true，这里不重复写。
-                    spectrumDisplayState = .analyzing  // 光谱进入分析状态（呼吸效果）
+                    inputVM.spectrumDisplayState = .analyzing  // 光谱进入分析状态（呼吸效果）
                 }
                 withAnimation(AnimationConfig.fastResponse) {
-                    inputText = ""
-                    currentAudioFileName = nil
-                    audioRecordings.removeAll()
-                    selectedImages.removeAll()
-                    selectedPhotos.removeAll()
+                    inputVM.inputText = ""
+                    recordingVM.currentAudioFileName = nil
+                    recordingVM.audioRecordings.removeAll()
+                    photoVM.selectedImages.removeAll()
+                    photoVM.selectedPhotos.removeAll()
                 }
                 hideKeyboard()
                 // 发送完成：换一条占位语给用户新的灵感
@@ -913,16 +906,16 @@ struct HomeView: View {
                 let mood = await aiService.analyzeMood(text: textToAnalyze)
                 finalMoodValue = mood
                 await MainActor.run {
-                    self.moodValue = mood
+                    inputVM.moodValue = mood
                 }
             }
 
             // 3. 显示情绪反馈 → spectrum揭示结果（光点聚焦动画）
             await MainActor.run {
                 withAnimation(AnimationConfig.smoothTransition) {
-                    revealedMood = finalMoodValue
-                    sendButtonState = .moodRevealing
-                    spectrumDisplayState = .revealed  // 光谱显示结果
+                    inputVM.revealedMood = finalMoodValue
+                    inputVM.sendButtonState = .moodRevealing
+                    inputVM.spectrumDisplayState = .revealed  // 光谱显示结果
                 }
                 Log.info("[HomeView SendButton] Mood revealed: \(finalMoodValue)", category: .ui)
             }
@@ -944,8 +937,8 @@ struct HomeView: View {
             // 7. 完成动画 → 重置状态
             await MainActor.run {
                 withAnimation(AnimationConfig.smoothTransition) {
-                    sendButtonState = .completed
-                    isSending = false
+                    inputVM.sendButtonState = .completed
+                    inputVM.isSending = false
                 }
             }
 
@@ -953,9 +946,9 @@ struct HomeView: View {
 
             await MainActor.run {
                 withAnimation(AnimationConfig.smoothTransition) {
-                    sendButtonState = .idle
-                    revealedMood = nil
-                    spectrumDisplayState = .idle  // 光谱重置
+                    inputVM.sendButtonState = .idle
+                    inputVM.revealedMood = nil
+                    inputVM.spectrumDisplayState = .idle  // 光谱重置
                 }
             }
 
@@ -969,7 +962,7 @@ struct HomeView: View {
             HStack {
                 Image(systemName: "photo.stack")
                     .foregroundColor(.blue)
-                Text(selectedImages.count == 1 ? NSLocalizedString("1张照片", comment: "") : String(format: NSLocalizedString("%d张照片", comment: ""), selectedImages.count))
+                Text(photoVM.selectedImages.count == 1 ? NSLocalizedString("1张照片", comment: "") : String(format: NSLocalizedString("%d张照片", comment: ""), photoVM.selectedImages.count))
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
@@ -981,17 +974,17 @@ struct HomeView: View {
                     // UIImage,如果用 index 作 id,删掉中间一张图后剩下的图接管它的 index
                     // 但 @State 还在 → 一闪"错图配错按钮"。Data 作 id 让 SwiftUI 按内容
                     // 追踪 cell 身份,删除/重排都不会让仍存在的 cell 重新解码。
-                    ForEach(selectedImages, id: \.self) { data in
+                    ForEach(photoVM.selectedImages, id: \.self) { data in
                         InputPhotoThumbnail(
                             data: data,
                             onRemove: {
                                 withAnimation(AnimationConfig.stiffSpring) {
                                     // 按内容查当前 index —— closure 捕获的 index 在
                                     // selectedImages 被其他事件改过后会过期。
-                                    if let idx = selectedImages.firstIndex(of: data) {
-                                        selectedImages.remove(at: idx)
-                                        if idx < selectedPhotos.count {
-                                            selectedPhotos.remove(at: idx)
+                                    if let idx = photoVM.selectedImages.firstIndex(of: data) {
+                                        photoVM.selectedImages.remove(at: idx)
+                                        if idx < photoVM.selectedPhotos.count {
+                                            photoVM.selectedPhotos.remove(at: idx)
                                         }
                                     }
                                 }
@@ -1194,17 +1187,13 @@ struct HomeView: View {
 
     @ViewBuilder
     private var entriesListSection: some View {
-        // **NOTE — 为什么不用 `ForEach(entries, id: \.objectID)`**：
-        // 这里的 ForEach 在外层 `List` 里。换成 objectID identity 后，SwiftUI 的 List
-        // 能识别"单行 delete"，会播**原生 row-removal 动画**（被删行 fade + 下方 slide up）；
-        // 叠加 `deleteEntry` 里的 `withAnimation { }` 外包装以及 `@FetchRequest(animation: .default)`
-        // 的内建动画，三层动画时序错开，视觉上出现"行错位"。小规模用户 500 条的 index-shuffle
-        // 重建 overhead 可接受，先让视觉稳定，性能后续换分页 / `fetchLimit` 方案解决。
+        // 用 objectID 作稳定 identity，List 能识别单行 delete 播原生 row-removal 动画；
+        // 同时 `@FetchRequest` 已关 animation，`deleteEntry` 里的 `withAnimation` 独立生效，
+        // 不再和 FetchRequest 内建动画打架。500 条日记 shuffle 时子视图 @State（如图片 thumbnail 解码）
+        // 也不会因索引重排而整列重建。
         let lastIndex = entries.count - 1
-        ForEach(entries.indices, id: \.self) { idx in
-            let entry = entries[idx]
+        ForEach(Array(entries.enumerated()), id: \.element.objectID) { idx, entry in
             timelineRow(entry: entry, isFirst: idx == 0, isLast: idx == lastIndex)
-                .id(entry.objectID)
         }
     }
 
@@ -1342,68 +1331,68 @@ struct HomeView: View {
     }
     
     func handleStopRecording() async {
-        Log.info("[HomeView handleStopRecording START] Current SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+        Log.info("[HomeView handleStopRecording START] Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
         guard let fileName = recorder.stopRecording() else {
-            Log.info("[HomeView handleStopRecording: stopRecording returned nil] SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+            Log.info("[HomeView handleStopRecording: stopRecording returned nil] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
             return
         }
-        Log.info("[HomeView handleStopRecording: recording stopped, fileName: \(fileName)] SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
-        
+        Log.info("[HomeView handleStopRecording: recording stopped, fileName: \(fileName)] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+
         // 标记正在转录
         await MainActor.run {
-            isTranscribing = true
-            Log.info("[HomeView handleStopRecording: isTranscribing set to true] SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+            recordingVM.isTranscribing = true
+            Log.info("[HomeView handleStopRecording: isTranscribing set to true] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
         }
-        
-        Log.info("[HomeView handleStopRecording] Setting currentAudioFileName. Old SFCFN: \(currentAudioFileName ?? "nil"), New FileName: \(fileName)", category: .ui)
+
+        Log.info("[HomeView handleStopRecording] Setting currentAudioFileName. Old SFCFN: \(recordingVM.currentAudioFileName ?? "nil"), New FileName: \(fileName)", category: .ui)
 
         // UI 理论上已通过 disabled 拦住重复录音，但兜底一下：如果仍存在旧 take，
         // 删掉它们的磁盘文件，避免孤儿音频（数据模型是单值 audioFileName，不会被引用到）。
-        var filesToCleanup = Set(audioRecordings.map(\.fileName))
-        if let current = currentAudioFileName { filesToCleanup.insert(current) }
+        var filesToCleanup = Set(recordingVM.audioRecordings.map(\.fileName))
+        if let current = recordingVM.currentAudioFileName { filesToCleanup.insert(current) }
         filesToCleanup.remove(fileName)
         for stale in filesToCleanup {
             deleteAudioFileFromDocuments(stale)
         }
 
-        currentAudioFileName = fileName // SET FILENAME in handleStopRecording
+        recordingVM.currentAudioFileName = fileName // SET FILENAME in handleStopRecording
         // UI 只保留当前这一段（数据模型也是单值）；新录直接替换。
         withAnimation(AnimationConfig.stiffSpring) {
             let rec = Recording(id: fileName, fileName: fileName, duration: recorder.duration)
-            audioRecordings.removeAll()
-            audioRecordings.append(rec)
+            recordingVM.audioRecordings.removeAll()
+            recordingVM.audioRecordings.append(rec)
         }
-        Log.info("[HomeView handleStopRecording] Did set currentAudioFileName. New SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
-        
+        Log.info("[HomeView handleStopRecording] Did set currentAudioFileName. New SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        Log.info("[HomeView handleStopRecording: got documentsURL] SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+        Log.info("[HomeView handleStopRecording: got documentsURL] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
         let audioURL = documentsURL.appendingPathComponent(fileName)
-        Log.info("[HomeView handleStopRecording: got audioURL: \(audioURL)] SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
-        
+        Log.info("[HomeView handleStopRecording: got audioURL: \(audioURL)] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+
         // 开始异步转录任务
-        transcriptionTask = Task {
-            Log.info("[HomeView handleStopRecording Task START] SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+        recordingVM.transcriptionTask = Task {
+            Log.info("[HomeView handleStopRecording Task START] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
             Log.info("[HomeView] Using language for transcription: \(appLanguage)", category: .ui)
             let transcribedTextOpt = await transcriber.transcribeAudio(fileURL: audioURL, localeIdentifier: appLanguage)
             // 转录完成，更新状态
             await MainActor.run {
-                isTranscribing = false
+                recordingVM.isTranscribing = false
                 Log.info("[HomeView transcriptionTask] isTranscribing set to false", category: .ui)
             }
             if let transcribedText = transcribedTextOpt {
                 // 确保当前文件未变更
-                guard currentAudioFileName == fileName else {
+                guard recordingVM.currentAudioFileName == fileName else {
                     Log.info("[HomeView transcriptionTask] 任务文件已改变，放弃更新", category: .ui)
                     return
                 }
-                Log.info("[HomeView handleStopRecording Task - transcription successful, text: \(transcribedText)] SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+                Log.info("[HomeView handleStopRecording Task - transcription successful, text: \(transcribedText)] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
                 // 更新文本并分析情绪
                 await MainActor.run {
                     let punctuation = transcribedText.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil ? "。" : "."
-                    if inputText.isEmpty {
-                        inputText = transcribedText + punctuation
+                    if inputVM.inputText.isEmpty {
+                        inputVM.inputText = transcribedText + punctuation
                     } else {
-                        inputText += transcribedText + punctuation
+                        inputVM.inputText += transcribedText + punctuation
                     }
                 }
                 // 转录后不再自动分析情绪，等待发送时统一分析
@@ -1411,24 +1400,24 @@ struct HomeView: View {
             } else {
                 Log.error("[HomeView transcriptionTask] 转录失败或返回nil", category: .ui)
             }
-            Log.info("[HomeView handleStopRecording Task END] SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+            Log.info("[HomeView handleStopRecording Task END] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
         }
-        Log.info("[HomeView handleStopRecording END FUNCTION] SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+        Log.info("[HomeView handleStopRecording END FUNCTION] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
     }
 
     private func playAudio(fileName: String) {
-        Log.info("[HomeView playAudio START] Requested to play: \(fileName). Current SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+        Log.info("[HomeView playAudio START] Requested to play: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
 
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let audioURL = documentsURL.appendingPathComponent(fileName)
 
         guard FileManager.default.fileExists(atPath: audioURL.path) else {
-            Log.info("[HomeView playAudio] File NOT FOUND: \(fileName). Current SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
-            if currentAudioFileName == fileName { // 如果UI上显示的是这个不存在的文件
-                 Log.info("[HomeView playAudio] Clearing SFCFN because file missing. Old SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+            Log.info("[HomeView playAudio] File NOT FOUND: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+            if recordingVM.currentAudioFileName == fileName { // 如果UI上显示的是这个不存在的文件
+                 Log.info("[HomeView playAudio] Clearing SFCFN because file missing. Old SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
                  withAnimation(AnimationConfig.standardResponse) {
-                    currentAudioFileName = nil // SET NIL
-                    Log.info("[HomeView playAudio] Did set SFCFN to nil due to missing file. New SFCFN: \(self.currentAudioFileName ?? "nil")", category: .ui)
+                    recordingVM.currentAudioFileName = nil // SET NIL
+                    Log.info("[HomeView playAudio] Did set SFCFN to nil due to missing file. New SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
                  }
                  if audioPlaybackController.currentPlayingFileName == fileName {
                     audioPlaybackController.stopPlayback()
@@ -1436,41 +1425,39 @@ struct HomeView: View {
             }
             return
         }
-        
-        Log.info("[HomeView playAudio] File exists for: \(fileName). Current SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+
+        Log.info("[HomeView playAudio] File exists for: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
 
         if audioPlaybackController.isPlaying && audioPlaybackController.currentPlayingFileName != fileName {
-            Log.info("[HomeView playAudio] Controller was playing another file (\(audioPlaybackController.currentPlayingFileName ?? "nil")). Stopping it. Current SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
-            audioPlaybackController.stopPlayback(clearCurrentFile: true) 
-            Log.info("[HomeView playAudio] Controller stopped. Current SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+            Log.info("[HomeView playAudio] Controller was playing another file (\(audioPlaybackController.currentPlayingFileName ?? "nil")). Stopping it. Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+            audioPlaybackController.stopPlayback(clearCurrentFile: true)
+            Log.info("[HomeView playAudio] Controller stopped. Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
         }
-        
-        Log.info("[HomeView playAudio] Calling controller.play for: \(fileName). Current SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
-        audioPlaybackController.play(url: audioURL, fileName: fileName)
-        Log.info("[HomeView playAudio] Called controller.play. Controller isPlaying: \(audioPlaybackController.isPlaying), Controller file: \(audioPlaybackController.currentPlayingFileName ?? "nil"). Current SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
 
-        if self.currentAudioFileName != fileName {
-            Log.info("[HomeView playAudio] SFCFN (\(self.currentAudioFileName ?? "nil")) != fileName (\(fileName)). Restoring SFCFN.", category: .ui)
-            withAnimation(AnimationConfig.standardResponse) { 
-                 self.currentAudioFileName = fileName // SET FILENAME
-                 Log.info("[HomeView playAudio] Did set SFCFN to \(fileName). New SFCFN: \(self.currentAudioFileName ?? "nil")", category: .ui)
+        Log.info("[HomeView playAudio] Calling controller.play for: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+        audioPlaybackController.play(url: audioURL, fileName: fileName)
+        Log.info("[HomeView playAudio] Called controller.play. Controller isPlaying: \(audioPlaybackController.isPlaying), Controller file: \(audioPlaybackController.currentPlayingFileName ?? "nil"). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+
+        if recordingVM.currentAudioFileName != fileName {
+            Log.info("[HomeView playAudio] SFCFN (\(recordingVM.currentAudioFileName ?? "nil")) != fileName (\(fileName)). Restoring SFCFN.", category: .ui)
+            withAnimation(AnimationConfig.standardResponse) {
+                 recordingVM.currentAudioFileName = fileName // SET FILENAME
+                 Log.info("[HomeView playAudio] Did set SFCFN to \(fileName). New SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
             }
         }
 
-        // **引用循环防护**：闭包存在 audioPlaybackController 身上、访问 self.currentAudioFileName，
-        // self 是 HomeView struct 但里面的 @StateObject 存储是引用语义——
-        // closure → self → @StateObject audioPlaybackController → closure 形成完整循环，
-        // `@StateObject` 的 deinit 被顶死永不触发，运行时泄漏 `audioPlaybackController` + 它拿的
-        // AVAudioPlayer / CADisplayLink / AudioSession 资源。
-        // 做法：抓 Binding 而不是 self，抓 [weak audioPlaybackController]；不在闭包里提到 self。
-        let fileNameBinding = $currentAudioFileName
-        audioPlaybackController.onFinishPlaying = { [weak audioPlaybackController, capturedFileName = fileName] in
+        // **引用循环防护**：闭包存在 audioPlaybackController 身上、访问 recordingVM.currentAudioFileName，
+        // recordingVM 是 `@Observable` 引用类型，若闭包强捕获 recordingVM:
+        // closure → recordingVM → (nothing back) —— VM 不持 controller,不成环。
+        // 但 HomeView 的 @StateObject 存储仍是引用语义,self-capture 仍有风险。
+        // 做法：抓 [weak audioPlaybackController, weak recordingVM]；不在闭包里提到 self。
+        audioPlaybackController.onFinishPlaying = { [weak audioPlaybackController, weak recordingVM, capturedFileName = fileName] in
             Task { @MainActor in
                 guard let controller = audioPlaybackController else { return }
                 Log.info("[HomeView playAudio CB_Finish] Playback finished for \(capturedFileName)", category: .ui)
-                if fileNameBinding.wrappedValue == nil && capturedFileName == controller.currentPlayingFileName {
+                if recordingVM?.currentAudioFileName == nil && capturedFileName == controller.currentPlayingFileName {
                     withAnimation(AnimationConfig.standardResponse) {
-                        fileNameBinding.wrappedValue = capturedFileName
+                        recordingVM?.currentAudioFileName = capturedFileName
                     }
                 }
                 if !controller.isPlaying, controller.currentPlayingFileName == capturedFileName {
@@ -1478,13 +1465,13 @@ struct HomeView: View {
                 }
             }
         }
-        audioPlaybackController.onPlayError = { [weak audioPlaybackController, capturedFileName = fileName] error in
+        audioPlaybackController.onPlayError = { [weak audioPlaybackController, weak recordingVM, capturedFileName = fileName] error in
             Task { @MainActor in
                 guard let controller = audioPlaybackController else { return }
                 Log.error("[HomeView playAudio CB_Error] Playback error for \(capturedFileName): \(error.localizedDescription)", category: .ui)
-                if fileNameBinding.wrappedValue == nil && capturedFileName == controller.currentPlayingFileName {
+                if recordingVM?.currentAudioFileName == nil && capturedFileName == controller.currentPlayingFileName {
                     withAnimation(AnimationConfig.standardResponse) {
-                        fileNameBinding.wrappedValue = capturedFileName
+                        recordingVM?.currentAudioFileName = capturedFileName
                     }
                 }
                 if controller.currentPlayingFileName == capturedFileName {
@@ -1492,7 +1479,7 @@ struct HomeView: View {
                 }
             }
         }
-        Log.info("[HomeView playAudio END] For: \(fileName). SFCFN: \(currentAudioFileName ?? "nil")", category: .ui)
+        Log.info("[HomeView playAudio END] For: \(fileName). SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
     }
 
     private func hideKeyboard() {
@@ -1568,15 +1555,15 @@ struct HomeView: View {
         audioPlaybackController.stopPlayback(clearCurrentFile: true)
         
         // Clear input state
-        inputText = ""
-        currentAudioFileName = nil
-        audioRecordings.removeAll()
-        selectedImages.removeAll()
-        selectedPhotos.removeAll()
-        moodValue = 0.5
+        inputVM.inputText = ""
+        recordingVM.currentAudioFileName = nil
+        recordingVM.audioRecordings.removeAll()
+        photoVM.selectedImages.removeAll()
+        photoVM.selectedPhotos.removeAll()
+        inputVM.moodValue = 0.5
 
         // Cancel any ongoing tasks
-        transcriptionTask?.cancel()
+        recordingVM.transcriptionTask?.cancel()
         
         // Force Core Data to refresh
         viewContext.refreshAllObjects()
@@ -1594,9 +1581,9 @@ struct HomeView: View {
     /// 输入框占位文字。**stable**：一旦选定就不变，避免 SwiftUI body 重评时反复换。
     /// 重新选只发生在几个明确时刻：进入首页、发送后清空、AI 池更新完成、本地模板加载完成。
     private var inputPlaceholder: String {
-        stablePlaceholder.isEmpty
+        inputVM.stablePlaceholder.isEmpty
             ? NSLocalizedString("今天是怎样的一天呢？", comment: "Daily prompt fallback")
-            : stablePlaceholder
+            : inputVM.stablePlaceholder
     }
 
     /// 在三级 fallback 里挑一条写入 `stablePlaceholder`：
@@ -1604,13 +1591,13 @@ struct HomeView: View {
     ///   2. 本地 `contextPrompts` 第一条
     ///   3. 不动（保持 "今天是怎样的一天呢？" 兜底）
     func rollPlaceholderIfNeeded(force: Bool = false) {
-        if !force && !stablePlaceholder.isEmpty { return }
+        if !force && !inputVM.stablePlaceholder.isEmpty { return }
         if let aiLine = PromptSuggestionEngine.shared.randomHomePlaceholder() {
-            stablePlaceholder = aiLine
+            inputVM.stablePlaceholder = aiLine
             return
         }
-        if let first = contextPrompts.first {
-            stablePlaceholder = first.text
+        if let first = inputVM.contextPrompts.first {
+            inputVM.stablePlaceholder = first.text
             return
         }
         // 保持旧值；下次 AI 池 / 本地模板就绪会再试
@@ -1631,7 +1618,7 @@ struct HomeView: View {
         let prompts = await ContextPromptGenerator.shared.generate()
         await MainActor.run {
             withAnimation(AnimationConfig.smoothTransition) {
-                self.contextPrompts = prompts
+                inputVM.contextPrompts = prompts
             }
             rollPlaceholderIfNeeded()
         }
@@ -1643,6 +1630,9 @@ struct HomeView: View {
 extension HomeView {
     @ViewBuilder
     var keyboardActionsBar: some View {
+        // `.photosPicker(isPresented:)` / `.photosPicker(selection:)` 要 Binding,走 `@Bindable` shadow。
+        @Bindable var photoVM = photoVM
+
         // 关键 fix 1(tap 串):PhotosPicker 当 button 用时 hit area 在 HStack 里和邻居
         // 按钮串,点照片偶尔触发录音。改成普通 Button + `.photosPicker(isPresented:)` ——
         // 走 SwiftUI 标准的 sheet 模态,完全独立按钮,绝不和 mic 串。
@@ -1653,7 +1643,7 @@ extension HomeView {
             #if canImport(UIKit)
             HapticManager.shared.click()
             #endif
-            photosPickerPresented = true
+            photoVM.photosPickerPresented = true
         } label: {
             Image(systemName: "photo")
                 .font(.system(size: 18, weight: .medium))
@@ -1662,20 +1652,20 @@ extension HomeView {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(selectedImages.count >= 9)
+        .disabled(photoVM.selectedImages.count >= 9)
         .accessibilityLabel(NSLocalizedString("添加照片", comment: "Add photos"))
         .accessibilityIdentifier("home.keyboard.photo")
         .photosPicker(
-            isPresented: $photosPickerPresented,
-            selection: $selectedPhotos,
+            isPresented: $photoVM.photosPickerPresented,
+            selection: $photoVM.selectedPhotos,
             maxSelectionCount: 9,
             matching: .images
         )
-        .onChange(of: selectedPhotos) { _, newValue in
+        .onChange(of: photoVM.selectedPhotos) { _, newValue in
             // F1 fix:取消上一轮压缩任务。否则用户快速换选时,旧任务可能后完成
             // 覆盖掉新结果(stale write)。
-            photoLoadTask?.cancel()
-            photoLoadTask = Task { await loadPhotosWithCompression(newValue) }
+            photoVM.photoLoadTask?.cancel()
+            photoVM.photoLoadTask = Task { await loadPhotosWithCompression(newValue) }
         }
 
         Button {
@@ -1701,7 +1691,7 @@ extension HomeView {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(audioRecordings.count >= 1 && !recorder.isRecording)
+        .disabled(recordingVM.audioRecordings.count >= 1 && !recorder.isRecording)
         .accessibilityLabel(recorder.isRecording
             ? NSLocalizedString("停止录音", comment: "Stop recording")
             : NSLocalizedString("开始录音", comment: "Start recording"))
@@ -1718,7 +1708,7 @@ extension HomeView {
         Button {
             handleSendAction()
         } label: {
-            if sendButtonState == .sending {
+            if inputVM.sendButtonState == .sending {
                 ProgressView()
                     .controlSize(.small)
             } else {
@@ -1728,7 +1718,7 @@ extension HomeView {
         }
         .buttonStyle(.glassProminent)
         .tint(Color.accentColor)
-        .disabled(!hasSendableContent || sendButtonState != .idle)
+        .disabled(!hasSendableContent || inputVM.sendButtonState != .idle)
         .accessibilityLabel(NSLocalizedString("发送", comment: "Send"))
         .accessibilityIdentifier("home.keyboard.send")
     }
@@ -1750,9 +1740,9 @@ extension HomeView {
         // 仍为 true，就会进来第二次 `handleSendAction`，snapshot 的都是旧内容，并行写两条重复日记。
         // 把 `isSending` 纳入 `hasSendableContent` 做 UI 级互斥，handleSendAction 开头再加一层
         // guard 兜底，双重保险。
-        (!inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !audioRecordings.isEmpty
-            || !selectedImages.isEmpty) && !isTranscribing && !isSending
+        (!inputVM.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !recordingVM.audioRecordings.isEmpty
+            || !photoVM.selectedImages.isEmpty) && !recordingVM.isTranscribing && !inputVM.isSending
     }
 }
 

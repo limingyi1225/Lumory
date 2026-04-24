@@ -49,12 +49,18 @@ final class InsightsEngine {
     }
 
     struct AnswerChunk: Equatable {
-        enum Kind: Equatable { case text, citation }
+        enum Kind: Equatable { case text, citation, truncated, failed }
         let kind: Kind
         let text: String
         let citedEntryIds: [UUID]
         init(text: String) { self.kind = .text; self.text = text; self.citedEntryIds = [] }
         init(citations ids: [UUID]) { self.kind = .citation; self.text = ""; self.citedEntryIds = ids }
+        /// 流中断(已有部分内容) —— `text` 是 localized 原因说明,UI 应显示警示条,
+        /// 不要把它当正文 append 到 message body。用户可以重新生成。
+        init(truncatedReason reason: String) { self.kind = .truncated; self.text = reason; self.citedEntryIds = [] }
+        /// 流彻底失败(没产出任何内容) —— `text` 是 error.localizedDescription,
+        /// UI 应展示为"可操作错误"(显示出原文,而不是通用截断提示),让用户知道是网络还是认证。
+        init(failureReason reason: String) { self.kind = .failed; self.text = reason; self.citedEntryIds = [] }
     }
 
     // MARK: Dependencies
@@ -240,6 +246,29 @@ final class InsightsEngine {
 
     // MARK: - 4. Streaming narrative
 
+    /// 事件流 —— 消费方能感知 `.truncated` / `.failed` 做 UI banner。
+    /// 旧 `streamNarrative` 保留作 String 适配器。
+    @available(iOS 15.0, macOS 12.0, *)
+    func streamNarrativeEvents(in range: DateInterval) -> AsyncStream<StreamEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                let entries = await self.fetchEntryData(in: range)
+                guard !entries.isEmpty else {
+                    continuation.yield(.chunk(NSLocalizedString("这段时间还没有日记。", comment: "Empty narrative")))
+                    continuation.yield(.done)
+                    continuation.finish()
+                    return
+                }
+                for await event in self.ai.streamReportEvents(entries: entries) {
+                    if Task.isCancelled { break }
+                    continuation.yield(event)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     func streamNarrative(in range: DateInterval) -> AsyncStream<String> {
         AsyncStream { continuation in
             let task = Task {
@@ -275,9 +304,22 @@ final class InsightsEngine {
                 if !selected.isEmpty {
                     continuation.yield(AnswerChunk(citations: selected.map { $0.id }))
                 }
-                for await chunk in self.ai.ask(question: question, context: selected) {
+                // 升级消费:走 askEvents,把 .truncated 单独冒泡给 UI
+                for await event in self.ai.askEvents(question: question, context: selected) {
                     if Task.isCancelled { break }
-                    continuation.yield(AnswerChunk(text: chunk))
+                    switch event {
+                    case .chunk(let text):
+                        continuation.yield(AnswerChunk(text: text))
+                    case .truncated(let reason):
+                        continuation.yield(AnswerChunk(truncatedReason: reason))
+                    case .failed(let error):
+                        // **区分 truncated 和 failed**:truncated 是"断在中间,已有部分内容";
+                        // failed 是"一点内容都没产出"(离线 / 401 / 5xx)。合并成 truncated 会让
+                        // AskPastView 只显示空 bubble + 通用 banner,用户看不到具体错误。
+                        continuation.yield(AnswerChunk(failureReason: error.localizedDescription))
+                    case .done:
+                        break
+                    }
                 }
                 continuation.finish()
             }
@@ -421,12 +463,19 @@ final class InsightsEngine {
             .sorted { $0.1 > $1.1 }
             .map { $0.0 }
 
-        // **最低**给"最近但没索引"留 slot（≥ topK/3，且不小于 2），保证 backfill 没跑完时
-        // 新写的日记也能被 AI 读到。但这只是下限——如果 embedded 条目不够，剩下的空位
-        // 继续由 recency 填，保证总量尽量接近 topK。
-        let minRecencyReserve: Int = withoutVectors.isEmpty
-            ? 0
-            : min(max(2, topK / 3), withoutVectors.count)
+        // 只有两种情况才给最近未索引条目留保留槽:
+        //   (a) 索引覆盖率不到 95% —— backfill 还没跑完,尾部未索引日记仍占相当比例
+        //   (b) 5 分钟内有新写但未索引的条目 —— 用户刚写完马上问"刚才那条"的窗口
+        // 其它情况(覆盖率 ≥ 95% 且无新鲜未索引)完全交给语义排名,避免把不相关的老条目塞进 context。
+        let indexCoverage = Double(withVectors.count) / Double(max(1, all.count))
+        let now = Date()
+        let hasFreshUnindexed = withoutVectors.contains { now.timeIntervalSince($0.date) < 300 }
+        let minRecencyReserve: Int
+        if !withoutVectors.isEmpty, (indexCoverage < 0.95 || hasFreshUnindexed) {
+            minRecencyReserve = min(max(2, topK / 3), withoutVectors.count)
+        } else {
+            minRecencyReserve = 0
+        }
 
         let maxSemanticSlots = max(0, topK - minRecencyReserve)
         let topSemantic = Array(scoredEmbedded.prefix(maxSemanticSlots))

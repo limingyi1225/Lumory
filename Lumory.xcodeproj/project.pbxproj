@@ -116,7 +116,7 @@
 			name = Lumory;
 			packageProductDependencies = (
 			);
-			productName = Chronote;
+			productName = Lumory;
 			productReference = 6A77D1032DEAA14B00CEDDE5 /* Lumory.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -573,7 +573,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Chronote;
+				TEST_TARGET_NAME = Lumory;
 			};
 			name = Debug;
 		};
@@ -592,7 +592,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Chronote;
+				TEST_TARGET_NAME = Lumory;
 			};
 			name = Release;
 		};

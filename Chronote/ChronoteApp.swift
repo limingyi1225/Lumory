@@ -32,6 +32,7 @@ struct ChronoteApp: App {
     }()
     @State private var showSplash: Bool = true
     @State private var remoteChangeObserver: NSObjectProtocol?
+    @State private var memoryWarningObserver: NSObjectProtocol?
     init() {
         #if canImport(UIKit)
         UITableView.appearance().separatorStyle = .none
@@ -41,6 +42,13 @@ struct ChronoteApp: App {
         // 注意：以前这里有 checkDatabaseHealth()——和 PersistenceController 内部的那条
         // 一起是双重预检，且会在 WAL 被其他进程持有时误报。已经移除（PersistenceController
         // 的 loadPersistentStores 错误分支会走 DatabaseRecoveryService，有用户弹窗确认）。
+
+        // App Store screenshot 用的 sample data 注入。仅 DEBUG + 显式 launchArg 才生效，
+        // 见 UITestSampleData.swift。这条路径同步执行（~40ms），需要发生在 DataMigration 之前
+        // 因为它会先 batch delete 所有 entries——如果迁移塞了一批数据进来，反而会被擦掉。
+        #if DEBUG
+        UITestSampleData.seedIfNeeded(into: persistenceController)
+        #endif
 
         // v2 JSON → Core Data 的一次性迁移。以前在 init() 里同步调用 → `performAndWait`
         // 在主线程上跑几百条 JSON 解码 + Core Data insert，老用户首次升级会看到 App 卡
@@ -110,6 +118,12 @@ struct ChronoteApp: App {
     
     // 请求录音权限和语音识别权限
     private func requestPermissions() {
+        // Screenshot 自动化模式:跳过弹窗,否则会盖在 Home 上把首屏截烂。
+        // 真实运行用户必须看到这俩弹窗,所以只在显式 launchArg 时才跳。
+        #if DEBUG
+        if UITestSampleData.isActive { return }
+        #endif
+
         #if canImport(UIKit) && !os(macOS)
         if #available(iOS 17.0, *) {
             AVAudioApplication.requestRecordPermission(completionHandler: { granted in
@@ -185,6 +199,7 @@ struct ChronoteApp: App {
             }
             .animation(.easeInOut(duration: 0.8), value: showSplash)
             .environment(\.managedObjectContext, persistenceController.container.viewContext)
+            .environment(\.aiService, OpenAIService.shared)
             .environmentObject(importService)
             .environmentObject(syncMonitor)
             .onAppear {
@@ -205,6 +220,23 @@ struct ChronoteApp: App {
                         }
                     }
                 }
+
+                // 系统内存吃紧时主动释放图片 cache 和 URLCache，降低被 jetsam kill 的概率。
+                // NSCache 本身对内存压力有响应，但系统 evict 策略只基于自身 cost，不会立刻清空；
+                // 显式响应 warning 通知能在 iPad 多任务 / 长会话场景下明显降低白屏率。
+                #if canImport(UIKit)
+                if memoryWarningObserver == nil {
+                    memoryWarningObserver = NotificationCenter.default.addObserver(
+                        forName: UIApplication.didReceiveMemoryWarningNotification,
+                        object: nil,
+                        queue: .main
+                    ) { _ in
+                        DiaryEntry.clearImageCache()
+                        URLCache.shared.removeAllCachedResponses()
+                        Log.info("[ChronoteApp] didReceiveMemoryWarning — cleared image cache + URLCache", category: .ui)
+                    }
+                }
+                #endif
             }
             .onChange(of: scenePhase) { _, newPhase in
                 handleScenePhaseChange(newPhase)

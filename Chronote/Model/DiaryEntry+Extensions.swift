@@ -4,10 +4,13 @@ import CoreData
 // MARK: - Core Data DiaryEntry 扩展
 extension DiaryEntry {
     // Image cache - thread-safe
+    // 阈值从 100MB 降到 50MB：iPad 多任务 / 前台 jetsam 阈值紧时 100MB 容易触发系统 kill。
+    // 配合 ChronoteApp 里注册的 didReceiveMemoryWarning 通知，系统吃紧时还会显式调
+    // clearImageCache() 立刻释放。
     private static let imageCache: NSCache<NSString, NSData> = {
         let cache = NSCache<NSString, NSData>()
-        cache.countLimit = 50 // Max 50 images in cache
-        cache.totalCostLimit = 100 * 1024 * 1024 // 100MB limit
+        cache.countLimit = 50
+        cache.totalCostLimit = 50 * 1024 * 1024
         return cache
     }()
     private static let cacheQueue = DispatchQueue(label: "com.lumory.imagecache", attributes: .concurrent)
@@ -668,11 +671,11 @@ extension DiaryEntry {
     static func compressImageData(_ imageData: Data) -> Data {
         #if os(iOS)
         guard let uiImage = UIImage(data: imageData) else { return imageData }
-        
+
         // Smart compression based on image size
         let pixelCount = Int(uiImage.size.width * uiImage.scale * uiImage.size.height * uiImage.scale)
         let compressionQuality: CGFloat
-        
+
         switch pixelCount {
         case 0..<1_000_000: // < 1MP
             compressionQuality = 0.9
@@ -683,24 +686,42 @@ extension DiaryEntry {
         default: // > 8MP
             compressionQuality = 0.3
         }
-        
+
         // Also resize if too large
+        //
+        // 老实现用 `UIGraphicsBeginImageContextWithOptions` + `UIGraphicsGetImageFromCurrentImageContext`
+        // 已于 iOS 17 deprecated；改走 `UIGraphicsImageRenderer`（modern API，自动处理 color space / Retina）。
+        // `format` 显式保持默认（scale = 1.0, opaque = false）—— 不要手动把 `.opaque = true`，
+        // 虽然 HEIC/JPEG 最终都丢 alpha，但渲染中间产物保持默认更稳。
+        let renderedImage: UIImage
         let maxDimension: CGFloat = 2048
         if uiImage.size.width > maxDimension || uiImage.size.height > maxDimension {
             let scale = min(maxDimension / uiImage.size.width, maxDimension / uiImage.size.height)
             let newSize = CGSize(width: uiImage.size.width * scale, height: uiImage.size.height * scale)
-            
-            UIGraphicsBeginImageContextWithOptions(newSize, false, 1.0)
-            defer { UIGraphicsEndImageContext() }
-            uiImage.draw(in: CGRect(origin: .zero, size: newSize))
-            
-            if let resizedImage = UIGraphicsGetImageFromCurrentImageContext() {
-                return resizedImage.jpegData(compressionQuality: compressionQuality) ?? imageData
+
+            let format = UIGraphicsImageRendererFormat.default()
+            format.scale = 1.0
+            let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
+            renderedImage = renderer.image { _ in
+                uiImage.draw(in: CGRect(origin: .zero, size: newSize))
             }
+        } else {
+            renderedImage = uiImage
         }
-        
-        return uiImage.jpegData(compressionQuality: compressionQuality) ?? imageData
-        
+
+        // HEIC 优先，失败回退 JPEG。
+        //
+        // 为什么需要回退：
+        //   - 非 RGB 色彩空间（CMYK / CIImage-only UIImage）走 HEIC encoder 会 Finalize 失败
+        //   - 老设备 / 历史上模拟器某些组合不支持 HEIC 编码
+        //   - `cgImage` 为 nil 的 UIImage 在 heicData 里直接返回 nil
+        // 如果 HEIC 和 JPEG 都失败（基本只发生在 UIImage 构造本身就损坏时），
+        // 退回原始 imageData，保证不会把 0 字节写进 blob。
+        if let heic = renderedImage.heicData(compressionQuality: compressionQuality) {
+            return heic
+        }
+        return renderedImage.jpegData(compressionQuality: compressionQuality) ?? imageData
+
         #else
         guard let nsImage = NSImage(data: imageData) else { return imageData }
         

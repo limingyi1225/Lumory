@@ -21,6 +21,10 @@ struct NarrativeReader: View {
     @State private var content: String = ""
     @State private var isStreaming: Bool = false
     @State private var streamTask: Task<Void, Never>?
+    /// 流被中断但已产出部分内容 —— UI 显示提示条,禁止把半截当完整叙事。
+    @State private var isIncomplete: Bool = false
+    /// 截断原因 (本地化后的一句话),不一定展示,留给 debug 或未来的 toast。
+    @State private var incompleteReason: String = ""
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -29,6 +33,11 @@ struct NarrativeReader: View {
 
             VStack(spacing: 0) {
                 header
+                if isIncomplete {
+                    incompleteBanner
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
+                }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         Text(title)
@@ -64,6 +73,45 @@ struct NarrativeReader: View {
         .onDisappear {
             streamTask?.cancel()
         }
+    }
+
+    // MARK: Incomplete banner
+
+    private var incompleteBanner: some View {
+        // content.isEmpty 时说明 stream 压根没产出(离线/401/5xx),banner 显示具体原因(incompleteReason)
+        // 替代通用提示,让用户能判断是网络还是配置问题。有部分 content 时仍保留原通用文案 + 重新生成按钮。
+        let hasContent = !content.isEmpty
+        let headline: String = hasContent
+            ? NSLocalizedString("stream.incomplete.banner", comment: "Stream truncated hint")
+            : (incompleteReason.isEmpty
+                ? NSLocalizedString("stream.incomplete.banner", comment: "Stream truncated hint")
+                : incompleteReason)
+        return HStack(spacing: 10) {
+            Image(systemName: hasContent ? "exclamationmark.triangle.fill" : "xmark.octagon.fill")
+                .foregroundStyle(hasContent ? .orange : .red)
+                .font(.caption)
+            Text(headline)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+            Spacer()
+            Button {
+                regenerate()
+            } label: {
+                Text(NSLocalizedString("stream.incomplete.regenerate", comment: "Regenerate"))
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tint)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill((hasContent ? Color.orange : Color.red).opacity(0.12))
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(headline)
     }
 
     // MARK: Header
@@ -115,11 +163,25 @@ struct NarrativeReader: View {
         guard streamTask == nil else { return }
         isStreaming = true
         content = ""
+        isIncomplete = false
+        incompleteReason = ""
         streamTask = Task {
-            for await chunk in engine.streamNarrative(in: range) {
+            // 走结构化事件流 —— 截断时不再把中文 `⚠️ ...` 混进正文,而是让 UI 显示横幅。
+            for await event in engine.streamNarrativeEvents(in: range) {
                 if Task.isCancelled { break }
                 await MainActor.run {
-                    content += chunk
+                    switch event {
+                    case .chunk(let text):
+                        content += text
+                    case .truncated(let reason):
+                        isIncomplete = true
+                        incompleteReason = reason
+                    case .failed(let error):
+                        isIncomplete = true
+                        incompleteReason = error.localizedDescription
+                    case .done:
+                        break
+                    }
                 }
             }
             await MainActor.run {
@@ -131,6 +193,8 @@ struct NarrativeReader: View {
     private func regenerate() {
         streamTask?.cancel()
         streamTask = nil
+        isIncomplete = false
+        incompleteReason = ""
         start()
     }
 

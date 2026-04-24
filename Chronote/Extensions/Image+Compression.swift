@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import AVFoundation
 #if canImport(UIKit)
 import UIKit
 
@@ -46,6 +48,29 @@ extension UIImage {
         return renderer.image { _ in
             self.draw(in: CGRect(origin: .zero, size: newSize))
         }
+    }
+
+    /// 编码为 HEIC 数据。失败返回 nil —— 调用方需要自己回退到 JPEG。
+    ///
+    /// 失败场景（不全是 bug）：
+    ///   - CMYK / 非 RGB 色彩空间 —— `CGImageDestinationFinalize` 会返回 false
+    ///   - 设备 / OS 不开 HEIC 编码器（模拟器历史上踩过）
+    ///   - `cgImage` 为空（纯 CIImage-backed 的 UIImage，日记 App 不太可能出现,但要保底）
+    ///
+    /// 必须检查 `CGImageDestinationFinalize` 的 Bool 返回值,不检查的话
+    /// `mutableData` 可能是空的,调用方把空 Data 当成 "成功但 0 字节" 写进 blob。
+    func heicData(compressionQuality: CGFloat) -> Data? {
+        guard let cgImage = self.cgImage else { return nil }
+        let mutableData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            mutableData, AVFileType.heic as CFString, 1, nil
+        ) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: compressionQuality
+        ]
+        CGImageDestinationAddImage(dest, cgImage, options as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return mutableData as Data
     }
 }
 #endif

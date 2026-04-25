@@ -104,8 +104,11 @@ final class DatabaseRecoveryService {
     
     private func createBackup(of url: URL) -> URL? {
         let timestamp = Int(Date().timeIntervalSince1970)
-        let backupDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("DatabaseBackups", isDirectory: true)
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            Log.error("[DatabaseRecovery] documentDirectory unavailable, cannot create backup", category: .persistence)
+            return nil
+        }
+        let backupDir = docs.appendingPathComponent("DatabaseBackups", isDirectory: true)
         
         // Create backup directory if needed
         try? FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
@@ -151,6 +154,15 @@ final class DatabaseRecoveryService {
         do {
             try FileManager.default.copyItem(at: backupURL, to: targetURL)
             Log.info("[DatabaseRecovery] Restored from backup", category: .persistence)
+
+            // Mirror createBackup: also restore -wal / -shm 兄弟文件。
+            // checkpoint 干净时它们可能不存在，所以全部 try?。
+            let extensions = ["sqlite-wal", "sqlite-shm"]
+            for ext in extensions {
+                let backupSibling = backupURL.deletingPathExtension().appendingPathExtension(ext)
+                let targetSibling = targetURL.deletingPathExtension().appendingPathExtension(ext)
+                try? FileManager.default.copyItem(at: backupSibling, to: targetSibling)
+            }
         } catch {
             Log.error("[DatabaseRecovery] Failed to restore from backup: \(error)", category: .persistence)
         }
@@ -208,8 +220,11 @@ final class DatabaseRecoveryService {
     }
     
     func cleanupOldBackups(keepLast: Int = 3) {
-        let backupDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("DatabaseBackups", isDirectory: true)
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            Log.error("[DatabaseRecovery] documentDirectory unavailable, skipping backup cleanup", category: .persistence)
+            return
+        }
+        let backupDir = docs.appendingPathComponent("DatabaseBackups", isDirectory: true)
         
         do {
             let backups = try FileManager.default.contentsOfDirectory(

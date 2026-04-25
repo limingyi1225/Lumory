@@ -6,8 +6,25 @@ extension Notification.Name {
 }
 
 final class PersistenceController {
-    static let shared = PersistenceController()
+    /// `.shared` 在普通启动下指向真实 CloudKit-backed store；
+    /// 检测到 `-LumoryUITestSampleData YES` launchArg 时自动切换到 **in-memory store**，
+    /// 完全旁路 CloudKit、本地 SQLite、用户数据 —— 这是 reviewer 第二轮提出的硬性要求：
+    /// "screenshot/CI 模式必须真在内存里跑，不能复用真实 store + 启发式判断安全"。
+    /// 注意：launchArg 的解析在第一次访问 `.shared` 时同步执行（早于 `App.init` 中所有
+    /// 其他属性初始化），所以 `seedIfNeeded` 进来时 store 类型已确定。
+    static let shared: PersistenceController = {
+        let args = ProcessInfo.processInfo.arguments
+        var screenshotMode = false
+        if let idx = args.firstIndex(of: "-LumoryUITestSampleData"),
+           idx + 1 < args.count,
+           args[idx + 1].uppercased() == "YES" {
+            screenshotMode = true
+        }
+        return PersistenceController(inMemory: screenshotMode)
+    }()
+
     let container: NSPersistentCloudKitContainer
+    let isInMemory: Bool
     private var observers: [NSObjectProtocol] = []
 
     /// 标识这次启动是否处在"加载失败、等用户决策"的降级态。
@@ -17,7 +34,10 @@ final class PersistenceController {
     /// 上次加载失败的 error（给 UI 展示用）。
     private(set) var storeLoadError: NSError?
 
-    init() {
+    /// 默认 init 走真实 CloudKit-backed store；`inMemory: true` 走 NSInMemoryStoreType。
+    /// in-memory 模式下完全不挂 CloudKit container options、不持久化、不走 history tracking。
+    init(inMemory: Bool = false) {
+        self.isInMemory = inMemory
         // 创建容器，名称必须与 .xcdatamodeld 文件名匹配
         container = NSPersistentCloudKitContainer(name: "Model")
 
@@ -27,22 +47,34 @@ final class PersistenceController {
             fatalError("无法获取 persistentStoreDescriptions — xcdatamodeld 未正确打包")
         }
 
-        // 设置CloudKit配置
-        description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(containerIdentifier: "iCloud.com.Mingyi.Lumory")
+        if inMemory {
+            // 完全旁路：不挂 CloudKit options，store 类型置为 in-memory，URL 置 /dev/null。
+            // 这样 batch delete + insert 完全发生在 RAM 里，不写盘、不同步到 CloudKit、不污染
+            // 用户的真实日记。Screenshot run 结束、进程退出，数据自动消失。
+            description.type = NSInMemoryStoreType
+            description.url = URL(fileURLWithPath: "/dev/null")
+            description.cloudKitContainerOptions = nil
+            description.shouldMigrateStoreAutomatically = false
+            description.shouldInferMappingModelAutomatically = false
+            Log.info("[PersistenceController] Initialized with IN-MEMORY store (screenshot/CI mode)", category: .persistence)
+        } else {
+            // 设置CloudKit配置
+            description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(containerIdentifier: "iCloud.com.Mingyi.Lumory")
 
-        // 启用远程通知
-        description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
-        description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
+            // 启用远程通知
+            description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+            description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
 
-        // **显式**打开 lightweight migration。NSPersistentCloudKitContainer 在部分 iOS 版本下
-        // 默认行为不稳定，显式设置这两个 option 保证模型新加可选字段（embedding/themes/wordCount）
-        // 升级时能自动完成 schema 迁移，而不是抛 "incompatible model" 把用户挡在门外。
-        description.shouldMigrateStoreAutomatically = true
-        description.shouldInferMappingModelAutomatically = true
+            // **显式**打开 lightweight migration。NSPersistentCloudKitContainer 在部分 iOS 版本下
+            // 默认行为不稳定，显式设置这两个 option 保证模型新加可选字段（embedding/themes/wordCount）
+            // 升级时能自动完成 schema 迁移，而不是抛 "incompatible model" 把用户挡在门外。
+            description.shouldMigrateStoreAutomatically = true
+            description.shouldInferMappingModelAutomatically = true
 
-        // 设置URL以确保本地存储位置
-        let storeURL = URL.storeURL(for: "Model", databaseName: "Model")
-        description.url = storeURL
+            // 设置URL以确保本地存储位置
+            let storeURL = URL.storeURL(for: "Model", databaseName: "Model")
+            description.url = storeURL
+        }
 
         // NOTE：以前这里有一段 pre-load `integrity_check` + 静默删除数据库文件的代码——
         // SQLite `PRAGMA integrity_check` 在 WAL 锁竞争 / 第三方备份软件持有 fd 时会假报故障，
@@ -189,71 +221,6 @@ final class PersistenceController {
         Log.info("[PersistenceController] deinit - cleaned up observers", category: .persistence)
     }
     
-    private func handlePreLoadCorruption(storeURL: URL, container: NSPersistentCloudKitContainer) {
-        Log.info("[PersistenceController] Handling pre-load corruption...", category: .persistence)
-        
-        // Perform recovery
-        DatabaseRecoveryService.shared.performRecovery(for: container) { [weak self] result in
-            switch result {
-            case .success:
-                Log.info("[PersistenceController] Pre-load recovery completed successfully", category: .persistence)
-                // Reload the container after recovery
-                DispatchQueue.main.async {
-                    self?.reloadAfterRecovery()
-                }
-            case .failure(let error):
-                Log.error("[PersistenceController] Pre-load recovery failed: \(error)", category: .persistence)
-                // Try emergency recovery
-                self?.performEmergencyRecovery(storeURL: storeURL, container: container)
-            }
-        }
-    }
-    
-    private func performEmergencyRecovery(storeURL: URL, container: NSPersistentCloudKitContainer) {
-        Log.info("[PersistenceController] Performing emergency recovery...", category: .persistence)
-        
-        // Create backup
-        let backupURL = storeURL.appendingPathExtension("emergency-backup-\(Date().timeIntervalSince1970)")
-        try? FileManager.default.copyItem(at: storeURL, to: backupURL)
-        
-        // Delete all database files and clear CloudKit tokens
-        try? FileManager.default.removeItem(at: storeURL)
-        let walURL = storeURL.deletingPathExtension().appendingPathExtension("sqlite-wal")
-        let shmURL = storeURL.deletingPathExtension().appendingPathExtension("sqlite-shm")
-        let ckURL = storeURL.deletingPathExtension().appendingPathExtension("sqlite-ck")
-        try? FileManager.default.removeItem(at: walURL)
-        try? FileManager.default.removeItem(at: shmURL)
-        try? FileManager.default.removeItem(at: ckURL)
-        
-        // Clear CloudKit history tokens
-        clearCloudKitTokens()
-        
-        // Try to reload — 失败也不 fatalError，进降级态。
-        container.loadPersistentStores { [weak self] storeDescription, error in
-            if let error = error {
-                Log.error("[PersistenceController] Emergency recovery failed: \(error) — entering degraded mode", category: .persistence)
-                DispatchQueue.main.async {
-                    self?.isStoreLoadFailed = true
-                    self?.storeLoadError = error as NSError
-                }
-            } else {
-                Log.info("[PersistenceController] Emergency recovery succeeded", category: .persistence)
-                DispatchQueue.main.async {
-                    self?.isStoreLoadFailed = false
-                    self?.storeLoadError = nil
-                    NotificationCenter.default.post(name: .databaseRecreated, object: nil)
-                }
-            }
-        }
-    }
-    
-    private func reloadAfterRecovery() {
-        // This would require reinitializing the entire PersistenceController
-        // For now, we'll just post the notification
-        NotificationCenter.default.post(name: .databaseRecreated, object: nil)
-    }
-    
-    
     private func initializeCloudKitSchema() {
         #if DEBUG
         // NSPersistentCloudKitContainer automatically manages schema creation
@@ -283,34 +250,6 @@ final class PersistenceController {
         #endif
     }
     
-    /// Clear CloudKit history tokens to resolve token reference errors
-    private func clearCloudKitTokens() {
-        Log.info("[PersistenceController] Clearing CloudKit history tokens...", category: .persistence)
-        
-        // Clear any stored history tokens in UserDefaults that might be causing issues
-        let userDefaults = UserDefaults.standard
-        let keys = userDefaults.dictionaryRepresentation().keys
-        
-        for key in keys {
-            if key.contains("NSPersistentHistoryToken") || key.contains("CloudKit") {
-                userDefaults.removeObject(forKey: key)
-                Log.info("[PersistenceController] Removed token key: \(key)", category: .persistence)
-            }
-        }
-        
-        // 走后台 context。viewContext 是 main queue，从背景紧急恢复路径里直接摸它是线程违规。
-        let bg = container.newBackgroundContext()
-        bg.perform {
-            do {
-                let request = NSPersistentHistoryChangeRequest.deleteHistory(before: Date())
-                try bg.execute(request)
-                try bg.save()
-                Log.info("[PersistenceController] Cleared persistent history", category: .persistence)
-            } catch {
-                Log.error("[PersistenceController] Failed to clear persistent history: \(error)", category: .persistence)
-            }
-        }
-    }
 }
 
 extension URL {
@@ -324,7 +263,15 @@ extension URL {
     /// 老用户升级时走 `migrateFromUbiquityIfNeeded` 一次性把老数据搬到新位置，然后把老文件
     /// 改名 `.legacy-ubiquity` 保留（不直接删，万一搬迁中断还能人工恢复）。
     static func storeURL(for appGroup: String, databaseName: String) -> URL {
-        let localSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        // `urls(for:in:)` 在 iOS 进程里实际不会返回空，但 SwiftLint 不知情；
+        // 用 fallback 到 tmpDir 兜底，并打 error log 让我们能在 Crashlytics 上发现这种"不可能"的状况。
+        let localSupport: URL
+        if let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            localSupport = dir
+        } else {
+            localSupport = FileManager.default.temporaryDirectory
+            Log.error("[PersistenceController] applicationSupportDirectory unavailable, falling back to: \(localSupport.path)", category: .persistence)
+        }
         // Application Support 在 simulator 首次启动时可能不存在，确保一下。
         try? FileManager.default.createDirectory(at: localSupport, withIntermediateDirectories: true)
         let storeURL = localSupport.appendingPathComponent("\(databaseName).sqlite")
@@ -359,7 +306,10 @@ extension URL {
         }
 
         // 回退路径：本地 Documents（老版本无 iCloud 时的 fallback）
-        let localDocs = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
+        guard let localDocs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            Log.error("[PersistenceController] documentDirectory unavailable, skipping legacy local migration", category: .persistence)
+            return
+        }
         let legacyLocalStore = localDocs.appendingPathComponent("\(databaseName).sqlite")
         if fm.fileExists(atPath: legacyLocalStore.path) {
             migrateFromLegacyDirectory(sourceDir: localDocs, targetURL: targetURL, databaseName: databaseName, label: "local-documents", archive: true)
@@ -507,20 +457,6 @@ extension PersistenceController {
 
 // MARK: - Cleanup
 extension PersistenceController {
-    // Public method to save context with error handling
-    func save() {
-        let context = container.viewContext
-        
-        guard context.hasChanges else { return }
-        
-        do {
-            try context.save()
-        } catch {
-            let nsError = error as NSError
-            Log.error("[PersistenceController] Save error: \(nsError), \(nsError.userInfo)", category: .persistence)
-        }
-    }
-    
     // Batch delete with performance optimization - uses background context for thread safety
     func batchDelete<T: NSManagedObject>(_ type: T.Type, predicate: NSPredicate? = nil) async throws {
         try await container.performBackgroundTask { context in

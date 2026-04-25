@@ -320,3 +320,39 @@
 "stream.incomplete.banner" = "Content incomplete — you can regenerate.";
 "stream.incomplete.regenerate" = "Regenerate";
 "--- 导出结束 ---" = "--- End of Export ---";
+
+/* CloudKit sync status / errors (user-visible, CloudKitSyncMonitor.SyncStatus.displayName + errorMessage) */
+"sync.status.unknown" = "Unknown";
+"sync.status.syncing" = "Syncing…";
+"sync.status.synced" = "Synced";
+"sync.status.error" = "Sync Error";
+"sync.status.notSignedIn" = "Not Signed In to iCloud";
+"sync.status.networkUnavailable" = "Network Unavailable";
+"sync.error.accountError" = "iCloud account error: %@";
+"sync.error.noAccount" = "Please sign in to iCloud in System Settings";
+"sync.error.restricted" = "iCloud access is restricted";
+"sync.error.couldNotDetermine" = "Could not determine iCloud status";
+"sync.error.temporarilyUnavailable" = "iCloud is temporarily unavailable";
+"sync.error.unknown" = "Unknown iCloud status";
+"sync.error.unknownDetail" = "Unknown error";
+"sync.error.setupFailed" = "CloudKit setup failed: %@";
+"sync.error.importFailed" = "Import failed: %@";
+"sync.error.exportFailed" = "Export failed: %@";
+"sync.error.networkUnavailable" = "Network unavailable for iCloud sync";
+"sync.error.notAuthenticated" = "Please sign in to iCloud";
+"sync.error.quotaExceeded" = "iCloud storage quota exceeded";
+"sync.error.generic" = "iCloud sync error: %@";
+"sync.error.saveFailed" = "Failed to save local changes: %@";
+"sync.error.accountCheckFailed" = "Account check failed: %@";
+"sync.error.accountUnavailable" = "iCloud account not available";
+"sync.error.verifyFailed" = "Sync verification failed: %@";
+
+/* Diary import errors / alert copy — DiaryImportError + DiaryImportView */
+"error.import.emptyInput" = "The pasted text is empty.";
+"error.import.network" = "Network error during import: %@";
+"error.import.parsingFailed" = "Failed to parse diary entries: %@";
+"error.import.noContent" = "AI returned no content. Please try again later.";
+"error.import.notJSON" = "AI response is not a valid JSON array.";
+"import.alert.error.title" = "Import Failed";
+"import.alert.empty.title" = "No Entries Detected";
+"import.alert.empty.message" = "No diary entries were detected in the pasted text. Please check the format and try again.";

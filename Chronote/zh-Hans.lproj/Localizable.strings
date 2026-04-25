@@ -319,3 +319,39 @@
 "stream.incomplete.banner" = "内容不完整，可重新生成。";
 "stream.incomplete.regenerate" = "重新生成";
 "--- 导出结束 ---" = "--- 导出结束 ---";
+
+/* CloudKit 同步状态 / 错误文案（用户可见，CloudKitSyncMonitor.SyncStatus.displayName + errorMessage） */
+"sync.status.unknown" = "未知";
+"sync.status.syncing" = "同步中…";
+"sync.status.synced" = "已同步";
+"sync.status.error" = "同步出错";
+"sync.status.notSignedIn" = "未登录 iCloud";
+"sync.status.networkUnavailable" = "网络不可用";
+"sync.error.accountError" = "iCloud 账户错误：%@";
+"sync.error.noAccount" = "请前往系统设置登录 iCloud";
+"sync.error.restricted" = "iCloud 访问受限";
+"sync.error.couldNotDetermine" = "无法确定 iCloud 状态";
+"sync.error.temporarilyUnavailable" = "iCloud 暂时不可用";
+"sync.error.unknown" = "未知的 iCloud 状态";
+"sync.error.unknownDetail" = "未知错误";
+"sync.error.setupFailed" = "CloudKit 初始化失败：%@";
+"sync.error.importFailed" = "导入失败：%@";
+"sync.error.exportFailed" = "导出失败：%@";
+"sync.error.networkUnavailable" = "iCloud 同步无法连接网络";
+"sync.error.notAuthenticated" = "请登录 iCloud";
+"sync.error.quotaExceeded" = "iCloud 存储空间不足";
+"sync.error.generic" = "iCloud 同步错误：%@";
+"sync.error.saveFailed" = "保存本地修改失败：%@";
+"sync.error.accountCheckFailed" = "账户检查失败：%@";
+"sync.error.accountUnavailable" = "iCloud 账户不可用";
+"sync.error.verifyFailed" = "同步校验失败：%@";
+
+/* 导入日记错误 / 弹窗文案 —— DiaryImportError + DiaryImportView */
+"error.import.emptyInput" = "粘贴的内容为空。";
+"error.import.network" = "导入时网络出错：%@";
+"error.import.parsingFailed" = "解析日记失败：%@";
+"error.import.noContent" = "AI 未返回内容，请稍后再试。";
+"error.import.notJSON" = "AI 返回的内容不是合法 JSON 数组。";
+"import.alert.error.title" = "导入失败";
+"import.alert.empty.title" = "未识别到日记";
+"import.alert.empty.message" = "没有从粘贴的内容里识别到任何日记。请检查格式后重试。";

@@ -177,41 +177,41 @@ struct SyncDiagnosticService {
     }
     
     private static func checkiCloudContainerAccess() -> Bool {
-        guard let iCloudContainer = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") else {
-            return false
-        }
-        
-        // Test write access
-        let testFile = iCloudContainer.appendingPathComponent("diagnostic_test.tmp")
-        do {
-            try "test".write(to: testFile, atomically: true, encoding: .utf8)
-            try FileManager.default.removeItem(at: testFile)
-            return true
-        } catch {
-            Log.error("[SyncDiagnostic] iCloud container access failed: \(error)", category: .sync)
-            return false
-        }
+        // 历史上这里是写一个 `diagnostic_test.tmp` 到 ubiquity container 来探活,但
+        // `PersistenceController.swift:319-322` 明确说不要走 ubiquity 路径(NSPersistentCloudKitContainer
+        // 用的是 CloudKit 私有数据库,不是 iCloud Drive 的 ubiquity 文件存储,写测试文件既污染
+        // 用户的 iCloud Drive,也不能反映 CloudKit 同步状态)。改成纯 token 探活:
+        //  - `ubiquityIdentityToken != nil` 表示用户登录了 iCloud 且本 app 容器是 reachable 的;
+        //  - 真正"CloudKit 数据库可达"由上一步 `checkNetworkConnectivity()` 的 query 判定。
+        return FileManager.default.ubiquityIdentityToken != nil
     }
-    
+
+    /// `viewContext` 是 `mainQueueConcurrencyType`,Core Data 强制要求只能在主线程访问。
+    /// `performDiagnostic()` 是 async non-MainActor 调用栈(SettingsView.runSyncDiagnostic
+    /// 在普通 `Task {}` 里 await 这个函数),从那里直接 `container.viewContext.fetch(...)`
+    /// 就是线程违规,会随机静默损坏对象图。这里改用 `newBackgroundContext()` —— 自己的私有队列,
+    /// 用 `performAndWait` 把 fetch 包到队列上,任意线程都安全。
     private static func checkCoreDataStoreStatus() -> (isHealthy: Bool, error: String?) {
         let container = PersistenceController.shared.container
-        
+
         // Check if the store is loaded
         guard !container.persistentStoreDescriptions.isEmpty else {
             return (false, "No persistent stores configured")
         }
-        
-        // Try to perform a simple fetch
-        let context = container.viewContext
-        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
-        request.fetchLimit = 1
-        
-        do {
-            _ = try context.fetch(request)
-            return (true, nil)
-        } catch {
-            return (false, "Core Data fetch failed: \(error.localizedDescription)")
+
+        let context = container.newBackgroundContext()
+        var result: (isHealthy: Bool, error: String?) = (true, nil)
+        context.performAndWait {
+            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            request.fetchLimit = 1
+            do {
+                _ = try context.fetch(request)
+                result = (true, nil)
+            } catch {
+                result = (false, "Core Data fetch failed: \(error.localizedDescription)")
+            }
         }
+        return result
     }
     
     private static func checkCloudKitConfiguration() -> Bool {

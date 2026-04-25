@@ -59,3 +59,28 @@ enum WordCountBackfillService {
         }
     }
 }
+
+/// 串行化 backfill 触发，防 CloudKit 批量 import 一次推 N 个 NSPersistentStoreRemoteChange
+/// 通知时，并发跑 N 个 backfill 抢 store coordinator 锁。
+///
+/// 用法：
+/// ```swift
+/// Task.detached {
+///     await WordCountBackfillGate.shared.runIfIdle {
+///         await WordCountBackfillService.backfillIfNeeded()
+///     }
+/// }
+/// ```
+/// 在前一轮跑完之前再触发的请求会被直接丢弃——backfill 本身幂等，丢请求等价于"等下一次远端
+/// 变更/启动再扫"，没有数据正确性风险。
+actor WordCountBackfillGate {
+    static let shared = WordCountBackfillGate()
+    private var inFlight = false
+
+    func runIfIdle(_ work: @Sendable () async -> Void) async {
+        guard !inFlight else { return }
+        inFlight = true
+        await work()
+        inFlight = false
+    }
+}

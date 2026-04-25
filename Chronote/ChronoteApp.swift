@@ -215,8 +215,13 @@ struct ChronoteApp: App {
                         object: persistenceController.container.persistentStoreCoordinator,
                         queue: nil
                     ) { _ in
+                        // 通过 WordCountBackfillGate 串行化——CloudKit 批量 import 时
+                        // remote-change 会连发多次，无 guard 时多个并发 backfill 抢
+                        // store coordinator 锁，浪费 CPU + 拖慢 UI 写入。
                         Task.detached(priority: .utility) {
-                            await WordCountBackfillService.backfillIfNeeded()
+                            await WordCountBackfillGate.shared.runIfIdle {
+                                await WordCountBackfillService.backfillIfNeeded()
+                            }
                         }
                     }
                 }
@@ -263,7 +268,10 @@ struct ChronoteApp: App {
                 }
             }
         case .active:
-            // 重新上前台：主动触发一次 CloudKit 状态检查，顺带把远端变更拉下来
+            // 重新上前台：触发一次 CloudKit 状态检查,顺带把远端变更拉下来。
+            // `checkCloudKitStatus()` 内部有 30s 冷却(see CloudKitSyncMonitor),频繁
+            // background↔active 切换不会反复打 CloudKit;用户主动刷新走 forceSync(),
+            // 那条路径绕过冷却。
             syncMonitor.checkCloudKitStatus()
         case .inactive:
             break

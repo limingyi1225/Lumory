@@ -185,23 +185,6 @@ final class AudioRecorder: NSObject, ObservableObject {
     }
     #endif
     
-    func pauseRecording() {
-        guard let recorder = recorder, isRecording, !isPaused else { return }
-        recorder.pause()
-        isPaused = true
-        // **记下暂停起点**：resumeRecording 会把这期间的秒数累加到 pausedTime。
-        // 以前这个变量从未被写过，`duration` / `recordedDuration` 计算出来恒 = 墙钟时长，
-        // 包含暂停空档。UI 每 tick 推 duration 后这个 bug 变成用户可见的"明明没录却在计时"。
-        pauseStart = Date()
-
-        // Stop the meter timer while paused
-        timerLock.lock()
-        meterTimer?.invalidate()
-        meterTimer = nil
-        timerLock.unlock()
-        amplitude = 0
-    }
-    
     func resumeRecording() {
         guard let recorder = recorder, isRecording, isPaused else { return }
         // 把刚刚这段暂停的秒数累加到 pausedTime，让后续 duration 计算能把空档抵消掉

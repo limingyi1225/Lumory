@@ -245,72 +245,6 @@ extension DiaryEntry {
         return names.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
     }
     
-    /// Saves images data for CloudKit sync (synchronous - deprecated, use saveImagesForSyncAsync instead)
-    @available(*, deprecated, message: "Use saveImagesForSyncAsync to avoid blocking main thread")
-    func saveImagesForSync(_ images: [Data]) {
-        guard !images.isEmpty else {
-            imagesData = nil
-            return
-        }
-
-        // Use serial queue to avoid blocking main thread completely
-        // But still complete before returning
-        let compressedImages = images.map { DiaryEntry.compressImageData($0) }
-
-        // Encode as array
-        do {
-            let encoded = try NSKeyedArchiver.archivedData(withRootObject: compressedImages, requiringSecureCoding: false)
-            imagesData = encoded
-            Log.info("[DiaryEntry] Saved \(images.count) images for sync, total size: \(encoded.count) bytes", category: .persistence)
-        } catch {
-            Log.error("[DiaryEntry] Failed to encode images: \(error)", category: .persistence)
-        }
-    }
-    
-    /// 异步保存图片用于 CloudKit 同步（避免阻塞主线程）
-    func saveImagesForSyncAsync(_ images: [Data]) async {
-        guard !images.isEmpty else {
-            // 空列表也要走 context 队列写，不能在任意线程直接改 managed object
-            await writeImagesDataOnContext(nil)
-            return
-        }
-
-        // 使用 TaskGroup 并发压缩图片
-        let compressedImages = await withTaskGroup(of: Data.self, returning: [Data].self) { group in
-            for imageData in images {
-                group.addTask {
-                    DiaryEntry.compressImageData(imageData)
-                }
-            }
-
-            var results: [Data] = []
-            for await compressed in group {
-                results.append(compressed)
-            }
-            return results
-        }
-
-        // Encode as array
-        do {
-            let encoded = try NSKeyedArchiver.archivedData(withRootObject: compressedImages, requiringSecureCoding: false)
-            // **必须**在 context 队列里写 managed object。原实现在任意 async 线程上 `imagesData = encoded`，
-            // 对 main-queue context 来说是线程违规；会随机静默损坏对象图。
-            await writeImagesDataOnContext(encoded)
-            Log.info("[DiaryEntry] Saved \(images.count) images for sync, total size: \(encoded.count) bytes", category: .persistence)
-        } catch {
-            Log.error("[DiaryEntry] Failed to encode images: \(error)", category: .persistence)
-        }
-    }
-
-    /// 把 `imagesData` 的写入序列化到 managed object 所在的 context 队列。
-    /// 没有 context（对象已被删除）则静默跳过。
-    private func writeImagesDataOnContext(_ encoded: Data?) async {
-        guard let context = self.managedObjectContext else { return }
-        await context.perform {
-            self.imagesData = encoded
-        }
-    }
-    
     /// Loads images from synced data
     func loadImagesFromSync() -> [Data] {
         guard let data = imagesData else { return [] }
@@ -325,37 +259,6 @@ extension DiaryEntry {
         }
         
         return []
-    }
-    
-    /// Returns URLs for all images
-    var imageURLs: [URL] {
-        imageFileNameArray.compactMap { fileName in
-            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            return documentsPath.appendingPathComponent(fileName)
-        }
-    }
-    
-    /// Adds an image file name to the entry
-    func addImageFileName(_ fileName: String) {
-        // **CSV 消毒**：`imageFileNames` 是 `","` 分隔的 CSV。虽然 app 自己生成的都是 UUID-based、
-        // 不含逗号，但来自导入 / 恢复 / 以后的 CloudKit sync 的字段不能 100% 信任，fileName 里有
-        // `","` 会把一条拆成两个鬼条目。把逗号替换掉再写入，保持 CSV 解析语义稳定。
-        let sanitized = fileName
-            .replacingOccurrences(of: ",", with: "_")
-            .replacingOccurrences(of: "，", with: "_")
-        guard !sanitized.isEmpty else { return }
-        var fileNames = imageFileNameArray
-        if !fileNames.contains(sanitized) {
-            fileNames.append(sanitized)
-            imageFileNames = fileNames.joined(separator: ",")
-        }
-    }
-    
-    /// Removes an image file name from the entry
-    func removeImageFileName(_ fileName: String) {
-        var fileNames = imageFileNameArray
-        fileNames.removeAll { $0 == fileName }
-        imageFileNames = fileNames.isEmpty ? nil : fileNames.joined(separator: ",")
     }
     
     /// Saves image data to iCloud-synced documents directory and returns the file name
@@ -529,23 +432,6 @@ extension DiaryEntry {
         return nil
     }
     
-    /// Loads all images as Data array (synchronous - deprecated, use loadAllImageDataAsync instead)
-    @available(*, deprecated, message: "Use loadAllImageDataAsync to avoid blocking main thread")
-    func loadAllImageData() -> [Data] {
-        // First try to load from synced data
-        let syncedImages = loadImagesFromSync()
-        if !syncedImages.isEmpty {
-            return syncedImages
-        }
-
-        // Fallback to loading from files sequentially to avoid blocking with group.wait()
-        let fileNames = imageFileNameArray
-        guard !fileNames.isEmpty else { return [] }
-
-        // Load images sequentially (still on current thread, but no group.wait())
-        return fileNames.compactMap { loadImageData(fileName: $0) }
-    }
-    
     /// 异步加载所有图片（避免阻塞主线程）
     func loadAllImageDataAsync() async -> [Data] {
         // First try to load from synced data
@@ -622,50 +508,6 @@ extension DiaryEntry {
         }
         imageFileNames = nil
         imagesData = nil
-    }
-    
-    /// Replaces all images with new ones
-    func replaceImages(with newImageData: [Data]) throws {
-        // Delete existing images
-        deleteAllImages()
-        
-        // Save new images
-        var newFileNames: [String] = []
-        for imageData in newImageData {
-            let fileName = try DiaryEntry.saveImageToDocuments(imageData)
-            newFileNames.append(fileName)
-        }
-        
-        // Update file names
-        imageFileNames = newFileNames.isEmpty ? nil : newFileNames.joined(separator: ",")
-    }
-    
-    /// Migrates images from local storage to iCloud if needed
-    func migrateImagesToiCloud() {
-        guard !imageFileNameArray.isEmpty else { return }
-        
-        for fileName in imageFileNameArray {
-            // Check if image exists in iCloud location
-            let iCloudURL = DiaryEntry.getImageURL(for: fileName)
-            if !FileManager.default.fileExists(atPath: iCloudURL.path) {
-                // Try to load from old location
-                let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                let oldURL = documentsPath.appendingPathComponent(fileName)
-                
-                if let imageData = try? Data(contentsOf: oldURL) {
-                    // Save to new location
-                    do {
-                        _ = try DiaryEntry.saveImageToDocuments(imageData, fileName: fileName)
-                        Log.info("[DiaryEntry] Migrated image \(fileName) to iCloud", category: .persistence)
-                        
-                        // Delete from old location
-                        try? FileManager.default.removeItem(at: oldURL)
-                    } catch {
-                        Log.error("[DiaryEntry] Failed to migrate image \(fileName): \(error)", category: .persistence)
-                    }
-                }
-            }
-        }
     }
     
     // MARK: - Helper Methods

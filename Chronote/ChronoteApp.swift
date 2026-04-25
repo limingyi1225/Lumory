@@ -107,9 +107,7 @@ struct ChronoteApp: App {
         // Pre-compute common animations to reduce first-time lag
         _ = AnimationConfig.standardResponse
         _ = AnimationConfig.gentleSpring
-        _ = AnimationConfig.bouncySpring
-        _ = AnimationConfig.breathingAnimation
-        
+
         // Pre-warm CADisplayLink if needed
         #if canImport(UIKit)
         let _ = CAFrameRateRange.uiUpdates

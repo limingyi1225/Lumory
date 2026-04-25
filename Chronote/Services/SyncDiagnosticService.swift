@@ -29,38 +29,6 @@ struct SyncDiagnosticService {
         #endif
     }
     
-    static func diagnoseCloudKitError(_ error: CKError) {
-        Log.error("[SyncDiagnosticService] CloudKit Error Code: \(error.code.rawValue)", category: .sync)
-        Log.error("[SyncDiagnosticService] Error Description: \(error.localizedDescription)", category: .sync)
-        
-        switch error.code {
-        case .badDatabase:
-            Log.info("[SyncDiagnosticService] Bad database - The CloudKit database may need to be reset", category: .sync)
-        case .permissionFailure:
-            Log.error("[SyncDiagnosticService] Permission failure - Check CloudKit entitlements and capabilities", category: .sync)
-        case .invalidArguments:
-            Log.info("[SyncDiagnosticService] Invalid arguments - Check the record types and field names", category: .sync)
-        case .serverRejectedRequest:
-            Log.info("[SyncDiagnosticService] Server rejected request - The schema might already exist or have conflicts", category: .sync)
-        case .assetFileNotFound:
-            Log.info("[SyncDiagnosticService] Asset file not found - Check binary data storage", category: .sync)
-        case .incompatibleVersion:
-            Log.info("[SyncDiagnosticService] Incompatible version - The app version might not match the CloudKit schema", category: .sync)
-        case .constraintViolation:
-            Log.info("[SyncDiagnosticService] Constraint violation - Check for unique constraints", category: .sync)
-        default:
-            Log.error("[SyncDiagnosticService] Other error: \(error)", category: .sync)
-        }
-        
-        // Check for partial errors
-        if let partialErrors = error.partialErrorsByItemID {
-            Log.error("[SyncDiagnosticService] Partial errors found:", category: .sync)
-            for (itemID, partialError) in partialErrors {
-                Log.error("[SyncDiagnosticService]   Item: \(itemID), Error: \(partialError)", category: .sync)
-            }
-        }
-    }
-    
     /// 执行完整的同步诊断
     static func performDiagnostic() async -> SyncDiagnosticResult {
         Log.info("[SyncDiagnostic] Starting comprehensive sync diagnostic...", category: .sync)

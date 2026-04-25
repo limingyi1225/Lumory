@@ -137,13 +137,6 @@ final class AppleSpeechRecognizer: TranscriberProtocol {
         }
     }
 
-    /// 取消任何正在进行的识别——调用方的 Task 被取消时调一下可以让底层及时释放资源。
-    /// 不直接 resume continuation，`recognitionTask(with:)` 的 completion 会因 cancel 带一条错误回调进来。
-    func cancelCurrentTask() {
-        recognitionTask?.cancel()
-        recognitionTask = nil
-    }
-
     private func requestAuthorization() async {
         await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { authStatus in

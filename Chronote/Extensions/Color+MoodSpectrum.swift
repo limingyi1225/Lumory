@@ -54,22 +54,4 @@ extension Color {
             )
         }
     }
-    
-    /// Convenience method for integer mood values (1-5)
-    static func moodSpectrum(for intMood: Int) -> Color {
-        let clampedMood = min(max(intMood, 1), 5)
-        let value = Double(clampedMood - 1) / 4.0
-        return moodSpectrum(value: value)
-    }
-
-    /// Convert discrete 5-level mood (0-4) to continuous value (0.0-1.0)
-    static func discreteMoodValue(from level: Int) -> Double {
-        let clamped = min(max(level, 0), 4)
-        return Double(clamped) * 0.25
-    }
-
-    /// Get mood level (0-4) from continuous value (0.0-1.0)
-    static func moodLevel(from value: Double) -> Int {
-        return Int(round(value * 4))
-    }
-} 
+}

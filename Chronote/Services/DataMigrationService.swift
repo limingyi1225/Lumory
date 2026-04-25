@@ -62,6 +62,11 @@ struct DataMigrationService {
                     if let audioFileName = oldEntry.audioFileName {
                         newEntry.setValue(audioFileName, forKey: "audioFileName")
                     }
+                    // 回算 wordCount —— 老 v2 JSON 里没这个字段，不补的话 Insights 累计字数 = 0、
+                    // heatmap 强度全灭，视觉上"好像没写过日记"。`recomputeWordCount` 只读 text，无网络。
+                    if let typed = newEntry as? DiaryEntry {
+                        typed.recomputeWordCount()
+                    }
                     inserted += 1
                 }
 

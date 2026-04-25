@@ -27,6 +27,46 @@ enum StreamEvent: Sendable {
     case done
 }
 
+// MARK: - Import parsing types
+//
+// `parseImportedDiaries` 的返回结构:`(date, text)` 元组按时间顺序排列。
+// 之前 `DiaryImportService.ParsedEntry` 只是私有 Decodable 中间型;现在挪到协议层,
+// 调用方(`CoreDataImportService`)拿到这个结构后再走 themes / mood / embedding 流水线。
+struct ParsedDiaryEntry: Sendable, Equatable {
+    let date: Date
+    let text: String
+}
+
+/// 导入解析层错误。**与"成功但 0 条"(`[]`)严格区分**——后者是合法的"粘贴里没找到日记",
+/// 前者是网络 / 后端 / 模型解析失败,UI 必须给两种不同提示。
+enum DiaryImportError: LocalizedError, Sendable {
+    /// 输入为空 / 全空白
+    case emptyInput
+    /// 后端返回非 2xx 或网络异常
+    case network(Error)
+    /// 模型回传内容缺失 / JSON 不可解析
+    case parsingFailed(reason: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyInput:
+            return NSLocalizedString("error.import.emptyInput",
+                                     value: "粘贴的内容为空。",
+                                     comment: "Empty input on import")
+        case .network(let underlying):
+            return String(format: NSLocalizedString("error.import.network",
+                                                    value: "导入时网络出错:%@",
+                                                    comment: "Network error on import"),
+                          underlying.localizedDescription)
+        case .parsingFailed(let reason):
+            return String(format: NSLocalizedString("error.import.parsingFailed",
+                                                    value: "解析日记失败:%@",
+                                                    comment: "Parsing failed on import"),
+                          reason)
+        }
+    }
+}
+
 protocol AIServiceProtocol {
     /// 根据文本生成简要摘要
     func summarize(text: String) async -> String?
@@ -77,6 +117,13 @@ protocol AIServiceProtocol {
     /// 提问和输入框占位语。返回 nil 表示失败或内容不可用，调用方应 fallback。
     /// 这个接口刻意不给 prompt 模板——实现侧自己写 prompt、自己约束返回格式。
     func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle?
+
+    /// 解析用户粘贴的整段文本(可能含多篇日记),返回结构化 `[(date, text)]`。
+    /// 成功但解析不出任何日记 → 返回 `[]`(合法,UI 应提示"未识别到日记");
+    /// 网络 / 后端 / JSON 解码失败 → `throws DiaryImportError`。
+    /// **不要再用旧的 static `DiaryImportService.parse`**——那条路径绕过了 DI、
+    /// 也吞了所有错误。新路径走 `AIServiceProtocol`,Mock 注入对单测全程有效。
+    func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry]
 }
 
 extension AIServiceProtocol {
@@ -197,6 +244,15 @@ struct MockAIService: AIServiceProtocol {
                 continuation.finish()
             }
         }
+    }
+
+    func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] {
+        // Mock 默认返回空数组——单测里需要"成功导入 N 条"场景的可以 wrap 一层自定义 Mock。
+        // 不抛错可让 UI happy-path 测试更容易。
+        guard !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DiaryImportError.emptyInput
+        }
+        return []
     }
 
     func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? {

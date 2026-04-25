@@ -10,6 +10,8 @@ final class OpenAIService: AIServiceProtocol {
     static let shared = OpenAIService(apiKey: "")
 
     private let apiKey: String
+    // swiftlint:disable:next force_unwrapping
+    // 编译期常量拼接（AppSecrets.backendURL 是硬编码 https URL），URL(string:) 不会失败。
     private let backendURL = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions")!
     private let jsonEncoder = JSONEncoder()
     private let jsonDecoder = JSONDecoder()
@@ -35,14 +37,14 @@ final class OpenAIService: AIServiceProtocol {
             } else {
                 prompt = "Summarize the following diary entry, focusing on the key points, in no more than 10 words, using only commas and semicolons.\n# Steps\n1. Read and understand the diary entry.\n2. Identify the key information and theme.\n3. Summarize using concise and precise language.\n4. Ensure the summary does not exceed 10 words.\n5. Use only commas and semicolons as punctuation.\n# Output Format\n- A short summary, no more than 10 words.\n- Only commas and semicolons used.\nDiary:\n\n\(text)"
             }
-            // 显式 maxTokens: 512——`chat` 的默认 128 对 gpt-5.4 "low" reasoning 太紧，
+            // 显式 maxTokens: 512——`chat` 的默认 128 对 gpt-5.5 "low" reasoning 太紧，
             // reasoning tokens 本身就会吃掉一半以上，content 经常被截 / 返回空串。
-            return await self.chat(prompt: prompt, model: "gpt-5.4", maxTokens: 512, reasoningEffort: "low")
+            return await self.chat(prompt: prompt, model: "gpt-5.5", maxTokens: 512, reasoningEffort: "low")
         }
     }
 
     func analyzeMood(text: String) async -> Double {
-        // gpt-5.4-mini + effort=none。mini 家族支持 `none`（零推理开销），大模型 5.4 只支持 low+。
+        // gpt-5.4-mini + effort=none。mini 家族支持 `none`（零推理开销），大模型 5.5 只支持 low+。
         // prompt 显式列出 1-20 / 21-40 / 41-60 / 61-80 / 81-100 五档 + "avoid 50" 强硬指令，
         // 让 mini 不经推理也能直接给出决断分。
         let diaryEscaped = text.replacingOccurrences(of: "\"", with: "\\\"")
@@ -164,17 +166,17 @@ final class OpenAIService: AIServiceProtocol {
 Diary Entries:
 \(textBlock)
 """
-        // 使用 gpt-5.4 写情绪报告
+        // 使用 gpt-5.5 写情绪报告
         Log.info("[OpenAIService] 开始调用chat方法生成报告", category: .ai)
         let result = await chat(prompt: prompt,
-                          model: "gpt-5.4",
+                          model: "gpt-5.5",
                           maxTokens: 4096,
                           stream: false,
                           reasoningEffort: "low")
-        Log.info("[OpenAIService] chat方法返回结果: \(result != nil ? "成功，长度 \(result!.count)" : "失败，返回nil")", category: .ai)
+        Log.info("[OpenAIService] chat方法返回结果: \(result.map { "成功，长度 \($0.count)" } ?? "失败，返回nil")", category: .ai)
         return result
     }
-    
+
     /// 根据安全数据结构生成情绪报告，避免CloudKit同步冲突
     func generateReportFromData(entries: [DiaryEntryData]) async -> String? {
         Log.info("[OpenAIService] 开始从安全数据生成情绪报告，条目数量: \(entries.count)", category: .ai)
@@ -205,14 +207,14 @@ Diary Entries:
 Diary Entries:
 \(textBlock)
 """
-        // 使用 gpt-5.4 写情绪报告
+        // 使用 gpt-5.5 写情绪报告
         Log.info("[OpenAIService] 开始调用chat方法生成安全数据报告", category: .ai)
         let result = await chat(prompt: prompt,
-                          model: "gpt-5.4",
+                          model: "gpt-5.5",
                           maxTokens: 4096,
                           stream: false,
                           reasoningEffort: "low")
-        Log.info("[OpenAIService] 安全数据chat方法返回结果: \(result != nil ? "成功，长度 \(result!.count)" : "失败，返回nil")", category: .ai)
+        Log.info("[OpenAIService] 安全数据chat方法返回结果: \(result.map { "成功，长度 \($0.count)" } ?? "失败，返回nil")", category: .ai)
         return result
     }
     
@@ -287,7 +289,7 @@ Diary Entries:
             enum CodingKeys: String, CodingKey { case model, messages, stream, reasoning_effort }
         }
         let requestBody = RequestBody(
-            model: "gpt-5.4",
+            model: "gpt-5.5",
             messages: [Message(role: "user", content: prompt)],
             stream: true,
             reasoning_effort: "low"
@@ -453,7 +455,7 @@ Diary Entries:
             enum CodingKeys: String, CodingKey { case model, messages, stream, reasoning_effort }
         }
         let requestBody = RequestBody(
-            model: "gpt-5.4",
+            model: "gpt-5.5",
             messages: [Message(role: "user", content: prompt)],
             stream: true,
             reasoning_effort: "low"
@@ -528,7 +530,7 @@ Diary Entries:
         }
 
         let requestBody = RequestBody(
-            model: model ?? "gpt-5.4",
+            model: model ?? "gpt-5.5",
             messages: [Message(role: "user", content: prompt)],
             response_format: forceJSON ? RequestBody.ResponseFormat(type: "json_object") : nil,
             stream: stream ? true : nil,
@@ -619,7 +621,81 @@ Diary Entries:
             }
         }
     }
-    
+
+    // MARK: - Throwing chat (used by parseImportedDiaries for typed error mapping)
+    //
+    // 和 `chat()` 共享同一个请求/重试/解码骨架,但**不吞错**——把上游 401 / 429 / offline 等
+    // 直接 throw 出去,让 caller(目前是 `parseImportedDiaries`)能区分"网络/认证/限流"和
+    // "AI 真的没返回内容"。reviewer 第二轮指出旧 `chat` 全部错误归一成 `noContent`,导致
+    // 用户在配置/网络异常时被引导到错误的恢复路径。
+    //
+    // 仅支持非流式 —— 当前唯一用例(import 解析)是非流式调用,流式路径走原 `chat()`。
+    private func chatThrowing(prompt: String,
+                              model: String? = nil,
+                              maxTokens: Int = 128,
+                              reasoningEffort: String? = nil) async throws -> String {
+        struct Message: Codable { let role: String; let content: String }
+        struct RequestBody: Codable {
+            let model: String
+            let messages: [Message]
+            let stream: Bool?
+            let reasoning_effort: String?
+            let maxCompletionTokens: Int?
+            enum CodingKeys: String, CodingKey {
+                case model, messages, stream, reasoning_effort
+                case maxCompletionTokens = "max_completion_tokens"
+            }
+        }
+        struct ResponseBody: Codable {
+            struct Choice: Codable { let message: Message }
+            let choices: [Choice]
+        }
+
+        // Reviewer 二轮指出:`AppSecrets.appSharedSecret` 注入失败(xcconfig 没挂、Info.plist
+        // 没填)时,客户端会把空 header 送上去,后端 timing-safe compare 直接判 401。我们在这里
+        // 提前拦下来,转成 `network` 错误带明确说明,而不是让用户看到"AI 未返回内容"误导提示。
+        guard !AppSecrets.appSharedSecret.isEmpty else {
+            throw NSError(
+                domain: "OpenAIService",
+                code: 401,
+                userInfo: [NSLocalizedDescriptionKey: "Backend shared secret not configured (xcconfig injection failed)."]
+            )
+        }
+
+        let requestBody = RequestBody(
+            model: model ?? "gpt-5.5",
+            messages: [Message(role: "user", content: prompt)],
+            stream: nil,
+            reasoning_effort: reasoningEffort,
+            maxCompletionTokens: maxTokens > 0 ? maxTokens : nil
+        )
+        var request = URLRequest(url: backendURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
+        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
+        request.httpBody = try jsonEncoder.encode(requestBody)
+
+        return try await NetworkRetryHelper.performWithRetry {
+            let (data, response) = try await URLSession.sslTolerantSession.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                Log.error("[OpenAIService] chatThrowing failed — status=\(statusCode) bodyLen=\(data.count)", category: .ai)
+                throw Self.errorForStatus(statusCode)
+            }
+            let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
+            guard let content = decoded.choices.first?.message.content
+                .trimmingCharacters(in: .whitespacesAndNewlines), !content.isEmpty else {
+                throw NSError(
+                    domain: "OpenAIService",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "Empty content from model"]
+                )
+            }
+            return content
+        }
+    }
+
     // MARK: - Debouncing
     /// 在启动 `request` 前先 sleep 一个短 delay，让极短时间内连发的请求合并。
     /// 原实现只是延迟，不去重——同 key 的两个 task 都会 sleep 完再各自 fire，
@@ -708,7 +784,7 @@ extension OpenAIService {
     func generateReport(from entries: [DiaryEntry], dateRange: ClosedRange<Date>) async -> String? {
         let safe = await Self.extractDataSafely(from: entries, dateRange: dateRange)
         guard !safe.isEmpty else { return nil }
-        // `[weak self]` + 空返 guard：Task.detached 原先强持 self 直到 gpt-5.4 流返完，
+        // `[weak self]` + 空返 guard：Task.detached 原先强持 self 直到 gpt-5.5 流返完，
         // 视图侧 owning 了这个 service 的 VM 被释放后 service 仍被挂住。
         return await Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return nil }
@@ -947,13 +1023,13 @@ extension OpenAIService {
 
     // MARK: Suggestions (AI-authored presets + placeholders)
 
-    /// 一次 gpt-5.4 调用生成 AskPast 预设 + 首页占位语池，JSON 返回。
+    /// 一次 gpt-5.5 调用生成 AskPast 预设 + 首页占位语池，JSON 返回。
     /// 失败 / 畸形 / 字段不全 → 返回 nil，让 PromptSuggestionEngine 保留旧 cache 或上游 fallback。
     func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? {
         let prompt = Self.buildSuggestionPrompt(context: context)
         guard let raw = await chat(
             prompt: prompt,
-            model: "gpt-5.4",
+            model: "gpt-5.5",
             maxTokens: 1024,
             forceJSON: true,
             reasoningEffort: "low"
@@ -1320,7 +1396,7 @@ extension OpenAIService {
                     """
                 }
 
-                for await event in self.streamChatEvents(prompt: prompt, model: "gpt-5.4", reasoningEffort: "low") {
+                for await event in self.streamChatEvents(prompt: prompt, model: "gpt-5.5", reasoningEffort: "low") {
                     if Task.isCancelled { break }
                     continuation.yield(event)
                 }
@@ -1497,5 +1573,162 @@ extension OpenAIService {
             continuation.onTermination = { _ in task.cancel() }
         }
     }
-}
 
+    // MARK: - Import parsing
+    //
+    // 旧实现:`DiaryImportService.parse` 是 static 函数,自己组 URLRequest /
+    // setValue("X-App-Secret") / `URLSession.sslTolerantSession` / 自己 catch 全部错误
+    // 返回 `[]` —— 完全绕过 `AIServiceProtocol` 注入,Mock 测试无效,且无法把
+    // 真实错误冒到 UI。
+    //
+    // 现在路由到 `chat()`:复用 session pool / `X-Install-Id` / `NetworkRetryHelper` /
+    // 统一 `errorForStatus`。`chat` 失败回 nil,我们在这里把 nil 翻成 `parsingFailed` /
+    // `network` 错误向上抛。
+    func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] {
+        guard !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DiaryImportError.emptyInput
+        }
+
+        // **Prompt injection 防御**:用户粘贴文本里的 `>>>` / `<<<` 会和我们的 delimiter
+        // 混淆,导致后续指令被攻击者覆盖。换成视觉等价但 codepoint 不同的全角对角号
+        // (U+203A / U+2039 各重复 3 次),用户读起来几乎无差,LLM 也不会把它误当 delimiter。
+        // TODO: migrate to structured JSON payload —— 把 rawText 放进 JSON 字段而不是
+        // 用纯文本 delimiter,可以彻底消除 delimiter 注入面。改 prompt 契约成本不大,
+        // 但需要同步调整模型 prompt 里的 "Examples" 段落,先用 escape 落地。
+        let safe = rawText
+            .replacingOccurrences(of: ">>>", with: "\u{203A}\u{203A}\u{203A}")
+            .replacingOccurrences(of: "<<<", with: "\u{2039}\u{2039}\u{2039}")
+
+        let today = Date()
+        let promptDateFormatter = ISO8601DateFormatter()
+        promptDateFormatter.formatOptions = [.withFullDate]
+        let todayStr = promptDateFormatter.string(from: today)
+        let year = Calendar.current.component(.year, from: today)
+        let dateFormatterCN = DateFormatter()
+        dateFormatterCN.dateFormat = "yyyy年MM月dd日"
+        let todayCNStr = dateFormatterCN.string(from: today)
+        let prompt = """
+当前年份是 \(year)；今天日期是 \(todayCNStr)（ISO格式：\(todayStr)）。
+
+解析给定的日记文本，将其转换为JSON数组。每个元素应包含两个字段：date字段以ISO 8601（YYYY-MM-DD）格式记录日期，text字段记录对应日期的文本内容。
+
+请按以下步骤解析文本：
+
+1. 提取文本中的日期和对应的日记内容。
+2. 如果日记没有标注年份且日期晚于今天，则为这篇日记分配的年份是\(year - 1)年。如日记没有标注年份，且日期早于或就是今天，则为这篇日记分配的年份是\(year)年。
+3. 按照上述条件构建JSON数组，其中每个元素包含"date"和"text"字段。
+
+# Output Format
+
+- 输出结果为一个JSON数组。
+- 每个元素应包含：
+  - "date": 日期字符串，符合ISO 8601格式。
+  - "text": 该日期下的日记内容。
+
+# Examples
+
+以下是如何将日记文本解析为JSON的示例格式：
+
+输入：
+```
+2023年10月1日: 今天是国庆节，我们一家人去了长城。
+2023年10月2日: 今天开始下雨，留在家里。
+```
+
+输出：
+```json
+[
+    {
+        "date": "2023-10-01",
+        "text": "今天是国庆节，我们一家人去了长城。"
+    },
+    {
+        "date": "2023-10-02",
+        "text": "今天开始下雨，留在家里。"
+    }
+]
+```
+
+# Notes
+
+- 确保输出的日期和时间信息符合ISO 8601标准。
+- 确保按照上述步骤给日记分配年份（当前日期：\(todayStr)）。
+<<<\(safe)>>>
+"""
+
+        // 走 `chatThrowing`(throws variant) 而非旧 `chat`(吞错回 nil)。reviewer 第二轮指出旧路径
+        // 把 401/429/offline 全部归到 "AI 未返回内容",defeats 了 `DiaryImportError.network`
+        // 与 `.parsingFailed` 的区分。这里 catch 错误后按类型映射:
+        //   - URLError(连接失败 / 超时 / DNS) → `.network` 让用户去查网络
+        //   - NSError code 100~599(HTTP 状态)→ `.network` 让用户去查后端/认证/限流
+        //   - 其他(空内容、解码错误等)→ `.parsingFailed` 提示重试或换内容
+        let content: String
+        do {
+            content = try await self.chatThrowing(
+                prompt: prompt,
+                model: "gpt-5.5",
+                maxTokens: 16384,
+                reasoningEffort: "low"
+            )
+        } catch let urlError as URLError {
+            throw DiaryImportError.network(urlError)
+        } catch let nsError as NSError where nsError.code >= 100 && nsError.code < 600 {
+            // HTTP 状态码全部归为 network 类:401(配置错)/ 403 / 429 / 5xx 都是后端/网络维度的问题,
+            // 不是 AI 解析问题。
+            throw DiaryImportError.network(nsError)
+        } catch let nsError as NSError where nsError.domain == NSURLErrorDomain {
+            throw DiaryImportError.network(nsError)
+        } catch {
+            // 走到这里通常是空内容(code -2)或 JSONDecoder 失败 —— 视为解析失败。
+            Log.info("[OpenAIService] parseImportedDiaries: chatThrowing -> parsingFailed: \(error)", category: .persistence)
+            throw DiaryImportError.parsingFailed(
+                reason: NSLocalizedString("error.import.noContent",
+                                          value: "AI 未返回内容,请稍后再试。",
+                                          comment: "AI returned empty content during import")
+            )
+        }
+
+        // 只 log 长度,不要把模型回包(里面套了用户日记原文)落到 sysdiagnose 里。
+        Log.info("[OpenAIService] parseImportedDiaries: raw content length \(content.count) chars",
+                 category: .persistence)
+
+        guard let startIndex = content.firstIndex(of: "["),
+              let endIndex = content.lastIndex(of: "]") else {
+            // 模型有内容但不是 JSON 数组结构 —— 算解析失败,不能当成"0 条"。
+            throw DiaryImportError.parsingFailed(
+                reason: NSLocalizedString("error.import.notJSON",
+                                          value: "AI 返回的内容不是合法 JSON 数组。",
+                                          comment: "AI response not JSON array")
+            )
+        }
+        let jsonString = String(content[startIndex...endIndex])
+        struct RawEntry: Decodable {
+            let date: String
+            let text: String
+        }
+        guard let jsonData = jsonString.data(using: .utf8) else {
+            throw DiaryImportError.parsingFailed(
+                reason: NSLocalizedString("error.import.notJSON",
+                                          value: "AI 返回的内容不是合法 JSON 数组。",
+                                          comment: "AI response not JSON array")
+            )
+        }
+        let raws: [RawEntry]
+        do {
+            raws = try JSONDecoder().decode([RawEntry].self, from: jsonData)
+        } catch {
+            throw DiaryImportError.parsingFailed(reason: error.localizedDescription)
+        }
+
+        let df = ISO8601DateFormatter()
+        df.formatOptions = [.withFullDate]
+        var results: [ParsedDiaryEntry] = []
+        for raw in raws {
+            if let date = df.date(from: raw.date) {
+                results.append(ParsedDiaryEntry(date: date, text: raw.text))
+            }
+        }
+        // **空数组是合法成功**:模型读完粘贴内容认定"里面没有日记结构"。UI 会区分对待。
+        return results
+    }
+}

@@ -11,23 +11,37 @@ class CoreDataImportService: ObservableObject {
     // 测试可传入 MockAIService 来跳过网络调用。
     private let aiService: AIServiceProtocol
 
-    init(aiService: AIServiceProtocol = OpenAIService(apiKey: "")) {
+    init(aiService: AIServiceProtocol = OpenAIService.shared) {
         self.aiService = aiService
     }
 
     /// 根据用户粘贴的原始文本批量导入日记到 Core Data
     /// 返回 (成功条数, 失败条数) 供 UI 向用户反馈。
+    /// **抛错语义**:解析层(网络 / 后端 / JSON)失败时抛 `DiaryImportError`,UI 应 catch
+    /// 后展示真错误,而非把它当 "succeeded=0" 的 happy-path。
+    /// 解析返回 `[]`(粘贴内容里没识别到日记)是合法情况,这里仍返回 `(0, 0)`,UI 在
+    /// `DiaryImportView` 里用专门的 "no entries detected" 文案区分。
     @discardableResult
-    func importEntries(from rawText: String, context: NSManagedObjectContext) async -> (succeeded: Int, failed: Int) {
+    func importEntries(from rawText: String, context: NSManagedObjectContext) async throws -> (succeeded: Int, failed: Int) {
         Log.info("[CoreDataImportService] importEntries: rawText length = \(rawText.count)", category: .migration)
         isImporting = true
         importProgress = 0.0
 
-        let parsed = await DiaryImportService.parse(rawText: rawText)
+        let parsed: [ParsedDiaryEntry]
+        do {
+            // 走注入的 AIService,Mock 在测试中可拦截。旧实现调静态 `DiaryImportService.parse`,
+            // 完全绕过 DI;现已删除该 free function。
+            parsed = try await aiService.parseImportedDiaries(rawText: rawText)
+        } catch {
+            Log.error("[CoreDataImportService] parse failed: \(error)", category: .migration)
+            isImporting = false
+            importProgress = 0.0
+            throw error
+        }
         Log.info("[CoreDataImportService] importEntries: parsed count = \(parsed.count)", category: .migration)
 
         guard !parsed.isEmpty else {
-            Log.info("[CoreDataImportService] importEntries: parsed isEmpty, abort import", category: .migration)
+            Log.info("[CoreDataImportService] importEntries: parsed isEmpty (no entries detected in paste)", category: .migration)
             isImporting = false
             importProgress = 0.0
             return (0, 0)
@@ -36,7 +50,9 @@ class CoreDataImportService: ObservableObject {
         let total = parsed.count
         var succeeded = 0
         var failed = 0
-        for (index, (date, text)) in parsed.enumerated() {
+        for (index, entry) in parsed.enumerated() {
+            let date = entry.date
+            let text = entry.text
             // 和 HomeView.addEntry 保持一致的四件套流水线：summary / mood / themes / embedding
             // 并行发 AI 请求，避免一条日记串行等 4 轮。wordCount 本地算，免费。
             async let summaryTask = aiService.summarize(text: text)

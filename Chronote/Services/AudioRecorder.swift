@@ -43,6 +43,10 @@ final class AudioRecorder: NSObject, ObservableObject {
     }
 
     func startRecording() {
+        guard !isRecording else {
+            Log.warning("[AudioRecorder] startRecording called while already recording — ignoring", category: .audio)
+            return
+        }
         do {
             #if !os(macOS)
             let audioSession = AVAudioSession.sharedInstance()
@@ -236,10 +240,6 @@ final class AudioRecorder: NSObject, ObservableObject {
         return documentsPath.appendingPathComponent(fileName)
     }
 
-    @objc private func handleMeter(_ timer: Timer) {
-        handleMeterUpdate()
-    }
-    
     /// 更新音量表读数（闭包版 Timer 调用）。顺手把 duration 也推一下，
     /// 否则 UI 里绑 `recorder.duration` 的录音时长只会在停止时才更新一次。
     private func handleMeterUpdate() {

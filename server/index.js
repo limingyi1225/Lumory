@@ -37,7 +37,7 @@ if (!OPENAI_API_KEY) {
   log.fatal('Missing OPENAI_API_KEY. Set it in server/.env');
   process.exit(1);
 }
-log.info({ maskedKey: `${OPENAI_API_KEY.substring(0, 7)}…` }, 'Loaded OPENAI_API_KEY');
+log.info({ keyLength: OPENAI_API_KEY.length }, 'Loaded OPENAI_API_KEY');
 
 // 客户端在每个请求里要带 `X-App-Secret: <APP_SHARED_SECRET>` 才放行。
 // 没配就让 server 在启动时直接拒绝跑（fail-closed），避免无意识把不鉴权的代理暴露出去。
@@ -70,7 +70,20 @@ app.set('trust proxy', 'loopback');
 // 默认 deny 比默认 open 安全——明确允许域名时再改。
 app.use(cors({ origin: false }));
 app.use(express.json({ limit: '1mb' }));
-app.use(pinoHttp({ logger: log }));
+app.use(
+  pinoHttp({
+    logger: log,
+    genReqId: (req, res) => {
+      const existing = req.get('x-request-id');
+      const id = existing || crypto.randomUUID();
+      res.setHeader('x-request-id', id);
+      return id;
+    },
+  })
+);
+
+// Tracker for in-flight SSE upstream streams so graceful shutdown can abort them.
+const activeStreams = new Set();
 
 // Shared-secret 鉴权中间件：time-safe compare 避免 timing attack 逐字节泄漏。
 // 不挂在 /health 上，方便负载均衡 / PM2 健康检查。
@@ -110,7 +123,7 @@ const installKey = (req) => {
 const chatLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 120,
-  standardHeaders: true,
+  standardHeaders: 'draft-7',
   legacyHeaders: false,
   keyGenerator: installKey,
   message: { error: 'rate_limited' },
@@ -119,7 +132,7 @@ const chatLimiter = rateLimit({
 const embeddingsLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 300,
-  standardHeaders: true,
+  standardHeaders: 'draft-7',
   legacyHeaders: false,
   keyGenerator: installKey,
   message: { error: 'rate_limited' },
@@ -132,7 +145,7 @@ const embeddingsLimiter = rateLimit({
 const globalIPLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 600,
-  standardHeaders: true,
+  standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: { error: 'rate_limited_global' },
 });
@@ -189,9 +202,15 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         timeout: REQUEST_TIMEOUT_MS,
       });
 
+      activeStreams.add(upstream.data);
+
       upstream.data.on('data', (chunk) => res.write(chunk));
-      upstream.data.on('end', () => res.end());
+      upstream.data.on('end', () => {
+        activeStreams.delete(upstream.data);
+        res.end();
+      });
       upstream.data.on('error', (error) => {
+        activeStreams.delete(upstream.data);
         req.log.error({ err: error }, 'upstream stream errored');
         // 不能写 `data: [DONE]`—— 那是 SSE 的**成功**终止帧，iOS 端的
         // `streamChat` 看到 `[DONE]` 会 `break` 并 `return result`，把半截
@@ -202,6 +221,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
 
       // Client disconnected — cancel upstream so we stop paying for the tokens.
       req.on('close', () => {
+        activeStreams.delete(upstream.data);
         if (!upstream.data.destroyed) {
           upstream.data.destroy();
         }
@@ -222,6 +242,10 @@ app.post('/api/openai/chat/completions', async (req, res) => {
     const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
     req.log.error({ err, status }, 'OpenAI request failed');
     if (!res.headersSent) {
+      const retryAfter = err.response?.headers?.['retry-after'];
+      if (status === 429 && retryAfter) {
+        res.setHeader('Retry-After', retryAfter);
+      }
       res.status(status).json({ error: sanitizeUpstreamError(err, status) });
     } else {
       res.end();
@@ -259,7 +283,15 @@ app.post('/api/openai/embeddings', async (req, res) => {
   } catch (err) {
     const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
     req.log.error({ err, status }, 'OpenAI embeddings request failed');
-    res.status(status).json({ error: sanitizeUpstreamError(err, status) });
+    if (!res.headersSent) {
+      const retryAfter = err.response?.headers?.['retry-after'];
+      if (status === 429 && retryAfter) {
+        res.setHeader('Retry-After', retryAfter);
+      }
+      res.status(status).json({ error: sanitizeUpstreamError(err, status) });
+    } else {
+      res.end();
+    }
   }
 });
 
@@ -288,8 +320,10 @@ function sanitizeUpstreamError(err, status) {
         return { code: 'upstream_error' };
     }
   }
-  // 非 prod：保留上游原始信息方便调试
-  return err.response?.data || { message: err.message, code: err.code };
+  // 非 prod：仍然不回传上游原始 body，只回 HTTP status + axios 侧的 err.code
+  // （ECONNABORTED / ENOTFOUND 等），避免 OpenAI error.type/error.param 等内部
+  // 标识泄漏给客户端调试控制台。
+  return { code: err.code, status };
 }
 
 const port = process.env.PORT || 3000;
@@ -299,7 +333,26 @@ const server = app.listen(port, () => {
 
 // Graceful shutdown — give in-flight requests up to 10s to finish before exit.
 const shutdown = (signal) => {
-  log.info({ signal }, 'shutting down');
+  log.info({ signal, activeStreams: activeStreams.size }, 'shutting down');
+  // Abort in-flight upstream SSE streams so they don't dangle past server.close().
+  // Their 'error' handler will fire and `res.destroy(error)` the client connection,
+  // letting NetworkRetryHelper on iOS retry against the next process.
+  //
+  // ⚠️ Must pass an Error to `destroy()` — calling `s.destroy()` with no arg emits
+  // `close` only, NOT `error`, so the `upstream.data.on('error', ...)` handler that
+  // ends `res` never fires. Without that, `server.close()` blocks on the open
+  // keep-alive connection, the 10s safety timeout fires, and PM2 force-kills us
+  // (client sees an abrupt cut instead of a clean disconnect).
+  const shutdownErr = new Error('server shutting down');
+  shutdownErr.code = 'SHUTDOWN';
+  for (const s of activeStreams) {
+    try {
+      s.destroy(shutdownErr);
+    } catch (e) {
+      log.warn({ err: e }, 'error destroying active stream during shutdown');
+    }
+  }
+  activeStreams.clear();
   server.close((err) => {
     if (err) {
       log.error({ err }, 'error during server.close');
@@ -316,6 +369,7 @@ const shutdown = (signal) => {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGHUP', () => shutdown('SIGHUP'));
 
 process.on('unhandledRejection', (reason) => {
   log.error({ err: reason }, 'unhandledRejection');

@@ -1811,7 +1811,10 @@ extension HomeView {
         }
     }
 
+    @MainActor
     func keywordHits(for text: String) async -> [DiaryEntry] {
+        // 函数整体 @MainActor：跨 await 返回 [DiaryEntry] (NSManagedObject) 在 Swift 6
+        // 严格并发下不 Sendable，把 receiver 锁定到 main 上避免跨 actor。
         let objectIDs: [NSManagedObjectID] = await PersistenceController.shared.container
             .performBackgroundTask { context in
                 let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
@@ -1825,13 +1828,11 @@ extension HomeView {
                 guard let entries = try? context.fetch(request) else { return [] }
                 return entries.map { $0.objectID }
             }
-        return await MainActor.run {
-            // 用 existingObject 而不是 object(with:)：后者返回未验证 fault，
-            // 若该条目在 fetch→access 之间被 CloudKit tombstone / 用户侧滑删除，
-            // 属性首访会抛 NSObjectInaccessibleException（Obj-C 异常，Swift try/catch 接不住）。
-            // existingObject 抛 Swift-catchable 错误，try? 安静降级即可。
-            objectIDs.compactMap { try? viewContext.existingObject(with: $0) as? DiaryEntry }
-        }
+        // 用 existingObject 而不是 object(with:)：后者返回未验证 fault，
+        // 若该条目在 fetch→access 之间被 CloudKit tombstone / 用户侧滑删除，
+        // 属性首访会抛 NSObjectInaccessibleException（Obj-C 异常，Swift try/catch 接不住）。
+        // existingObject 抛 Swift-catchable 错误，try? 安静降级即可。
+        return objectIDs.compactMap { try? viewContext.existingObject(with: $0) as? DiaryEntry }
     }
 }
 

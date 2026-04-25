@@ -98,11 +98,14 @@ struct SearchView: View {
         }
     }
 
+    @MainActor
     private func keywordHits(for text: String) async -> [DiaryEntry] {
         // 两段式 fetch：先在后台拿一份轻量的 [NSManagedObjectID]（不 fault 任何属性，
         // 不会把 text/embedding/imagesData 拉进内存），再在 main context 里按 ID 懒生成
         // DiaryEntry——SwiftUI List 渲染哪行才 fault 哪行。比 propertiesToFetch hint 真实得多
         //（hint 在默认 .managedObjectResultType 下只是预取，对象仍是完整对象）。
+        // 函数整体 @MainActor：跨 await 返回 [DiaryEntry] (NSManagedObject) 在 Swift 6
+        // 严格并发下不 Sendable，把 receiver 锁定到 main 上避免跨 actor。
         let objectIDs: [NSManagedObjectID] = await PersistenceController.shared.container
             .performBackgroundTask { context in
                 let request = NSFetchRequest<NSManagedObjectID>(entityName: "DiaryEntry")
@@ -115,9 +118,7 @@ struct SearchView: View {
                 request.fetchLimit = 50
                 return (try? context.fetch(request)) ?? []
             }
-        return await MainActor.run {
-            // existingObject：CloudKit 同步删除或用户侧滑删除后首访不会抛 Obj-C 异常。
-            objectIDs.compactMap { try? viewContext.existingObject(with: $0) as? DiaryEntry }
-        }
+        // existingObject：CloudKit 同步删除或用户侧滑删除后首访不会抛 Obj-C 异常。
+        return objectIDs.compactMap { try? viewContext.existingObject(with: $0) as? DiaryEntry }
     }
 }

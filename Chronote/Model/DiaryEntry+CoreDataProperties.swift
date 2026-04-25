@@ -20,9 +20,9 @@ extension DiaryEntry {
     @NSManaged public var themes: String?
     @NSManaged public var embedding: Data?
     @NSManaged public var wordCount: Int32
-    
+
     // content属性已在DiaryEntry+Extensions.swift中定义，这里不重复定义
-    
+
     /// 返回音频文件完整 URL（若存在）
     func audioURL() -> URL? {
         guard let fileName = audioFileName else { return nil }
@@ -56,26 +56,29 @@ extension DiaryEntry {
 
         return nil
     }
-    
+
     private func migrateAudioToiCloud(fileName: String, oldURL: URL) {
         guard let audioData = try? Data(contentsOf: oldURL) else { return }
-        
+
         // Save to new location
         if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
             let audioDir = iCloudURL.appendingPathComponent("Documents/LumoryAudio")
-            if !FileManager.default.fileExists(atPath: audioDir.path) {
-                try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
-            }
-            
             let newURL = audioDir.appendingPathComponent(fileName)
-            try? audioData.write(to: newURL)
-            Log.info("[DiaryEntry] Migrated audio \(fileName) to iCloud", category: .persistence)
-            
-            // Delete from old location
-            try? FileManager.default.removeItem(at: oldURL)
+            do {
+                if !FileManager.default.fileExists(atPath: audioDir.path) {
+                    try FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
+                }
+                try audioData.write(to: newURL, options: .atomic)
+                Log.info("[DiaryEntry] Migrated audio \(fileName) to iCloud", category: .persistence)
+
+                // Delete from old location only after the iCloud copy is durable.
+                try? FileManager.default.removeItem(at: oldURL)
+            } catch {
+                Log.error("[DiaryEntry] Audio migration failed, keeping legacy copy \(fileName): \(error)", category: .persistence)
+            }
         }
     }
-    
+
     // 为CloudKit同步添加便利初始化器
     convenience init(context: NSManagedObjectContext, id: UUID = UUID(), text: String, date: Date = Date(), moodValue: Double = 0.5) {
         self.init(context: context)
@@ -84,4 +87,4 @@ extension DiaryEntry {
         self.date = date
         self.moodValue = moodValue
     }
-} 
+}

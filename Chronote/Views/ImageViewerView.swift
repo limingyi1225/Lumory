@@ -313,7 +313,7 @@ private struct ImageViewerPage: View {
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(maxPixelSize, 1),
+            kCGImageSourceThumbnailMaxPixelSize: max(maxPixelSize, 1)
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts as CFDictionary) else {
             return nil

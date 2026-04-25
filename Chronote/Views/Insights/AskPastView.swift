@@ -11,9 +11,7 @@ import CoreData
 // 整条检索+生成链路由 `InsightsEngine.ask(_:)` 负责；本视图只关心 UI。
 
 struct AskPastView: View {
-
     enum Role { case user, ai }
-
     struct Message: Identifiable, Equatable {
         var id: UUID = UUID()
         let role: Role
@@ -26,7 +24,7 @@ struct AskPastView: View {
         /// AI 流彻底失败(零内容产出) —— UI 在气泡里直接显示这条 errorText
         /// (localizedDescription),用户能看到"是网络问题还是认证问题"而不是空白 + 通用提示。
         /// 和 `isIncomplete` 互斥:isIncomplete 是"断在中间",errorText 是"根本没开始"。
-        var errorText: String? = nil
+        var errorText: String?
     }
 
     @Environment(\.managedObjectContext) private var viewContext
@@ -48,6 +46,7 @@ struct AskPastView: View {
     @State private var isLoadingPresets: Bool = false
     /// 后台静默刷新 task 的句柄 —— onDisappear 时取消,避免 view 关掉后还在跑/写 singleton。
     @State private var backgroundRefreshTask: Task<Void, Never>?
+    @State private var lastAutoScrollAt: Date = .distantPast
 
     private let engine = InsightsEngine.shared
 
@@ -195,6 +194,9 @@ struct AskPastView: View {
             }
             .onChange(of: messages.last?.text) { _, _ in
                 guard let id = messages.last?.id else { return }
+                let now = Date()
+                guard now.timeIntervalSince(lastAutoScrollAt) > 0.15 else { return }
+                lastAutoScrollAt = now
                 proxy.scrollTo(id, anchor: .bottom)
             }
         }
@@ -202,165 +204,25 @@ struct AskPastView: View {
 
     @ViewBuilder
     private func bubble(for message: Message) -> some View {
-        switch message.role {
-        case .user:
-            userBubble(message)
-        case .ai:
-            aiBubble(message)
-        }
-    }
-
-    private func userBubble(_ message: Message) -> some View {
-        HStack {
-            Spacer(minLength: 40)
-            Text(message.text)
-                .font(.body)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 18).fill(.tint)
-                )
-        }
-    }
-
-    private func aiBubble(_ message: Message) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.tint)
-                    .padding(.top, 3)
-                VStack(alignment: .leading, spacing: 6) {
-                    if message.text.isEmpty && message.isStreaming {
-                        HStack(spacing: 6) {
-                            ProgressView().scaleEffect(0.7)
-                            Text(NSLocalizedString("正在读你的日记…", comment: "Reading diary"))
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    } else {
-                        MarkdownText(markdown: message.text)
-                            .textSelection(.enabled)
-                    }
-                    if message.isStreaming && !message.text.isEmpty {
-                        Circle()
-                            .fill(Color.primary.opacity(0.5))
-                            .frame(width: 6, height: 6)
-                    }
-                    if message.isIncomplete {
-                        incompleteBanner
-                    }
-                    if let err = message.errorText, !err.isEmpty {
-                        errorRow(message: err)
-                    }
-                }
-            }
-            if !message.citedEntryIds.isEmpty {
-                citationsFold(for: message)
-                    .padding(.leading, 22)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.trailing, 40)
-    }
-
-    /// 完全失败时在气泡内渲染错误原文(不是通用文案)。用户需要看到是 "The Internet
-    /// connection appears to be offline" 还是 "unauthorized" 才能判断下一步。
-    private func errorRow(message err: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "xmark.octagon.fill")
-                .foregroundStyle(.red)
-                .font(.caption)
-            Text(err)
-                .font(.caption)
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.red.opacity(0.08))
+        AskPastMessageRow(
+            message: message,
+            isCitationExpanded: expandedCitations.contains(message.id),
+            onToggleCitations: { toggleCitations(for: message.id) }
         )
-    }
-
-    /// 对话气泡里的"内容不完整"提示条 —— 取代早先把 `⚠️ 回答未完整…` 当文本 append 的做法。
-    /// 用户明确知道这是系统说的,不是 AI 的句号。
-    private var incompleteBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .font(.caption)
-            Text(NSLocalizedString("stream.incomplete.banner", comment: "Stream truncated hint"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.orange.opacity(0.12))
-        )
+        .equatable()
     }
 
     // MARK: Citations — stacked fold
 
-    @ViewBuilder
-    private func citationsFold(for message: Message) -> some View {
-        let ids = message.citedEntryIds
-        let isExpanded = expandedCitations.contains(message.id)
-
-        VStack(alignment: .leading, spacing: 0) {
-            // 折叠头：永远显示 —— 数量 + 展开/收起箭头
-            Button {
-                #if canImport(UIKit)
-                HapticManager.shared.click()
-                #endif
-                withAnimation(.interpolatingSpring(stiffness: 320, damping: 28)) {
-                    if isExpanded {
-                        expandedCitations.remove(message.id)
-                    } else {
-                        expandedCitations.insert(message.id)
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.caption)
-                    Text(String(format: NSLocalizedString("%d 篇相关日记", comment: "N related entries"), ids.count))
-                        .font(.caption.weight(.medium))
-                    Spacer()
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
-                }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(
-                isExpanded
-                ? NSLocalizedString("收起参考", comment: "Collapse citations a11y")
-                : NSLocalizedString("展开参考", comment: "Expand citations a11y")
-            )
-
-            // 展开态才渲染卡片；折叠态只留 header 按钮，不再用叠卡预览。
-            // 原来的 `stackedPeek`（顶卡全展示 + 两张后卡 peek）在真机上视觉错位明显
-            // （cornerRadius 重叠 / 阴影穿透 / 行距被 compact 卡片撑开），去掉更干净。
-            if isExpanded {
-                VStack(spacing: 8) {
-                    ForEach(ids, id: \.self) { entryId in
-                        CitationEntryCard(entryId: entryId)
-                            .environment(\.managedObjectContext, viewContext)
-                    }
-                }
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .move(edge: .top)),
-                    removal: .opacity
-                ))
+    private func toggleCitations(for messageID: UUID) {
+        #if canImport(UIKit)
+        HapticManager.shared.click()
+        #endif
+        withAnimation(.interpolatingSpring(stiffness: 320, damping: 28)) {
+            if expandedCitations.contains(messageID) {
+                expandedCitations.remove(messageID)
+            } else {
+                expandedCitations.insert(messageID)
             }
         }
     }
@@ -455,8 +317,12 @@ struct AskPastView: View {
                     }
                 }
             }
+            let wasCancelled = Task.isCancelled
             await MainActor.run {
                 update(messageID: aiMessageID) { msg in
+                    if wasCancelled, !msg.text.isEmpty, msg.errorText == nil {
+                        msg.isIncomplete = true
+                    }
                     msg.isStreaming = false
                 }
                 // 清掉 activeTask，下一次 submit 才能通过 guard
@@ -532,9 +398,8 @@ struct AskPastView: View {
 
 /// 从用户真实数据里长出一组预设问题。
 /// 策略：主题频次 + 情绪极端 + 近期变化，几项合成 4 条。
-/// 数据不足时返回空 —— 由 UI 决定兜底提示。
-enum PersonalizedPresetGenerator {
-
+    /// 数据不足时返回空 —— 由 UI 决定兜底提示。
+    enum PersonalizedPresetGenerator {
     /// 不触发 AI，全本地聚合。
     static func generate() async -> [String] {
         let engine = InsightsEngine.shared
@@ -612,8 +477,166 @@ enum PersonalizedPresetGenerator {
     }
 
     private static let dateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.setLocalizedDateFormatFromTemplate("MMMd")
-        return f
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        return formatter
     }()
+}
+
+private struct AskPastMessageRow: View, Equatable {
+    let message: AskPastView.Message
+    let isCitationExpanded: Bool
+    let onToggleCitations: () -> Void
+    @Environment(\.managedObjectContext) private var viewContext
+
+    static func == (lhs: AskPastMessageRow, rhs: AskPastMessageRow) -> Bool {
+        lhs.message == rhs.message && lhs.isCitationExpanded == rhs.isCitationExpanded
+    }
+
+    var body: some View {
+        switch message.role {
+        case .user:
+            userBubble
+        case .ai:
+            aiBubble
+        }
+    }
+
+    private var userBubble: some View {
+        HStack {
+            Spacer(minLength: 40)
+            Text(message.text)
+                .font(.body)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 18).fill(.tint)
+                )
+        }
+    }
+
+    private var aiBubble: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.tint)
+                    .padding(.top, 3)
+                VStack(alignment: .leading, spacing: 6) {
+                    aiText
+                    if message.isStreaming && !message.text.isEmpty {
+                        Circle()
+                            .fill(Color.primary.opacity(0.5))
+                            .frame(width: 6, height: 6)
+                    }
+                    if message.isIncomplete {
+                        incompleteBanner
+                    }
+                    if let error = message.errorText, !error.isEmpty {
+                        errorRow(message: error)
+                    }
+                }
+            }
+            if !message.citedEntryIds.isEmpty {
+                citationsFold
+                    .padding(.leading, 22)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.trailing, 40)
+    }
+
+    @ViewBuilder
+    private var aiText: some View {
+        if message.text.isEmpty && message.isStreaming {
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.7)
+                Text(NSLocalizedString("正在读你的日记…", comment: "Reading diary"))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            MarkdownText(markdown: message.text)
+                .textSelection(.enabled)
+        }
+    }
+
+    /// 完全失败时在气泡内渲染错误原文，不把具体网络/认证错误吞成通用文案。
+    private func errorRow(message error: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "xmark.octagon.fill")
+                .foregroundStyle(.red)
+                .font(.caption)
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.red.opacity(0.08))
+        )
+    }
+
+    /// 对话气泡里的"内容不完整"提示条，避免把系统状态当作 AI 正文 append。
+    private var incompleteBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.caption)
+            Text(NSLocalizedString("stream.incomplete.banner", comment: "Stream truncated hint"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.orange.opacity(0.12))
+        )
+    }
+
+    private var citationsFold: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: onToggleCitations) {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.caption)
+                    Text(
+                        String(
+                            format: NSLocalizedString("%d 篇相关日记", comment: "N related entries"),
+                            message.citedEntryIds.count
+                        )
+                    )
+                    .font(.caption.weight(.medium))
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .rotationEffect(.degrees(isCitationExpanded ? 180 : 0))
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                isCitationExpanded
+                ? NSLocalizedString("收起参考", comment: "Collapse citations a11y")
+                : NSLocalizedString("展开参考", comment: "Expand citations a11y")
+            )
+
+            if isCitationExpanded {
+                CitationEntryList(ids: message.citedEntryIds)
+                    .environment(\.managedObjectContext, viewContext)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .top)),
+                        removal: .opacity
+                    ))
+            }
+        }
+    }
 }

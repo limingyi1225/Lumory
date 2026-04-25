@@ -18,7 +18,8 @@ struct NarrativeReader: View {
     // SwiftUI 自己管 presentation 栈，健壮得多。
     @Environment(\.dismiss) private var dismiss
 
-    @State private var content: String = ""
+    @State private var completedParagraphs: [String] = []
+    @State private var trailingParagraph: String = ""
     @State private var isStreaming: Bool = false
     @State private var streamTask: Task<Void, Never>?
     /// 流被中断但已产出部分内容 —— UI 显示提示条,禁止把半截当完整叙事。
@@ -43,17 +44,13 @@ struct NarrativeReader: View {
                         Text(title)
                             .font(.system(size: 28, weight: .semibold))
                             .padding(.top, 8)
-                        if content.isEmpty && isStreaming {
+                        if !hasNarrativeContent && isStreaming {
                             ProgressView()
                                 .padding(.top, 40)
                         } else {
-                            Text(content)
-                                .font(.system(size: 17))
-                                .lineSpacing(6)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
+                            narrativeContent
                         }
-                        if isStreaming && !content.isEmpty {
+                        if isStreaming && hasNarrativeContent {
                             Circle()
                                 .fill(Color.primary.opacity(0.5))
                                 .frame(width: 8, height: 8)
@@ -78,9 +75,9 @@ struct NarrativeReader: View {
     // MARK: Incomplete banner
 
     private var incompleteBanner: some View {
-        // content.isEmpty 时说明 stream 压根没产出(离线/401/5xx),banner 显示具体原因(incompleteReason)
+        // 没有正文时说明 stream 压根没产出(离线/401/5xx),banner 显示具体原因(incompleteReason)
         // 替代通用提示,让用户能判断是网络还是配置问题。有部分 content 时仍保留原通用文案 + 重新生成按钮。
-        let hasContent = !content.isEmpty
+        let hasContent = hasNarrativeContent
         let headline: String = hasContent
             ? NSLocalizedString("stream.incomplete.banner", comment: "Stream truncated hint")
             : (incompleteReason.isEmpty
@@ -131,7 +128,7 @@ struct NarrativeReader: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-            } else if !content.isEmpty {
+            } else if hasNarrativeContent {
                 Button(action: regenerate) {
                     Label(NSLocalizedString("重新生成", comment: "Regenerate"), systemImage: "arrow.clockwise")
                         .font(.caption.weight(.medium))
@@ -162,7 +159,8 @@ struct NarrativeReader: View {
     private func start() {
         guard streamTask == nil else { return }
         isStreaming = true
-        content = ""
+        completedParagraphs = []
+        trailingParagraph = ""
         isIncomplete = false
         incompleteReason = ""
         streamTask = Task {
@@ -172,7 +170,7 @@ struct NarrativeReader: View {
                 await MainActor.run {
                     switch event {
                     case .chunk(let text):
-                        content += text
+                        appendNarrativeChunk(text)
                     case .truncated(let reason):
                         isIncomplete = true
                         incompleteReason = reason
@@ -201,5 +199,40 @@ struct NarrativeReader: View {
     private func closeTapped() {
         streamTask?.cancel()
         dismiss()
+    }
+
+    private var hasNarrativeContent: Bool {
+        !completedParagraphs.isEmpty || !trailingParagraph.isEmpty
+    }
+
+    private var narrativeContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(Array(completedParagraphs.enumerated()), id: \.offset) { _, paragraph in
+                narrativeParagraph(paragraph)
+            }
+            if !trailingParagraph.isEmpty {
+                narrativeParagraph(trailingParagraph)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func narrativeParagraph(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 17))
+            .lineSpacing(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .textSelection(.enabled)
+    }
+
+    private func appendNarrativeChunk(_ text: String) {
+        let merged = trailingParagraph + text
+        let parts = merged.components(separatedBy: "\n\n")
+        guard parts.count > 1 else {
+            trailingParagraph = merged
+            return
+        }
+        completedParagraphs.append(contentsOf: parts.dropLast().filter { !$0.isEmpty })
+        trailingParagraph = parts.last ?? ""
     }
 }

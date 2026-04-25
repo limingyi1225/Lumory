@@ -8,18 +8,17 @@ struct DiaryImportView: View {
 
     @State private var pastedText: String = ""
     @State private var showResultAlert: Bool = false
-    @State private var resultSucceeded: Int = 0
-    @State private var resultFailed: Int = 0
 
-    // **三种结束态**:成功(含 succeeded/failed 计数) / 没识别到日记 / 真错误(网络等)。
+    // **三种结束态**:成功(含 succeeded/failed/skipped 计数) / 没识别到日记 / 真错误(网络等)。
     // 旧实现只看 succeeded/failed 数字 ——「parser 抛错」和「parser 返回 0 条」都被当成
     // "成功导入 0 条日记" 给用户,误导很大。这里用枚举把三种态分开,并在 alert 里走不同文案。
     private enum ImportOutcome {
-        case finished(succeeded: Int, failed: Int)
+        case finished(succeeded: Int, failed: Int, skipped: Int)
+        case duplicatesOnly(skipped: Int)
         case noEntriesDetected
         case error(String)
     }
-    @State private var outcome: ImportOutcome = .finished(succeeded: 0, failed: 0)
+    @State private var outcome: ImportOutcome = .finished(succeeded: 0, failed: 0, skipped: 0)
     @AppStorage("appLanguage") private var appLanguage: String = {
         let currentLocale = Locale.current.identifier
         if currentLocale.hasPrefix("zh") {
@@ -109,6 +108,10 @@ struct DiaryImportView: View {
             return NSLocalizedString("import.alert.empty.title",
                                      value: "未识别到日记",
                                      comment: "Import no entries alert title")
+        case .duplicatesOnly:
+            return NSLocalizedString("import.alert.duplicates.title",
+                                     value: "已跳过重复日记",
+                                     comment: "Import duplicates-only alert title")
         case .finished:
             return NSLocalizedString("导入结果", comment: "Import result title")
         }
@@ -122,12 +125,27 @@ struct DiaryImportView: View {
             return NSLocalizedString("import.alert.empty.message",
                                      value: "没有从粘贴的内容里识别到任何日记。请检查格式后重试。",
                                      comment: "Import no entries detected message")
-        case .finished(let succeeded, let failed):
-            if failed == 0 {
+        case .duplicatesOnly(let skipped):
+            return String(format: NSLocalizedString("import.alert.duplicates.message",
+                                                    value: "已识别 %d 条日记，但它们都已存在，未重复导入。",
+                                                    comment: "Import duplicates-only message"),
+                          skipped)
+        case .finished(let succeeded, let failed, let skipped):
+            if failed == 0 && skipped == 0 {
                 return String(format: NSLocalizedString("成功导入 %d 条日记。", comment: "Import succeeded"), succeeded)
-            } else {
+            } else if failed == 0 {
+                return String(format: NSLocalizedString("import.alert.importWithSkipped.message",
+                                                        value: "成功导入 %d 条，跳过重复 %d 条。",
+                                                        comment: "Import succeeded with duplicates skipped"),
+                              succeeded, skipped)
+            } else if skipped == 0 {
                 return String(format: NSLocalizedString("成功 %d 条，失败 %d 条。", comment: "Import mixed"),
                               succeeded, failed)
+            } else {
+                return String(format: NSLocalizedString("import.alert.importMixedWithSkipped.message",
+                                                        value: "成功 %d 条，失败 %d 条，跳过重复 %d 条。",
+                                                        comment: "Import mixed with duplicates skipped"),
+                              succeeded, failed, skipped)
             }
         }
     }
@@ -139,12 +157,12 @@ struct DiaryImportView: View {
         Task {
             do {
                 let result = try await importService.importEntries(from: pastedText, context: viewContext)
-                if result.succeeded == 0 && result.failed == 0 {
+                if result.succeeded == 0 && result.failed == 0 && result.skipped == 0 {
                     outcome = .noEntriesDetected
+                } else if result.succeeded == 0 && result.failed == 0 {
+                    outcome = .duplicatesOnly(skipped: result.skipped)
                 } else {
-                    outcome = .finished(succeeded: result.succeeded, failed: result.failed)
-                    resultSucceeded = result.succeeded
-                    resultFailed = result.failed
+                    outcome = .finished(succeeded: result.succeeded, failed: result.failed, skipped: result.skipped)
                 }
             } catch {
                 // `DiaryImportError` / 任意上抛错误。`localizedDescription` 已在
@@ -161,4 +179,4 @@ struct DiaryImportView_Previews: PreviewProvider {
         DiaryImportView()
             .environmentObject(CoreDataImportService())
     }
-} 
+}

@@ -3,6 +3,7 @@ import SwiftUI
 struct DiaryEntryRow: View {
     let entry: DiaryEntry
     @State private var imageData: Data?
+    @State private var loadedThumbnailFileName: String?
     @State private var shimmerPhase: CGFloat = 0
     // 默认值必须跟随系统 locale，否则首次启动前强制英语与其他读 `appLanguage` 的组件不一致。
     @AppStorage("appLanguage") private var appLanguage: String = DiaryEntryRow.defaultAppLanguage
@@ -103,10 +104,12 @@ struct DiaryEntryRow: View {
         .padding()
         .liquidGlassCard(cornerRadius: 16, interactive: true)
         .onAppear {
-            loadThumbnail()
             if isSummaryLoading {
                 startShimmerAnimation()
             }
+        }
+        .task(id: thumbnailFileName) {
+            await loadThumbnail(fileName: thumbnailFileName)
         }
     }
 
@@ -189,29 +192,39 @@ struct DiaryEntryRow: View {
         formatterCacheLock.lock()
         defer { formatterCacheLock.unlock() }
         if let cached = formatterCache[key] { return cached }
-        let f = DateFormatter()
-        f.locale = Locale(identifier: language)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: language)
         switch kind {
-        case .day:   f.dateFormat = "dd"
-        case .month: f.dateFormat = "MMM"
-        case .time:  f.timeStyle = .short
+        case .day:   formatter.dateFormat = "dd"
+        case .month: formatter.dateFormat = "MMM"
+        case .time:  formatter.timeStyle = .short
         }
-        formatterCache[key] = f
-        return f
+        formatterCache[key] = formatter
+        return formatter
     }
 
-    private func loadThumbnail() {
-        guard imageData == nil,
-              let firstImageName = entry.imageFileNameArray.first else { return }
+    private var thumbnailFileName: String? {
+        entry.imageFileNameArray.first
+    }
+
+    @MainActor
+    private func loadThumbnail(fileName: String?) async {
+        guard let fileName else {
+            imageData = nil
+            loadedThumbnailFileName = nil
+            return
+        }
+        guard loadedThumbnailFileName != fileName else { return }
+        imageData = nil
 
         // 只捕获文件名（值类型）——不跨线程持有 managed object。
         // 静态 `loadImageData(fileName:)` 会依次查 iCloud / LumoryImages / 老位置三处。
-        let fileName = firstImageName
-        Task.detached(priority: .utility) {
-            if let data = DiaryEntry.loadImageData(fileName: fileName) {
-                await MainActor.run { self.imageData = data }
-            }
-        }
+        let data = await Task.detached(priority: .utility) {
+            DiaryEntry.loadImageData(fileName: fileName)
+        }.value
+        guard !Task.isCancelled else { return }
+        imageData = data
+        loadedThumbnailFileName = fileName
     }
 }
 

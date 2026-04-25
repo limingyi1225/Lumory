@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # Script to reset corrupted Lumory database
 
 echo "Lumory Database Reset Script"
@@ -43,14 +44,16 @@ reset_database() {
 
 # iOS/iPadOS path
 if [ -d "$HOME/Library/Mobile Documents/iCloud~com~Mingyi~Lumory" ]; then
-    reset_database "$HOME/Library/Mobile Documents/iCloud~com~Mingyi~Lumory"
-    exit 0
+    if reset_database "$HOME/Library/Mobile Documents/iCloud~com~Mingyi~Lumory"; then
+        exit 0
+    fi
 fi
 
 # macOS path
 if [ -d "$HOME/Library/Containers/Mingyi.Lumory/Data/Library/Mobile Documents/iCloud~com~Mingyi~Lumory" ]; then
-    reset_database "$HOME/Library/Containers/Mingyi.Lumory/Data/Library/Mobile Documents/iCloud~com~Mingyi~Lumory"
-    exit 0
+    if reset_database "$HOME/Library/Containers/Mingyi.Lumory/Data/Library/Mobile Documents/iCloud~com~Mingyi~Lumory"; then
+        exit 0
+    fi
 fi
 
 echo "Could not find Lumory database. Please make sure Lumory is installed and has been run at least once."

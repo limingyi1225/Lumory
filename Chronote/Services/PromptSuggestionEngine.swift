@@ -44,14 +44,14 @@ struct SuggestionContext {
         let latestId = recentEntries.first.map { String($0.id.uuidString.prefix(8)) } ?? "none"
         let latestWeek: String = {
             guard let latest = recentEntries.first else { return "none" }
-            let f = DateFormatter()
+            let formatter = DateFormatter()
             // ISO 8601 周年 + 周编号。**必须显式 pin calendar/locale** —— DateFormatter 默认
             // 用 Calendar.current(美区 firstWeekday=1,非 ISO)+ Locale.current,跨地区 /
             // 夏令时边界会漂,指纹稳定性依赖这个固定。
-            f.calendar = Calendar(identifier: .iso8601)
-            f.locale = Locale(identifier: "en_US_POSIX")
-            f.dateFormat = "YYYY-'W'ww"
-            return f.string(from: latest.date)
+            formatter.calendar = Calendar(identifier: .iso8601)
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "YYYY-'W'ww"
+            return formatter.string(from: latest.date)
         }()
         // 0..1 区间分成 10 档 → 单条日记 mood 改动通常落在同一桶,极端波动才跨桶。
         let moodBucket = Int((moodAvg30d * 10).rounded())
@@ -98,7 +98,7 @@ final class PromptSuggestionEngine: ObservableObject {
 
     init(
         insights: InsightsEngine = .shared,
-        ai: AIServiceProtocol = OpenAIService(apiKey: "")
+        ai: AIServiceProtocol = OpenAIService.shared
     ) {
         self.insights = insights
         self.ai = ai
@@ -110,11 +110,12 @@ final class PromptSuggestionEngine: ObservableObject {
     /// AskPastView / HomeView 进入时调。会用指纹判断是否需要重新生成；
     /// 如果缓存还新鲜就直接 return，不发网络请求。
     func refreshIfNeeded() async {
+        let context = await buildContext()
         if let bundle = current, Self.isFresh(bundle: bundle, ttl: ttl) {
             // fingerprint 变化的二次检查：必要时再刷
-            if await fingerprintMatchesCurrentData(bundle) { return }
+            if context.makeFingerprint() == bundle.fingerprint { return }
         }
-        _ = await runRefresh()
+        _ = await runRefresh(context: context)
     }
 
     /// 用户点 refresh 按钮时强制刷新。
@@ -123,7 +124,7 @@ final class PromptSuggestionEngine: ObservableObject {
     /// "一键重建" 流程是真成功还是仅 fall back 到旧 cache。
     @discardableResult
     func forceRefresh() async -> Bool {
-        await runRefresh()
+        await runRefresh(context: nil)
     }
 
     /// 从 homePlaceholders 池里随机挑一条；避免连续重复。
@@ -142,7 +143,7 @@ final class PromptSuggestionEngine: ObservableObject {
 
     // MARK: Core refresh
 
-    private func runRefresh() async -> Bool {
+    private func runRefresh(context: SuggestionContext?) async -> Bool {
         // C2 path:已有在飞 task,直接 join 结果,避免重复 AI 调用。
         // 注意:这里不把 caller cancel 桥到 task,因为 task 还在为其他 caller 服务。
         if let task = inFlight {
@@ -156,7 +157,7 @@ final class PromptSuggestionEngine: ObservableObject {
         // false —— 视角是"starter 放弃了,大家一起失败",符合 dedup 语义。
         let task = Task<Bool, Never> { [weak self] in
             guard let self else { return false }
-            return await self.executeRefresh()
+            return await self.executeRefresh(context: context)
         }
         inFlight = task
         let result = await withTaskCancellationHandler {
@@ -168,7 +169,7 @@ final class PromptSuggestionEngine: ObservableObject {
         return result
     }
 
-    private func executeRefresh() async -> Bool {
+    private func executeRefresh(context initialContext: SuggestionContext?) async -> Bool {
         isRefreshing = true
         defer { isRefreshing = false }
 
@@ -176,7 +177,12 @@ final class PromptSuggestionEngine: ObservableObject {
         // 取消 backgroundRefreshTask,但如果 executeRefresh 已经过了 await composeSuggestions
         // 还在跑 buildContext 或 saveCache,cancel 会被忽略,旧 task 仍然写 current,
         // 触发其他订阅者(OneClickRebuildRow)无意义重渲染。
-        let context = await buildContext()
+        let context: SuggestionContext
+        if let initialContext {
+            context = initialContext
+        } else {
+            context = await buildContext()
+        }
         guard !Task.isCancelled else { return false }
         guard context.hasEnoughSignal else {
             Log.info("[PromptSuggestion] signal 不够（<3 条），跳过 AI", category: .ai)
@@ -213,33 +219,31 @@ final class PromptSuggestionEngine: ObservableObject {
             end: now
         )
 
-        async let themes = insights.themes(in: themeRange, limit: 5)
+        async let suggestionSnapshot = insights.suggestionSnapshot(
+            themeRange: themeRange,
+            moodRange: moodRange,
+            themeLimit: 5
+        )
         async let stats = insights.writingStats()
         async let recent = insights.recentEntries(limit: 3, textCharCap: 200)
-        async let extremes = insights.moodExtremes(in: moodRange)
-        async let moodPoints = insights.moodSeries(in: moodRange, bucket: .day)
 
-        let (topThemes, writingStats, recentEntries, moodExtremes, mpoints) =
-            await (themes, stats, recent, extremes, moodPoints)
+        let (snapshot, writingStats, recentEntries) = await (suggestionSnapshot, stats, recent)
 
-        let moodAvg = mpoints.isEmpty ? 0.5 : mpoints.reduce(0.0) { $0 + $1.mood } / Double(mpoints.count)
+        let moodAvg = snapshot.moodPoints.isEmpty
+            ? 0.5
+            : snapshot.moodPoints.reduce(0.0) { $0 + $1.mood } / Double(snapshot.moodPoints.count)
         let language = Self.detectLanguage(from: recentEntries)
 
         return SuggestionContext(
-            topThemes: topThemes,
+            topThemes: snapshot.topThemes,
             moodAvg30d: moodAvg,
-            moodHighEntry: moodExtremes.high,
-            moodLowEntry: moodExtremes.low,
+            moodHighEntry: snapshot.moodHighEntry,
+            moodLowEntry: snapshot.moodLowEntry,
             currentStreak: writingStats.currentStreak,
             totalEntries: writingStats.totalEntries,
             recentEntries: recentEntries,
             language: language
         )
-    }
-
-    private func fingerprintMatchesCurrentData(_ bundle: SuggestionBundle) async -> Bool {
-        let ctx = await buildContext()
-        return ctx.makeFingerprint() == bundle.fingerprint
     }
 
     // MARK: Cache

@@ -18,7 +18,7 @@ final class HomePhotoViewModel {
     var photosPickerPresented: Bool = false
 
     /// 上一次的 photo 压缩任务,选择变化时取消,防止旧任务回来覆盖新结果(F1 race fix)。
-    var photoLoadTask: Task<Void, Never>? = nil
+    var photoLoadTask: Task<Void, Never>?
 
     /// 压缩成功后的 JPEG Data,和 selectedPhotos 严格等长、同序。
     var selectedImages: [Data] = []

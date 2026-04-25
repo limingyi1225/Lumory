@@ -9,7 +9,6 @@ import UIKit
 // 按频率分三层：
 // 1) 主层：常用 —— AI 一键索引、数据、iCloud、语言、关于
 // 2) 进阶子页：诊断 / 修复 / 分项索引 / DEBUG 工具
-// 3) 隐藏彩蛋：导入按钮长按 5 秒触发秘密导入
 //
 // 视觉去掉原来的 `listRowBackground(RoundedRectangle + shadow(0.2))` 重阴影，
 // 让 iOS 26 inset-grouped 原生样式发挥作用，和首页的 Liquid Glass 对齐。
@@ -18,17 +17,19 @@ struct SettingsView: View {
     @Binding var isSettingsOpen: Bool
     @Environment(\.managedObjectContext) private var viewContext
     @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)],
-        animation: .default
+        sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
     ) private var entries: FetchedResults<DiaryEntry>
 
-    @AppStorage("appLanguage") private var appLanguage: String = Locale.current.identifier
+    @AppStorage("appLanguage") private var appLanguage: String = {
+        Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"
+    }()
 
     // 各种模态 / 确认态
     @State private var showImportSheet = false
     @State private var showExportSheet = false
     @State private var showDeleteAllAlert = false
     @State private var showDeleteCompleteAlert = false
+    @State private var isDeletingAllEntries = false
     @State private var isSyncing = false
     @State private var syncMessage: String?
 
@@ -142,12 +143,23 @@ struct SettingsView: View {
             Button {
                 showDeleteAllAlert = true
             } label: {
-                settingsLabel(NSLocalizedString("删除所有日记", comment: "Delete all"), icon: "trash", tint: .red)
+                HStack {
+                    settingsLabel(NSLocalizedString("删除所有日记", comment: "Delete all"), icon: "trash", tint: .red)
+                    if isDeletingAllEntries {
+                        Spacer()
+                        ProgressView()
+                    }
+                }
             }
+            .disabled(isDeletingAllEntries)
             .alert(NSLocalizedString("确认删除所有日记？", comment: "Confirm delete all"), isPresented: $showDeleteAllAlert) {
                 Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
-                    deleteAllEntries()
-                    showDeleteCompleteAlert = true
+                    Task {
+                        let didDelete = await deleteAllEntries()
+                        if didDelete {
+                            showDeleteCompleteAlert = true
+                        }
+                    }
                 }
                 Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
             } message: {
@@ -174,8 +186,8 @@ struct SettingsView: View {
                     if isSyncing {
                         ProgressView()
                     } else if syncMessage != nil {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(Color.moodSpectrum(value: 0.85))
+                        Image(systemName: syncStatusIcon)
+                            .foregroundStyle(syncStatusTint)
                     }
                 }
             }
@@ -220,14 +232,14 @@ struct SettingsView: View {
     @ViewBuilder
     private var aboutSection: some View {
         Section(header: sectionHeader(NSLocalizedString("关于", comment: "About"))) {
-            // swiftlint:disable:next force_unwrapping
-            // 编译期常量 mailto: URL，格式合法，URL(string:) 不会失败。
-            Link(destination: URL(string: "mailto:me@limingyi.com")!) {
-                settingsLabel(
-                    NSLocalizedString("联系开发者", comment: "Contact developer"),
-                    icon: "envelope",
-                    tint: .accentColor
-                )
+            if let contactURL = URL(string: "mailto:me@limingyi.com") {
+                Link(destination: contactURL) {
+                    settingsLabel(
+                        NSLocalizedString("联系开发者", comment: "Contact developer"),
+                        icon: "envelope",
+                        tint: .accentColor
+                    )
+                }
             }
         }
     }
@@ -260,6 +272,14 @@ struct SettingsView: View {
         return "\(short) (\(build))"
     }
 
+    private var syncStatusIcon: String {
+        syncMonitor.syncStatus == .synced ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+    }
+
+    private var syncStatusTint: Color {
+        syncMonitor.syncStatus == .synced ? Color.moodSpectrum(value: 0.85) : .orange
+    }
+
     /// 很淡的顶部 mood-tinted 渐变，让 Settings 和首页保持同一种空气感。
     private var backgroundGradient: some View {
         LinearGradient(
@@ -274,19 +294,39 @@ struct SettingsView: View {
 
     // MARK: - Actions
 
-    private func deleteAllEntries() {
+    private func deleteAllEntries() async -> Bool {
+        isDeletingAllEntries = true
+        defer { isDeletingAllEntries = false }
+
+        let attachmentSnapshots = entries.map {
+            EntryAttachmentSnapshot(imageFileNames: $0.imageFileNameArray, audioFileName: $0.audioFileName)
+        }
         for entry in entries {
-            // 磁盘附件（图片 + 音频）必须在 managed object delete 之前清，否则 audioFileName /
-            // imageFileNames 访问不到，磁盘文件会永远留成孤儿。
-            entry.deleteAllImages()
-            entry.deleteAudioFile()
             viewContext.delete(entry)
         }
         do {
             try viewContext.save()
         } catch {
             Log.error("[SettingsView] 删除所有日记失败: \(error)", category: .ui)
+            viewContext.rollback()
+            return false
         }
+
+        await Task.detached(priority: .utility) {
+            for snapshot in attachmentSnapshots {
+                for fileName in snapshot.imageFileNames {
+                    do {
+                        try DiaryEntry.deleteImageFromDocuments(fileName)
+                    } catch {
+                        Log.error("[SettingsView] 删除图片附件失败 \(fileName): \(error)", category: .ui)
+                    }
+                }
+                if let audioFileName = snapshot.audioFileName, !audioFileName.isEmpty {
+                    DiaryEntry.deleteAudioFromDocuments(audioFileName)
+                }
+            }
+        }.value
+        return true
     }
 
     private func performManualSync() {
@@ -327,6 +367,11 @@ struct SettingsView: View {
             syncMessage = nil
         }
     }
+}
+
+private struct EntryAttachmentSnapshot: Sendable {
+    let imageFileNames: [String]
+    let audioFileName: String?
 }
 
 struct SettingsView_Previews: PreviewProvider {
@@ -524,7 +569,7 @@ private struct OneClickRebuildRow: View {
 
     @State private var stage: Stage = .idle
     /// 待索引条目数 —— 进入设置时 / 重建完成后刷新一次。nil = 还没查过,不显示数字。
-    @State private var pendingCount: Int? = nil
+    @State private var pendingCount: Int?
     @State private var isCountingPending: Bool = false
 
     private enum Stage: Equatable {
@@ -592,7 +637,7 @@ private struct OneClickRebuildRow: View {
         case .failed:
             return .orange.opacity(0.9)
         case .idle:
-            if let n = pendingCount, n == 0 {
+            if let pendingCount, pendingCount == 0 {
                 return Color.moodSpectrum(value: 0.85).opacity(0.85)
             }
             return .secondary
@@ -643,20 +688,20 @@ private struct OneClickRebuildRow: View {
         switch stage {
         case .idle:
             // 还没查过 → 模糊文案;有待索引 → 提示数量;0 → 明确"无需重建"。
-            guard let n = pendingCount else {
+            guard let pendingCount else {
                 if isCountingPending {
                     return NSLocalizedString("正在检查待索引条目…", comment: "Checking pending")
                 }
                 return NSLocalizedString("对存量日记跑一遍最新的 AI 管线", comment: "One-click idle subtitle")
             }
-            if n == 0 {
+            if pendingCount == 0 {
                 return NSLocalizedString("索引已是最新,无需重建 ✓", comment: "Up to date")
             }
             // 用"项"而不是"条" —— pendingCount 是主题待修 + 向量待补的**和**,
             // 一篇日记可能两边都需要,会被算两次。"项"更诚实(任务数,不是日记数)。
             return String(
                 format: NSLocalizedString("有 %d 项索引待更新,建议运行一次", comment: "Pending count"),
-                n
+                pendingCount
             )
         case .themes:
             return NSLocalizedString("第 1 / 3 步：重抽主题…", comment: "One-click stage 1")
@@ -914,4 +959,3 @@ private struct ThemeBackfillRow: View {
                                  comment: "Theme backfill subtitle")
     }
 }
-

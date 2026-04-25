@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Deep clean script for Lumory to remove all build artifacts and caches
 

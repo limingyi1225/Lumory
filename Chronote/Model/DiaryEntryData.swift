@@ -46,34 +46,4 @@ struct DiaryEntryData {
             wordCount: Int(fetchedEntry.wordCount)
         )
     }
-
-    /// 从Core Data DiaryEntry创建安全的数据副本 (async版本，推荐使用)
-    static func from(_ entry: DiaryEntry) async -> DiaryEntryData? {
-        guard let context = entry.managedObjectContext else { return nil }
-
-        // Capture objectID which is Sendable, then fetch in context.perform
-        let objectID = entry.objectID
-
-        return await context.perform {
-            do {
-                // `as?` 而不是 `as!`：即使 existingObject 成功取到对象，类型漂移 / 测试桩 / CloudKit
-                // 同步过来的残留实体都可能不是 DiaryEntry，force cast 会触发 runtime trap 整个 App 崩。
-                guard let fetchedEntry = try context.existingObject(with: objectID) as? DiaryEntry else {
-                    Log.error("[DiaryEntryData] objectID 不是 DiaryEntry: \(objectID)", category: .persistence)
-                    return nil
-                }
-                return DiaryEntryData.from(fetchedEntry: fetchedEntry)
-            } catch {
-                Log.error("[DiaryEntryData] 创建数据副本失败: \(error)", category: .persistence)
-                return nil
-            }
-        }
-    }
-
-    /// 从Core Data DiaryEntry创建安全的数据副本 (同步版本，仅在已知主线程时使用)
-    @MainActor
-    static func fromSync(_ entry: DiaryEntry) -> DiaryEntryData? {
-        guard entry.managedObjectContext != nil else { return nil }
-        return DiaryEntryData.from(fetchedEntry: entry)
-    }
 }

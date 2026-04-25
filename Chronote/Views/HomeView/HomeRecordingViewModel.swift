@@ -28,10 +28,10 @@ final class HomeRecordingViewModel {
 
     /// 当前这次输入对应的音频文件名(单值,和 DiaryEntry.audioFileName 模型对齐)。
     /// 录制完成后写入,发送或删除后清空。
-    var currentAudioFileName: String? = nil
+    var currentAudioFileName: String?
 
     /// 进行中的转写任务,允许 cancel。
-    var transcriptionTask: Task<Void, Never>? = nil
+    var transcriptionTask: Task<Void, Never>?
 
     /// UI 层 recording cell 列表。数据模型只持久化一段(DiaryEntry.audioFileName 是单值),
     /// UI 最多保留 1 条 take;重录前用户需要先删除已有 take。
@@ -39,5 +39,5 @@ final class HomeRecordingViewModel {
 
     // MARK: 删除录音确认弹窗
     var showingDeleteAlert: Bool = false
-    var deleteTarget: String? = nil
+    var deleteTarget: String?
 }

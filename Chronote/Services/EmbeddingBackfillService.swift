@@ -16,7 +16,6 @@ import Combine
 
 @available(iOS 15.0, macOS 12.0, *)
 final class EmbeddingBackfillService: ObservableObject {
-
     static let shared = EmbeddingBackfillService()
 
     // MARK: Public state
@@ -44,10 +43,12 @@ final class EmbeddingBackfillService: ObservableObject {
     // 从而保证 Settings「一键重建」按钮、自动路径、未来的 auto-backfill 任何多入口都在同一条线上排队。
     // 以前是裸 `var`，不 actor-safe，多入口 race 会让两份 run() 同时跑、progress 串号。
     @MainActor private var runningTask: Task<Void, Never>?
+    @MainActor private var runningRunID: UUID?
+    @MainActor private var pendingCache: (value: Int, date: Date)?
 
     init(
         persistence: PersistenceController = .shared,
-        ai: AIServiceProtocol = OpenAIService(apiKey: ""),
+        ai: AIServiceProtocol = OpenAIService.shared,
         // 原来 batch=10, throttle=500ms → peak ~1200 req/min，把服务端 embeddings limit 300/min
         // 撞死。改 batch=3, throttle=900ms → peak ~200 req/min，留 50% headroom。
         // 500 条日记跑完约 2.5 分钟。
@@ -66,19 +67,26 @@ final class EmbeddingBackfillService: ObservableObject {
     @MainActor
     @discardableResult
     func backfillAll() async -> Progress {
-        if runningTask != nil {
+        if let runningTask, !runningTask.isCancelled {
             Log.info("[EmbeddingBackfill] 已在运行，忽略重复调用", category: .migration)
             return progress
         }
 
+        pendingCache = nil
+        let runID = UUID()
         // [weak self]：和 ThemeBackfillService 同款——避免 Task 强捕 singleton 的 AI 客户端和缓存
         let task: Task<Void, Never> = Task { [weak self] in
             guard let self else { return }
-            await self.run()
+            await self.run(runID: runID)
         }
         runningTask = task
+        runningRunID = runID
         await task.value
-        runningTask = nil
+        if runningRunID == runID {
+            runningTask = nil
+            runningRunID = nil
+            pendingCache = nil
+        }
         return progress
     }
 
@@ -86,18 +94,20 @@ final class EmbeddingBackfillService: ObservableObject {
     func cancel() {
         runningTask?.cancel()
         runningTask = nil
+        runningRunID = nil
+        pendingCache = nil
     }
 
     // MARK: Core loop
 
-    private func run() async {
+    private func run(runID: UUID) async {
         let missingIDs = await fetchMissingObjectIDs()
         Log.info("[EmbeddingBackfill] 待回填条目数: \(missingIDs.count)", category: .migration)
 
-        await publish(Progress(processed: 0, total: missingIDs.count, failed: 0, isRunning: true))
+        await publish(Progress(processed: 0, total: missingIDs.count, failed: 0, isRunning: true), runID: runID)
 
         guard !missingIDs.isEmpty else {
-            await publish(Progress(processed: 0, total: 0, failed: 0, isRunning: false))
+            await publish(Progress(processed: 0, total: 0, failed: 0, isRunning: false), runID: runID)
             return
         }
 
@@ -110,39 +120,45 @@ final class EmbeddingBackfillService: ObservableObject {
                 if Task.isCancelled { break }
                 let ok = await processOne(objectID: objectID)
                 if ok { processed += 1 } else { failed += 1 }
-                await publish(Progress(processed: processed, total: missingIDs.count, failed: failed, isRunning: true))
+                await publish(Progress(processed: processed, total: missingIDs.count, failed: failed, isRunning: true), runID: runID)
             }
             // 喘口气，避免 OpenAI 限流
             try? await Task.sleep(nanoseconds: throttleNanos)
         }
 
         Log.info("[EmbeddingBackfill] 完成: 成功 \(processed) / 失败 \(failed)", category: .migration)
-        await publish(Progress(processed: processed, total: missingIDs.count, failed: failed, isRunning: false))
+        await publish(Progress(processed: processed, total: missingIDs.count, failed: failed, isRunning: false), runID: runID)
     }
 
     // MARK: Public count
 
     /// 当前缺 embedding 的条目数。用 count 而不是 fetch + count,扫一遍主键索引就出来,
     /// 不会把 NSManagedObject 实例化进 context,Settings 页面随手调安全。
+    @MainActor
     func pendingCount() async -> Int {
-        await persistence.container.performBackgroundTask { context -> Int in
+        if let pendingCache, Date().timeIntervalSince(pendingCache.date) < 5 {
+            return pendingCache.value
+        }
+        let count = await persistence.container.performBackgroundTask { context -> Int in
             let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
             request.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
             return (try? context.count(for: request)) ?? 0
         }
+        pendingCache = (count, Date())
+        return count
     }
 
     // MARK: DB helpers
 
     private func fetchMissingObjectIDs() async -> [NSManagedObjectID] {
         await persistence.container.performBackgroundTask { context -> [NSManagedObjectID] in
-            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            let request = NSFetchRequest<NSManagedObjectID>(entityName: "DiaryEntry")
             // 只挑 text 非空且 embedding 为 nil 的
             request.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
-            request.propertiesToFetch = []
-            guard let entries = try? context.fetch(request) else { return [] }
-            return entries.map { $0.objectID }
+            request.resultType = .managedObjectIDResultType
+            request.fetchBatchSize = 200
+            return (try? context.fetch(request)) ?? []
         }
     }
 
@@ -185,7 +201,8 @@ final class EmbeddingBackfillService: ObservableObject {
     }
 
     @MainActor
-    private func publish(_ value: Progress) {
+    private func publish(_ value: Progress, runID: UUID) {
+        guard runningRunID == runID else { return }
         self.progress = value
     }
 }

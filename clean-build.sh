@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Clean script for Lumory to remove build artifacts and caches
 
@@ -6,7 +7,9 @@ echo "Cleaning Lumory build artifacts..."
 
 # Clean Xcode build
 echo "Cleaning Xcode build..."
-xcodebuild clean -project Lumory.xcodeproj -alltargets
+if ! xcodebuild clean -project Lumory.xcodeproj -alltargets; then
+    echo "xcodebuild clean failed; continuing with local artifact cleanup..."
+fi
 
 # Remove DerivedData
 echo "Removing DerivedData..."

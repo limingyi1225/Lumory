@@ -10,11 +10,6 @@ final class AudioRecorder: NSObject, ObservableObject {
     private var meterTimer: Timer?
     private var startTime: Date?
     @Published var duration: TimeInterval = 0
-    /// 已累计的暂停总时长（秒）。计算真实录音时长时 `Date().timeIntervalSince(startTime) - pausedTime`。
-    private var pausedTime: TimeInterval = 0
-    /// 本次暂停开始的时刻。resume 时用 `Date().timeIntervalSince(pauseStart)` 累加进 `pausedTime`。
-    private var pauseStart: Date?
-    @Published var isPaused = false
 
     // Thread safety
     private let recorderLock = NSLock()
@@ -47,10 +42,50 @@ final class AudioRecorder: NSObject, ObservableObject {
             Log.warning("[AudioRecorder] startRecording called while already recording — ignoring", category: .audio)
             return
         }
+        #if !os(macOS)
+        let permission = AVAudioSession.sharedInstance().recordPermission
+        switch permission {
+        case .undetermined:
+            if #available(iOS 17.0, *) {
+                AVAudioApplication.requestRecordPermission { [weak self] granted in
+                    Task { @MainActor in
+                        guard granted else {
+                            Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
+                            return
+                        }
+                        self?.startRecording()
+                    }
+                }
+            } else {
+                AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+                    Task { @MainActor in
+                        guard granted else {
+                            Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
+                            return
+                        }
+                        self?.startRecording()
+                    }
+                }
+            }
+            return
+        case .denied:
+            Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
+            return
+        case .granted:
+            break
+        @unknown default:
+            Log.warning("[AudioRecorder] Unknown microphone permission status", category: .audio)
+            return
+        }
+        #endif
         do {
             #if !os(macOS)
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+            try audioSession.setCategory(
+                .playAndRecord,
+                mode: .measurement,
+                options: [.defaultToSpeaker, .allowBluetoothHFP, .mixWithOthers]
+            )
             try audioSession.setActive(true)
             Log.info("[AudioRecorder] Audio session configured successfully", category: .audio)
             #endif
@@ -60,7 +95,7 @@ final class AudioRecorder: NSObject, ObservableObject {
 
             let settings: [String: Any] = [
                 AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-                AVSampleRateKey: 12000,
+                AVSampleRateKey: 16000,
                 AVNumberOfChannelsKey: 1,
                 AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
             ]
@@ -74,7 +109,6 @@ final class AudioRecorder: NSObject, ObservableObject {
             recorder?.record()
             startTime = Date()
             duration = 0
-            pausedTime = 0
 
             // 启动计时器，定期更新音量数据（使用闭包避免内存泄漏）。
             // 改成手动 init + 单次 RunLoop.add(.common)：原来的 scheduledTimer 已经自动
@@ -92,7 +126,6 @@ final class AudioRecorder: NSObject, ObservableObject {
             // 我们**需要** unlock 在 timer 装好后立即发生，defer 会把它推迟到 func 返回。
 
             isRecording = true
-            pauseStart = nil
             Log.info("[AudioRecorder] Recording started. File URL: \(url.path)", category: .audio)
         } catch {
             Log.error("[AudioRecorder] Could not start recording: \(error)", category: .audio)
@@ -103,29 +136,20 @@ final class AudioRecorder: NSObject, ObservableObject {
         // 先截取出 recorder 引用，让锁的作用域尽量短——后续 File I/O / Log 都不用持锁。
         recorderLock.lock()
         let captured: AVAudioRecorder? = self.recorder
-        let wasPaused = isPaused
         recorderLock.unlock()
 
         guard let recorder = captured else { return nil }
-
-        if wasPaused {
-            // stop 之前还在暂停状态：先把暂停段累加进 pausedTime 再让 recorder 过一遍 record→stop，
-            // 否则 `recordedDuration` 会包含这段最后的暂停空档
-            if let start = pauseStart {
-                pausedTime += Date().timeIntervalSince(start)
-                pauseStart = nil
-            }
-            recorder.record()
-            recorderLock.lock()
-            isPaused = false
-            recorderLock.unlock()
+        #if !os(macOS)
+        defer {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
+        #endif
 
         recorder.stop()
 
         var recordedDuration: TimeInterval = 0
         if let start = startTime {
-            recordedDuration = Date().timeIntervalSince(start) - pausedTime
+            recordedDuration = Date().timeIntervalSince(start)
             duration = recordedDuration
         }
         timerLock.lock()
@@ -134,10 +158,7 @@ final class AudioRecorder: NSObject, ObservableObject {
         timerLock.unlock()
         amplitude = 0
         isRecording = false
-        isPaused = false
-        pausedTime = 0
-        pauseStart = nil
-        
+
         // 如果录音时长小于0.5秒，则删除录音文件并返回nil
         if recordedDuration < 0.5 {
             let url = recorder.url
@@ -145,16 +166,11 @@ final class AudioRecorder: NSObject, ObservableObject {
             Log.info("[AudioRecorder] Recording too short (\(recordedDuration)s), deleted file", category: .audio)
             return nil
         }
-        
+
         let url = recorder.url
         let fileName = url.lastPathComponent
         Log.info("[AudioRecorder] Recording stopped. Duration: \(recordedDuration)s, File: \(fileName), Path: \(url.path)", category: .audio)
         Log.info("[AudioRecorder] File exists: \(FileManager.default.fileExists(atPath: url.path))", category: .audio)
-
-        // 归还系统音频路由：挂起的音乐/播客会在这之后自动恢复播放。
-        #if !os(macOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        #endif
 
         return fileName
     }
@@ -184,30 +200,6 @@ final class AudioRecorder: NSObject, ObservableObject {
         }
     }
     #endif
-    
-    func resumeRecording() {
-        guard let recorder = recorder, isRecording, isPaused else { return }
-        // 把刚刚这段暂停的秒数累加到 pausedTime，让后续 duration 计算能把空档抵消掉
-        if let start = pauseStart {
-            pausedTime += Date().timeIntervalSince(start)
-            pauseStart = nil
-        }
-        recorder.record()
-        isPaused = false
-
-        // 必须跟 startRecording 里一样：`Timer.init` + 单次 `RunLoop.add(.common)`。
-        // 之前用 `Timer.scheduledTimer` 已经把 timer 注册到了 `.default` mode，再 `add(.common)`
-        // 会让它在同一个 tick 下双触发 handleMeterUpdate，暂停恢复后 meter 抖动 + 主线程被拉满。
-        timerLock.lock()
-        defer { timerLock.unlock() }
-        let timer = Timer(timeInterval: 0.03, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.handleMeterUpdate()
-            }
-        }
-        RunLoop.current.add(timer, forMode: .common)
-        meterTimer = timer
-    }
 
     /// 将 dB 值映射到 0.0~1.0 线性区间
     private func normalizedPower(_ power: Float) -> Float {
@@ -215,7 +207,7 @@ final class AudioRecorder: NSObject, ObservableObject {
         let clamped = max(min(power, 0), minDb)
         return (clamped - minDb) / -minDb
     }
-    
+
     /// Gets the proper URL for audio storage (always local for temp recordings)
     private func getAudioURL(for fileName: String) -> URL {
         // Always use local documents directory for temporary recordings
@@ -237,8 +229,8 @@ final class AudioRecorder: NSObject, ObservableObject {
 
         let level = normalizedPower(power)
         let elapsed: TimeInterval
-        if let start = startTime, !isPaused {
-            elapsed = Date().timeIntervalSince(start) - pausedTime
+        if let start = startTime {
+            elapsed = Date().timeIntervalSince(start)
         } else {
             elapsed = duration
         }
@@ -248,7 +240,7 @@ final class AudioRecorder: NSObject, ObservableObject {
             self.duration = elapsed
         }
     }
-    
+
     deinit {
         // **不要** 假设 MainActor 类的 deinit 在主线程——Swift 6 下 deinit 可在任意线程。
         // Timer.invalidate / NotificationCenter.removeObserver 都是 thread-safe 的，锁也是。
@@ -282,29 +274,10 @@ extension AudioRecorder: AVAudioRecorderDelegate {
             Log.info("[AudioRecorder] Recording finished successfully", category: .audio)
         }
     }
-    
+
     nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
         if let error = error {
             Log.error("[AudioRecorder] Encoding error: \(error.localizedDescription)", category: .audio)
         }
     }
 }
-
-// MARK: - Cleanup
-extension AudioRecorder {
-    func cleanup() {
-        timerLock.lock()
-        meterTimer?.invalidate()
-        meterTimer = nil
-        timerLock.unlock()
-        
-        recorderLock.lock()
-        recorder?.stop()
-        recorder = nil
-        recorderLock.unlock()
-        
-        isRecording = false
-        isPaused = false
-        amplitude = 0
-    }
-} 

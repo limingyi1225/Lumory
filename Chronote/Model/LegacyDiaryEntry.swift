@@ -1,7 +1,7 @@
 import Foundation
 
 // 用于读取旧 JSON 数据的临时结构体
-struct LegacyDiaryEntry: Codable, Identifiable, Hashable {
+struct LegacyDiaryEntry: Decodable, Identifiable {
     let id: UUID
     let date: Date
     let text: String
@@ -49,14 +49,4 @@ struct LegacyDiaryEntry: Codable, Identifiable, Hashable {
             moodValue = 0.5
         }
     }
-    
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(id, forKey: .id)
-        try container.encode(date, forKey: .date)
-        try container.encode(text, forKey: .text)
-        try container.encodeIfPresent(summary, forKey: .summary)
-        try container.encode(moodValue, forKey: .moodValue)
-        try container.encodeIfPresent(audioFileName, forKey: .audioFileName)
-    }
-} 
+}

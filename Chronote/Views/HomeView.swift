@@ -416,28 +416,26 @@ struct HomeView: View {
     // MARK: - View-level 路由 / 搜索 / 生命周期 state
     // 这些**留在 HomeView**:和 NavigationStack / sheet / .searchable 生命周期耦合,
     // 抽进 VM 反而要反向同步。
-    @State private var selectedEntry: DiaryEntry? = nil
+    @State private var selectedEntry: DiaryEntry?
     /// 现在直接驱动 `.sheet` —— 不再走自绘抽屉。
     @State private var isSettingsOpen: Bool = false
     @State private var isInsightsPresented: Bool = false
     @State private var shouldStartEditing: Bool = false
-    @State private var entryToDelete: DiaryEntry? = nil
+    @State private var entryToDelete: DiaryEntry?
     @State private var showDeleteConfirmation: Bool = false
     /// 冷启动首帧 @FetchRequest 尚未完成时为 false——避免 emptyState 闪一帧。
     @State private var hasLoadedOnce: Bool = false
+    @State private var showSpeechSettingsAlert: Bool = false
 
     // Search state — 由系统 .searchable 托管输入；下面三个仅是结果与节流任务。
     @State private var searchQuery: String = ""
     @State private var searchResults: [DiaryEntry] = []
     @State private var searchTask: Task<Void, Never>?
 
-
     /// 滚动深度 —— 用户向下滚超过阈值才显示"回顶部"FAB,避免常态遮挡内容。
     @State private var showScrollToTop: Bool = false
     /// List 顶部锚点 id,FAB 用 ScrollViewProxy.scrollTo 跳回这里。
     private let topAnchorID = "__lumory_top__"
-
-
 
     // Database recreation observer
     @State private var databaseRecreationObserver: NSObjectProtocol?
@@ -485,6 +483,17 @@ struct HomeView: View {
                 }
             } message: {
                 Text(NSLocalizedString("确定要删除这篇日记吗？此操作无法撤销。", comment: "Delete confirmation"))
+            }
+            .alert(
+                NSLocalizedString("speech.permission.settings.title", comment: "Speech permission settings alert title"),
+                isPresented: $showSpeechSettingsAlert
+            ) {
+                Button(NSLocalizedString("speech.permission.settings.open", comment: "Open app settings button")) {
+                    openAppSettings()
+                }
+                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
+            } message: {
+                Text(NSLocalizedString("speech.permission.settings.message", comment: "Speech permission settings alert message"))
             }
     }
     
@@ -725,13 +734,12 @@ struct HomeView: View {
         }
     }
     
-    
     @ViewBuilder
     private var recordingsSection: some View {
         // alert(isPresented:) 要 Binding<Bool>,走 `@Bindable` shadow。
         @Bindable var recordingVM = recordingVM
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(recordingVM.audioRecordings) { rec in
+            if let rec = recordingVM.audioRecordings.first {
                 RecordingRow(
                     recording: rec,
                     controller: audioPlaybackController,
@@ -820,7 +828,7 @@ struct HomeView: View {
         // 按 idx 排序,只保留压缩成功的 (item, data) 对。
         let successful: [(PhotosPickerItem, Data)] = indexed
             .sorted { $0.0 < $1.0 }
-            .compactMap { (i, data) -> (PhotosPickerItem, Data)? in
+            .compactMap { i, data -> (PhotosPickerItem, Data)? in
                 guard let data else { return nil }
                 return (items[i], data)
             }
@@ -842,7 +850,11 @@ struct HomeView: View {
     private struct SendSnapshot {
         let text: String
         let audio: String?
+        // 失败回滚时,Recording 要带回真实时长,不然 audio row 会显示 0:00
+        // 即便文件还在。原始 Recording.duration 来自 recorder.duration,这里同步快照下来。
+        let audioDuration: TimeInterval
         let images: [Data]
+        let photos: [PhotosPickerItem]
         let mood: Double
     }
 
@@ -869,7 +881,9 @@ struct HomeView: View {
                 let captured = SendSnapshot(
                     text: inputVM.inputText,
                     audio: recordingVM.currentAudioFileName,
+                    audioDuration: recordingVM.audioRecordings.first?.duration ?? 0,
                     images: photoVM.selectedImages,
+                    photos: photoVM.selectedPhotos,
                     mood: inputVM.moodValue
                 )
 
@@ -895,7 +909,9 @@ struct HomeView: View {
 
             let textToSend = snapshot.text
             let audioToSend = snapshot.audio
+            let audioDurationToRestore = snapshot.audioDuration
             let imagesToSend = snapshot.images
+            let photosToSend = snapshot.photos
             var finalMoodValue = snapshot.mood
 
             // 2. 执行AI情绪分析（基于 snapshot 的文本，只调用一次）
@@ -932,7 +948,25 @@ struct HomeView: View {
             Task { await loadContextPrompts() }
 
             // 等落库真正完成再亮"完成"状态，避免按钮骗人。
-            await saveTask.value
+            let didSave = await saveTask.value
+            guard didSave else {
+                await MainActor.run {
+                    withAnimation(AnimationConfig.smoothTransition) {
+                        inputVM.inputText = textToSend
+                        inputVM.sendButtonState = .idle
+                        inputVM.isSending = false
+                        inputVM.revealedMood = nil
+                        inputVM.spectrumDisplayState = .idle
+                        recordingVM.currentAudioFileName = audioToSend
+                        recordingVM.audioRecordings = audioToSend.map {
+                            [Recording(id: $0, fileName: $0, duration: audioDurationToRestore)]
+                        } ?? []
+                        photoVM.selectedImages = imagesToSend
+                        photoVM.selectedPhotos = photosToSend
+                    }
+                }
+                return
+            }
 
             // 7. 完成动画 → 重置状态
             await MainActor.run {
@@ -962,7 +996,7 @@ struct HomeView: View {
             HStack {
                 Image(systemName: "photo.stack")
                     .foregroundColor(.blue)
-                Text(photoVM.selectedImages.count == 1 ? NSLocalizedString("1张照片", comment: "") : String(format: NSLocalizedString("%d张照片", comment: ""), photoVM.selectedImages.count))
+                Text(photoCountLabel)
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
@@ -977,6 +1011,7 @@ struct HomeView: View {
                     ForEach(photoVM.selectedImages, id: \.self) { data in
                         InputPhotoThumbnail(
                             data: data,
+                            dataID: data.hashValue,
                             onRemove: {
                                 withAnimation(AnimationConfig.stiffSpring) {
                                     // 按内容查当前 index —— closure 捕获的 index 在
@@ -1000,11 +1035,12 @@ struct HomeView: View {
     
     // MARK: - Core Data 操作
     
-    private func addEntry(text: String, audioFileName: String?, moodValue: Double? = nil, images: [Data] = []) async {
+    private func addEntry(text: String, audioFileName: String?, moodValue: Double? = nil, images: [Data] = []) async -> Bool {
         // 立即保存日记（不等待标题生成），标题异步生成
         let finalMoodValue = moodValue ?? 0.5
         let entryID = UUID()
         var savedEntryID: UUID?
+        var didSave = false
 
         // 把磁盘 I/O、CloudKit blob 编码全部挪到非主线程，主线程只做 Core Data 字段赋值 + save。
         // 之前这些都挤在 `await MainActor.run { ... }` 里，附件多一点 UI 就会卡。
@@ -1017,7 +1053,6 @@ struct HomeView: View {
         await MainActor.run {
             let newEntry = DiaryEntry(context: viewContext)
             newEntry.id = entryID
-            savedEntryID = entryID
             newEntry.date = Date()
             newEntry.text = text
             newEntry.moodValue = finalMoodValue
@@ -1038,11 +1073,15 @@ struct HomeView: View {
 
             do {
                 try viewContext.save()
+                savedEntryID = entryID
+                didSave = true
                 Log.info("[HomeView] 日记已保存，标题稍后生成", category: .ui)
             } catch {
                 Log.error("[HomeView] 保存日记失败: \(error)", category: .ui)
             }
         }
+
+        guard didSave else { return false }
 
         // 异步生成摘要、主题、embedding（Phase 3 × Phase 2 融合）
         // **Stale-write guard**：用户可能在 AI 请求返回前就打开这条日记编辑了，
@@ -1073,11 +1112,16 @@ struct HomeView: View {
                     if let vector = embedding {
                         entry.setEmbedding(vector)
                     }
-                    try? viewContext.save()
-                    Log.info("[HomeView] 摘要+主题+索引已更新: themes=\(themes.count), hasEmbedding=\(embedding != nil)", category: .ai)
+                    do {
+                        try viewContext.save()
+                        Log.info("[HomeView] 摘要+主题+索引已更新: themes=\(themes.count), hasEmbedding=\(embedding != nil)", category: .ai)
+                    } catch {
+                        Log.error("[HomeView] AI 写回保存失败: \(error)", category: .ai)
+                    }
                 }
             }
         }
+        return true
     }
 
     // MARK: - addEntry helpers (off-main I/O)
@@ -1094,13 +1138,17 @@ struct HomeView: View {
                let audioData = try? Data(contentsOf: localURL),
                let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
                 let audioDir = iCloudURL.appendingPathComponent("Documents/LumoryAudio")
-                if !FileManager.default.fileExists(atPath: audioDir.path) {
-                    try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
-                }
                 let iCloudAudioURL = audioDir.appendingPathComponent(audioFileName)
-                try? audioData.write(to: iCloudAudioURL)
-                try? FileManager.default.removeItem(at: localURL)
-                Log.info("[HomeView] Saved audio to iCloud: \(audioFileName)", category: .ui)
+                do {
+                    if !FileManager.default.fileExists(atPath: audioDir.path) {
+                        try FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
+                    }
+                    try audioData.write(to: iCloudAudioURL, options: .atomic)
+                    try? FileManager.default.removeItem(at: localURL)
+                    Log.info("[HomeView] Saved audio to iCloud: \(audioFileName)", category: .ui)
+                } catch {
+                    Log.error("[HomeView] Audio iCloud write failed, keeping local copy \(audioFileName): \(error)", category: .ui)
+                }
             }
 
             return audioFileName
@@ -1127,28 +1175,12 @@ struct HomeView: View {
         }.value
     }
 
-    /// 后台线程把图片压缩后 NSKeyedArchiver 编码成 Data，落库时直接赋给 `imagesData`。
+    /// 后台线程把已压缩的图片 NSKeyedArchiver 编码成 Data，落库时直接赋给 `imagesData`。
     /// 替代原来 `saveImagesForSync`（同步版）在 MainActor 里跑的重活。
     private static func encodeImagesForSyncOffMain(images: [Data]) async -> Data? {
         guard !images.isEmpty else { return nil }
-        // **顺序保持**：TaskGroup 的 `for await` 按**完成顺序**yield 结果，不是提交顺序。
-        // compressImageData 根据像素量挑 JPEG quality，大图慢、小图快——直接 append 会让 blob
-        // 顺序被打乱。用户选 [A, B, C]，blob 里可能是 [B, C, A]；CloudKit 同步到另一台设备 /
-        // 重装后，`loadAllImageDataAsync` 优先读 blob，用户看到的图片顺序跟选择时不一样、
-        // 且跟 `imageFileNames` 的文件序不一致（永久错位）。
-        // 加索引后按 index 落位，保证输出与输入顺序一致。
-        let compressed = await withTaskGroup(of: (Int, Data).self, returning: [Data].self) { group in
-            for (idx, imageData) in images.enumerated() {
-                group.addTask { (idx, DiaryEntry.compressImageData(imageData)) }
-            }
-            var buffer = [Data?](repeating: nil, count: images.count)
-            for await (idx, data) in group {
-                buffer[idx] = data
-            }
-            return buffer.compactMap { $0 }
-        }
         do {
-            let encoded = try NSKeyedArchiver.archivedData(withRootObject: compressed, requiringSecureCoding: false)
+            let encoded = try NSKeyedArchiver.archivedData(withRootObject: images, requiringSecureCoding: false)
             Log.info("[HomeView] Encoded \(images.count) images for sync, total size: \(encoded.count) bytes", category: .ui)
             return encoded
         } catch {
@@ -1191,9 +1223,14 @@ struct HomeView: View {
         // 同时 `@FetchRequest` 已关 animation，`deleteEntry` 里的 `withAnimation` 独立生效，
         // 不再和 FetchRequest 内建动画打架。500 条日记 shuffle 时子视图 @State（如图片 thumbnail 解码）
         // 也不会因索引重排而整列重建。
-        let lastIndex = entries.count - 1
-        ForEach(Array(entries.enumerated()), id: \.element.objectID) { idx, entry in
-            timelineRow(entry: entry, isFirst: idx == 0, isLast: idx == lastIndex)
+        let firstID = entries.first?.objectID
+        let lastID = entries.last?.objectID
+        ForEach(entries, id: \.objectID) { entry in
+            timelineRow(
+                entry: entry,
+                isFirst: entry.objectID == firstID,
+                isLast: entry.objectID == lastID
+            )
         }
     }
 
@@ -1290,30 +1327,44 @@ struct HomeView: View {
     private static var cachedWeekdayFormatter: DateFormatter?
     private static var cachedMonthDayFormatter: DateFormatter?
     private static var cachedLocale: String = ""
+    private static let relativeDateFormatterLock = NSLock()
     private static let timeOnlyFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return f
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
     }()
+
+    private var photoCountLabel: String {
+        if photoVM.selectedImages.count == 1 {
+            return NSLocalizedString("1张照片", comment: "")
+        }
+        return String(format: NSLocalizedString("%d张照片", comment: ""), photoVM.selectedImages.count)
+    }
 
     private func relativeDateLabel(_ date: Date?) -> String {
         guard let date else { return "" }
         if cal.isDateInToday(date) { return NSLocalizedString("今天", comment: "Today") }
         if cal.isDateInYesterday(date) { return NSLocalizedString("昨天", comment: "Yesterday") }
         let days = cal.dateComponents([.day], from: cal.startOfDay(for: date), to: cal.startOfDay(for: Date())).day ?? 0
+        return Self.relativeDateString(for: date, days: days, language: appLanguage)
+    }
+
+    private static func relativeDateString(for date: Date, days: Int, language: String) -> String {
+        relativeDateFormatterLock.lock()
+        defer { relativeDateFormatterLock.unlock() }
         // 按 appLanguage 缓存两个 formatter；语言变了重建
-        if Self.cachedLocale != appLanguage {
-            Self.cachedLocale = appLanguage
+        if cachedLocale != language {
+            cachedLocale = language
             let weekday = DateFormatter()
-            weekday.locale = Locale(identifier: appLanguage)
+            weekday.locale = Locale(identifier: language)
             weekday.dateFormat = "EEEE"
-            Self.cachedWeekdayFormatter = weekday
+            cachedWeekdayFormatter = weekday
             let monthDay = DateFormatter()
-            monthDay.locale = Locale(identifier: appLanguage)
+            monthDay.locale = Locale(identifier: language)
             monthDay.setLocalizedDateFormatFromTemplate("MMMd")
-            Self.cachedMonthDayFormatter = monthDay
+            cachedMonthDayFormatter = monthDay
         }
-        let formatter = days < 7 ? Self.cachedWeekdayFormatter : Self.cachedMonthDayFormatter
+        let formatter = days < 7 ? cachedWeekdayFormatter : cachedMonthDayFormatter
         return formatter?.string(from: date) ?? ""
     }
 
@@ -1399,6 +1450,12 @@ struct HomeView: View {
                 Log.info("[HomeView transcriptionTask] Transcription completed, mood analysis will happen on send.", category: .ui)
             } else {
                 Log.error("[HomeView transcriptionTask] 转录失败或返回nil", category: .ui)
+                let failure = transcriber.lastFailure
+                if failure?.shouldOfferSettings == true {
+                    await MainActor.run {
+                        showSpeechSettingsAlert = true
+                    }
+                }
             }
             Log.info("[HomeView handleStopRecording Task END] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
         }
@@ -1485,6 +1542,13 @@ struct HomeView: View {
     private func hideKeyboard() {
         #if canImport(UIKit)
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
+    }
+
+    private func openAppSettings() {
+        #if canImport(UIKit)
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
         #endif
     }
 
@@ -1922,17 +1986,17 @@ struct RecordingRow: View {
     }
 }
 
-
 // MARK: - Input photo thumbnail (lazy decode + cache)
 //
 // 抽出独立子视图避免父视图(HomeView)body 重 eval 时反复 `UIImage(data:)` 解码 9 张图。
 // 之前每输入一个字符就触发 9 次解码,选完照片后输入卡卡得没法用。
 //
-// 内部用 .task(id: data) 把 UIImage 解码挪到 Task.detached 后台,完成后存到 @State。
+// 内部用 .task(id: dataID) 把 UIImage 解码挪到 Task.detached 后台,完成后存到 @State。
 // data 变了(新一组照片)才重新解码。
 
 struct InputPhotoThumbnail: View {
     let data: Data
+    let dataID: Int
     let onRemove: () -> Void
 
     #if canImport(UIKit)
@@ -1974,7 +2038,7 @@ struct InputPhotoThumbnail: View {
             .buttonStyle(PlainButtonStyle())
             .padding(4)
         }
-        .task(id: data) {
+        .task(id: dataID) {
             // detached → 解码不占主线程,选 9 张图后输入框立刻能用,缩略图陆续浮上来。
             let bytes = data
             let image = await Task.detached(priority: .userInitiated) {
@@ -1996,6 +2060,15 @@ struct DiaryPreviewView: View {
     let onTap: () -> Void
 
     private let cal = Calendar.current
+    private static let dateFormatterLock = NSLock()
+    private static var cachedWeekdayFormatter: DateFormatter?
+    private static var cachedMonthDayFormatter: DateFormatter?
+    private static var cachedLocale: String = ""
+    private static let timeOnlyFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
 
     var body: some View {
         // 确保 entry 仍然有效
@@ -2088,20 +2161,32 @@ struct DiaryPreviewView: View {
         if cal.isDateInToday(date) { return NSLocalizedString("今天", comment: "Today") }
         if cal.isDateInYesterday(date) { return NSLocalizedString("昨天", comment: "Yesterday") }
         let days = cal.dateComponents([.day], from: cal.startOfDay(for: date), to: cal.startOfDay(for: Date())).day ?? 0
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: appLanguage)
-        if days < 7 {
-            formatter.dateFormat = "EEEE"
-        } else {
-            formatter.setLocalizedDateFormatFromTemplate("MMMd")
-        }
-        return formatter.string(from: date)
+        return Self.relativeDateString(for: date, days: days, language: appLanguage)
     }
 
     private func timeLabel(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter.string(from: date)
+        Self.dateFormatterLock.lock()
+        defer { Self.dateFormatterLock.unlock() }
+        return Self.timeOnlyFormatter.string(from: date)
+    }
+
+    private static func relativeDateString(for date: Date, days: Int, language: String) -> String {
+        dateFormatterLock.lock()
+        defer { dateFormatterLock.unlock() }
+        if cachedLocale != language {
+            cachedLocale = language
+            let weekday = DateFormatter()
+            weekday.locale = Locale(identifier: language)
+            weekday.dateFormat = "EEEE"
+            cachedWeekdayFormatter = weekday
+
+            let monthDay = DateFormatter()
+            monthDay.locale = Locale(identifier: language)
+            monthDay.setLocalizedDateFormatFromTemplate("MMMd")
+            cachedMonthDayFormatter = monthDay
+        }
+        let formatter = days < 7 ? cachedWeekdayFormatter : cachedMonthDayFormatter
+        return formatter?.string(from: date) ?? ""
     }
 
     private func cleanedSummary(_ raw: String) -> String {

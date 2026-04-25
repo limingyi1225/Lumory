@@ -185,9 +185,7 @@ struct CalendarMonthModule: View {
     }
 
     private func accessibilityLabel(for date: Date, mood: Double?, isToday: Bool) -> String {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        var base = f.string(from: date)
+        var base = date.formatted(date: .abbreviated, time: .omitted)
         if isToday {
             base += "，" + NSLocalizedString("今天", comment: "Today a11y")
         }
@@ -244,11 +242,11 @@ struct CalendarMonthModule: View {
     // MARK: Month helpers
 
     private func changeMonth(by value: Int) {
-        guard let m = calendar.date(byAdding: .month, value: value, to: displayedMonth) else { return }
+        guard let month = calendar.date(byAdding: .month, value: value, to: displayedMonth) else { return }
         #if canImport(UIKit)
         HapticManager.shared.click()
         #endif
-        displayedMonth = m
+        displayedMonth = month
     }
 
     private var canGoBack: Bool {
@@ -290,8 +288,8 @@ struct CalendarMonthModule: View {
     }
 
     private static let monthYearFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.setLocalizedDateFormatFromTemplate("yMMMM")
-        return f
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("yMMMM")
+        return formatter
     }()
 }

@@ -151,11 +151,10 @@ struct ThemeCard: View {
             let height = geo.size.height
             let stepX = values.count > 1 ? width / CGFloat(values.count - 1) : width
             Path { path in
-                for (i, v) in values.enumerated() {
+                for (i, value) in values.enumerated() {
                     let x = CGFloat(i) * stepX
-                    let y = height * (1 - CGFloat(v))
-                    if i == 0 { path.move(to: CGPoint(x: x, y: y)) }
-                    else { path.addLine(to: CGPoint(x: x, y: y)) }
+                    let y = height * (1 - CGFloat(value))
+                    if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
                 }
             }
             .stroke(Color.moodSpectrum(value: theme.avgMood), lineWidth: 2)

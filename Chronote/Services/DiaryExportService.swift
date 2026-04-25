@@ -3,7 +3,6 @@ import CoreData
 
 /// Service to handle exporting diary entries to a text file.
 class DiaryExportService {
-
     /// Errors raised when creating an export file.
     enum ExportError: Error {
         /// Disk is full / out of space (`NSFileWriteOutOfSpaceError`, `ENOSPC`, etc.).
@@ -46,7 +45,7 @@ class DiaryExportService {
             lines.append("📅 \(dateFormatter.string(from: entryDate))")
 
             // Mood indicator
-            let moodDescription = moodEmoji(for: entry.moodValue)
+            let moodDescription = MoodLabels.localizedExportDescription(for: entry.moodValue)
             lines.append(String(format: NSLocalizedString("心情: %@", comment: ""), moodDescription))
 
             // Summary if available
@@ -66,23 +65,6 @@ class DiaryExportService {
         lines.append(NSLocalizedString("--- 导出结束 ---", comment: "Export end"))
 
         return lines.joined(separator: "\n")
-    }
-
-    /// Returns an emoji representing the mood value.
-    private static func moodEmoji(for value: Double) -> String {
-        switch value {
-        case 0..<0.2:
-            return "😢 " + NSLocalizedString("很差", comment: "")
-        case 0.2..<0.4:
-            // "较差" matches the key in Localizable.strings better than "不好"
-            return "😕 " + NSLocalizedString("较差", comment: "")
-        case 0.4..<0.6:
-            return "😐 " + NSLocalizedString("一般", comment: "")
-        case 0.6..<0.8:
-            return "🙂 " + NSLocalizedString("不错", comment: "")
-        default:
-            return "😊 " + NSLocalizedString("很好", comment: "")
-        }
     }
 
     /// Creates a persistent file with the export content under
@@ -216,7 +198,7 @@ class DiaryExportService {
     /// Generates a date string suitable for file names.
     private static func formattedDateForFileName() -> String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HHmmss"
+        formatter.dateFormat = "yyyy-MM-dd_HHmmss_SSS"
         return formatter.string(from: Date())
     }
 }

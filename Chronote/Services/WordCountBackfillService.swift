@@ -11,7 +11,6 @@ import CoreData
 /// 没有 flag——因为 CloudKit pull 进来的老 entries 可能在任意时间点抵达本地；一旦抵达，我们
 /// 仍然需要算字数。没 pending 时 fetch 返回空数组，for / save 都不跑，代价只是一次 SQL 扫描。
 enum WordCountBackfillService {
-
     /// 在 App 启动后 + 每次收到 `NSPersistentStoreRemoteChange` 时调。
     /// 走后台 context，不阻塞主线程；没 pending 时 fetch 返回空数组、for / save 都跳过。
     static func backfillIfNeeded() async {
@@ -36,6 +35,7 @@ enum WordCountBackfillService {
                 // 这样哪怕用户日记里 *真的* 就 0 字（比如只有图片或音频），我们也不误报。
                 // 不用 predicate 过滤 text，因为 Core Data text IS NULL / EMPTY 在 SQLite 下要写两段。
                 request.predicate = NSPredicate(format: "wordCount == 0")
+                request.fetchBatchSize = 200
 
                 var processed = 0
                 do {

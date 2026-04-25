@@ -11,21 +11,10 @@ import CoreData
 struct ContextPrompt: Identifiable, Equatable {
     let id = UUID()
     let text: String
-    let kind: Kind
-
-    enum Kind: Equatable {
-        case themeFollowUp(String)   // 紧接昨天提到的主题
-        case themeLapse(String)      // 多久没写某个主题
-        case moodSwing                // 最近情绪变化
-        case timeOfDay                // 早/午/晚问候
-        case streak                   // 连续几天的鼓励
-        case blank                    // 空白提示（最兜底）
-    }
 }
 
 @available(iOS 15.0, macOS 12.0, *)
 final class ContextPromptGenerator {
-
     static let shared = ContextPromptGenerator()
 
     private let persistence: PersistenceController
@@ -79,10 +68,7 @@ final class ContextPromptGenerator {
 
         // 至少一条 blank 兜底
         if prompts.isEmpty {
-            prompts.append(ContextPrompt(
-                text: NSLocalizedString("今天发生了什么？", comment: "Blank prompt"),
-                kind: .blank
-            ))
+            prompts.append(ContextPrompt(text: NSLocalizedString("今天发生了什么？", comment: "Blank prompt")))
         }
 
         return prompts
@@ -98,10 +84,7 @@ final class ContextPromptGenerator {
         // 挑一个有辨识度的主题（不是"情绪"这种太泛的）
         let goodThemes = themes.filter { $0 != NSLocalizedString("情绪", comment: "") }
         guard let theme = goodThemes.first else { return nil }
-        return ContextPrompt(
-            text: String(format: NSLocalizedString("昨天你提到 %@，今天感觉如何？", comment: "Yesterday theme follow-up"), theme),
-            kind: .themeFollowUp(theme)
-        )
+        return ContextPrompt(text: String(format: NSLocalizedString("昨天你提到 %@，今天感觉如何？", comment: "Yesterday theme follow-up"), theme))
     }
 
     private func lapsePrompt(recentEntries: [Snapshot], olderEntries: [Snapshot], calendar: Calendar, now: Date) -> ContextPrompt? {
@@ -118,10 +101,7 @@ final class ContextPromptGenerator {
         let days = calendar.dateComponents([.day], from: lastSeen, to: now).day ?? 0
         guard days >= lapseDays else { return nil }
 
-        return ContextPrompt(
-            text: String(format: NSLocalizedString("已经 %d 天没提到 %@ 了，最近怎么样？", comment: "Theme lapse"), days, theme),
-            kind: .themeLapse(theme)
-        )
+        return ContextPrompt(text: String(format: NSLocalizedString("已经 %d 天没提到 %@ 了，最近怎么样？", comment: "Theme lapse"), days, theme))
     }
 
     /// 从日记里"长出来"的人/物/事 prompt：扫描 recent + older 的 themes，
@@ -162,10 +142,7 @@ final class ContextPromptGenerator {
         // 每次冷启动落到不同模板上，"稳定模板/主题"意图就破了。改用 FNV-1a 32-bit 拿
         // 进程无关的确定性 hash。
         let idx = Int(Self.stableHash(theme) % UInt32(templates.count))
-        return ContextPrompt(
-            text: String(format: templates[idx], theme),
-            kind: .themeFollowUp(theme)
-        )
+        return ContextPrompt(text: String(format: templates[idx], theme))
     }
 
     private func moodSwingPrompt(recentEntries: [Snapshot]) -> ContextPrompt? {
@@ -173,10 +150,7 @@ final class ContextPromptGenerator {
         let moods = recentEntries.map { $0.moodValue }
         let range = (moods.max() ?? 0.5) - (moods.min() ?? 0.5)
         guard range >= 0.5 else { return nil }
-        return ContextPrompt(
-            text: NSLocalizedString("最近几天情绪有点起伏，现在的你怎么样？", comment: "Mood swing"),
-            kind: .moodSwing
-        )
+        return ContextPrompt(text: NSLocalizedString("最近几天情绪有点起伏，现在的你怎么样？", comment: "Mood swing"))
     }
 
     private func timeOfDayPrompt(now: Date) -> ContextPrompt {
@@ -194,16 +168,13 @@ final class ContextPromptGenerator {
         default:
             text = NSLocalizedString("夜深了，今天最触动你的一件事是？", comment: "Late night prompt")
         }
-        return ContextPrompt(text: text, kind: .timeOfDay)
+        return ContextPrompt(text: text)
     }
 
     private func streakPrompt(recentEntries: [Snapshot], calendar: Calendar, now: Date) -> ContextPrompt? {
         let streak = Self.computeStreak(entryDates: recentEntries.map { $0.date }, calendar: calendar, now: now)
         guard streak >= 3 else { return nil }
-        return ContextPrompt(
-            text: String(format: NSLocalizedString("已经连续 %d 天了，今天也写几笔吧", comment: "Streak prompt"), streak),
-            kind: .streak
-        )
+        return ContextPrompt(text: String(format: NSLocalizedString("已经连续 %d 天了，今天也写几笔吧", comment: "Streak prompt"), streak))
     }
 
     /// 计算 streak。**从 today 或 yesterday 起步**：以前 cursor 固定从 today 开始，
@@ -234,12 +205,12 @@ final class ContextPromptGenerator {
 
     /// FNV-1a 32-bit hash. 进程无关、确定性——用来给同一 theme 永远选到同一条模板，
     /// 替代 Swift 标准库被随机化的 `String.hashValue`。
-    static func stableHash(_ s: String) -> UInt32 {
-        var h: UInt32 = 2_166_136_261
-        for b in s.utf8 {
-            h = (h ^ UInt32(b)) &* 16_777_619
+    static func stableHash(_ string: String) -> UInt32 {
+        var hash: UInt32 = 2_166_136_261
+        for byte in string.utf8 {
+            hash = (hash ^ UInt32(byte)) &* 16_777_619
         }
-        return h
+        return hash
     }
 
     // MARK: - Data

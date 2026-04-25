@@ -37,7 +37,7 @@ final class HomeInputViewModel {
     var sendButtonState: SendButtonState = .idle
 
     /// AI 回来的最终 mood,发送完成动画展开 2s 期间用
-    var revealedMood: Double? = nil
+    var revealedMood: Double?
     /// 历史遗留标记,保留给未来 UI(搜了一圈当前没有读点,但和原 `@State` 一起搬过来保证平移)。
     var showMoodReveal: Bool = false
     /// 光谱条的显示状态:idle / analyzing / revealed。原先在 HomeView 里。

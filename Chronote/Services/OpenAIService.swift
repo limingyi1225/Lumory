@@ -4,23 +4,23 @@ import CryptoKit
 
 @available(iOS 15.0, macOS 12.0, *)
 final class OpenAIService: AIServiceProtocol {
-
-    /// 进程内共享实例——后台代理模式下不再需要每次编辑都 new 一个带 apiKey 的对象。
+    /// 进程内共享实例——后台代理模式下不再需要每次编辑都 new 一个网络客户端。
     /// 调用方优先用 `.shared`，避免在 hot-path 上重复初始化。
-    static let shared = OpenAIService(apiKey: "")
+    static let shared = OpenAIService()
 
-    private let apiKey: String
-    // swiftlint:disable:next force_unwrapping
-    // 编译期常量拼接（AppSecrets.backendURL 是硬编码 https URL），URL(string:) 不会失败。
-    private let backendURL = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions")!
+    private static let backendEndpoint = "\(AppSecrets.backendURL)/api/openai/chat/completions"
+    private let backendURL: URL
     private let jsonEncoder = JSONEncoder()
     private let jsonDecoder = JSONDecoder()
 
     // Debounce delay for summarize requests
     private let debounceDelay: TimeInterval = 0.3 // 300ms debounce
 
-    init(apiKey: String) {
-        self.apiKey = apiKey
+    init() {
+        guard let backendURL = URL(string: Self.backendEndpoint) else {
+            preconditionFailure("[OpenAIService] Invalid backend endpoint: \(Self.backendEndpoint)")
+        }
+        self.backendURL = backendURL
     }
 
     // MARK: - Public
@@ -99,10 +99,10 @@ final class OpenAIService: AIServiceProtocol {
     /// 从自由文本里找第一个看起来像 mood 分数的整数（1...100）。
     /// 遇到 4+ 位长数字（比如 `2024` 年份 / 请求 ID / token 计数）时**跳过这个整数剩余位**
     /// 而不是 `break` 退出整个扫描——否则 LLM 响应里夹一个"2024"就把真正的 mood 分数吃掉了。
-    static func firstValidScore(in s: String) -> Int? {
+    static func firstValidScore(in string: String) -> Int? {
         var current = ""
         var skipRestOfNumber = false
-        for ch in s {
+        for ch in string {
             if ch.isNumber {
                 if skipRestOfNumber { continue }
                 current.append(ch)
@@ -114,147 +114,23 @@ final class OpenAIService: AIServiceProtocol {
             } else {
                 skipRestOfNumber = false
                 if !current.isEmpty {
-                    if let n = Int(current), (1...100).contains(n) { return n }
+                    if let number = Int(current), (1...100).contains(number) { return number }
                     current.removeAll()
                 }
             }
         }
-        if let n = Int(current), (1...100).contains(n) { return n }
+        if let number = Int(current), (1...100).contains(number) { return number }
         return nil
     }
 
-    func analyzeAndSummarize(text: String) async -> (summary: String?, mood: Double) {
-        // 同时调用 summarize 和 analyzeMood，避免重复的情绪判断逻辑
-        async let summaryResult = summarize(text: text)
-        async let moodResult = analyzeMood(text: text)
-        return (await summaryResult, await moodResult)
-    }
-
-    /// 根据多条日记生成情绪+内容分析报告，返回完整报告（同步）
-    func generateReport(entries: [DiaryEntry]) async -> String? {
-        Log.info("[OpenAIService] 开始生成情绪报告，日记条目数量: \(entries.count)", category: .ai)
-        guard !entries.isEmpty else { 
-            Log.error("[OpenAIService] 错误：没有日记条目", category: .ai)
-            return nil 
-        }
-        
-        let textBlock = entries.compactMap { entry in
-            // 安全访问Core Data属性，避免CloudKit同步时的编码问题
-            let entryDate = entry.date ?? Date()
-            let entryMood = Int(entry.moodValue * 100)
-            let entrySummary = entry.summary ?? ""
-            let entryText = entry.text ?? ""
-            
-            return "日期: \(entryDate)\n心情分数: \(entryMood)\n摘要: \(entrySummary)\n正文: \(entryText)"
-        }.joined(separator: "\n---\n")
-        
-        Log.info("[OpenAIService] 文本块长度: \(textBlock.count) 字符", category: .ai)
-
-        let prompt = """
-阅读提供的日记条目，并基于内容撰写一份连贯的分析报告。
-# 指南
-- **写作风格与语言**：如果日记是中文的，请用中文进行分析；如果是英文的，请用英文进行分析。通过使用"你 xxxx"而非"他们 xxx"等直接称呼，与读者建立直接联系。确保行文生动有趣，富有吸引力。
-- **定性分析**：描述情感时避免使用数值或定量指标。
-- **主题与模式**：识别反复出现的主题、生活方式模式或情感变化，以加深自我理解。
-- **日期引用**：使用口语化的日期表达方式（如"四月初"），避免使用过于正式的数字格式（如2024-12-1）。
-- **结构**：不包含标题、小标题、引言或结论。使用1-4段落，段落之间用空行分隔。
-# 输出格式
-- 1-6段落的报告（Mac版本总字数不超过800字，其他平台不超过400字）。
-- 每个段落之间用空行（两行换行）分隔。
-- 不得使用括号、破折号，引号，星号，加粗，斜体或其他类似标点符号。
-
-Diary Entries:
-\(textBlock)
-"""
-        // 使用 gpt-5.5 写情绪报告
-        Log.info("[OpenAIService] 开始调用chat方法生成报告", category: .ai)
-        let result = await chat(prompt: prompt,
-                          model: "gpt-5.5",
-                          maxTokens: 4096,
-                          stream: false,
-                          reasoningEffort: "low")
-        Log.info("[OpenAIService] chat方法返回结果: \(result.map { "成功，长度 \($0.count)" } ?? "失败，返回nil")", category: .ai)
-        return result
-    }
-
-    /// 根据安全数据结构生成情绪报告，避免CloudKit同步冲突
-    func generateReportFromData(entries: [DiaryEntryData]) async -> String? {
-        Log.info("[OpenAIService] 开始从安全数据生成情绪报告，条目数量: \(entries.count)", category: .ai)
-        guard !entries.isEmpty else { 
-            Log.error("[OpenAIService] 错误：没有安全数据条目", category: .ai)
-            return nil 
-        }
-        
-        let textBlock = entries.map { entry in
-            "日期: \(entry.date)\n心情分数: \(Int(entry.moodValue * 100))\n摘要: \(entry.summary)\n正文: \(entry.text)"
-        }.joined(separator: "\n---\n")
-        
-        Log.info("[OpenAIService] 安全数据文本块长度: \(textBlock.count) 字符", category: .ai)
-
-        let prompt = """
-阅读提供的日记条目，并基于内容撰写一份连贯的分析报告。
-# 指南
-- **写作风格与语言**：如果日记是中文的，请用中文进行分析；如果是英文的，请用英文进行分析。通过使用"你 xxxx"而非"他们 xxx"等直接称呼，与读者建立直接联系。确保行文生动有趣，富有吸引力。
-- **定性分析**：描述情感时避免使用数值或定量指标。
-- **主题与模式**：识别反复出现的主题、生活方式模式或情感变化，以加深自我理解。
-- **日期引用**：使用口语化的日期表达方式（如"四月初"），避免使用过于正式的数字格式（如2024-12-1）。
-- **结构**：不包含标题、小标题、引言或结论。使用1-4段落，段落之间用空行分隔。
-# 输出格式
-- 1-6段落的报告（不超过1000字）。
-- 每个段落之间用空行（两行换行）分隔。
-- 不得使用括号、破折号，引号，星号，加粗，斜体或其他类似标点符号。
-
-Diary Entries:
-\(textBlock)
-"""
-        // 使用 gpt-5.5 写情绪报告
-        Log.info("[OpenAIService] 开始调用chat方法生成安全数据报告", category: .ai)
-        let result = await chat(prompt: prompt,
-                          model: "gpt-5.5",
-                          maxTokens: 4096,
-                          stream: false,
-                          reasoningEffort: "low")
-        Log.info("[OpenAIService] 安全数据chat方法返回结果: \(result.map { "成功，长度 \($0.count)" } ?? "失败，返回nil")", category: .ai)
-        return result
-    }
-    
-    /// 根据安全数据结构生成情绪报告（流式版本），避免CloudKit同步冲突
-    /// `onChunk` 标 `@MainActor`：所有调用方都要更新 `@Published` / SwiftUI state，
-    /// 如果闭包在后台线程触发 UI 更新，strict concurrency 会直接崩。
-    ///
-    /// 向下兼容形态：保留两参数 (entries:onChunk:) 调用点,但内部升级为 StreamEvent 引擎。
-    /// 需要感知"断流"的 caller 请用下面的 `(entries:onEvent:)` 版本。
-    func generateReportFromData(entries: [DiaryEntryData], onChunk: @escaping @MainActor (String) -> Void) async {
-        await generateReportFromData(entries: entries) { @MainActor event in
-            switch event {
-            case .chunk(let text):
-                onChunk(text)
-            case .truncated(let reason):
-                // 旧 API 没有"区分 truncation"的能力:把本地化的截断说明继续当 chunk 发出去,保持原行为。
-                // 需要 UI 单独渲染 banner 的 caller 应改用 onEvent 版本。
-                onChunk("\n\n" + reason)
-            case .failed(let error):
-                let msg = Self.localizedReportError(error)
-                onChunk(msg)
-            case .done:
-                break
-            }
-        }
-    }
-
     /// 结构化事件版本 —— NarrativeReader / InsightsEngine 用这个,可以区分 chunk vs truncated vs failed。
-    /// 所有事件都在 MainActor 上投递,和旧 onChunk 签名一致。
+    /// 所有事件都在 MainActor 上投递。
     func generateReportFromData(entries: [DiaryEntryData], onEvent: @escaping @MainActor (StreamEvent) -> Void) async {
         Log.info("[OpenAIService] 开始从安全数据生成流式情绪报告，条目数量: \(entries.count)", category: .ai)
         guard !entries.isEmpty else {
             await MainActor.run { onEvent(.done) }
             return
         }
-
-        // **用户真正的语言**：从日记原文里测。之前用 `prompt.contains("中文")` 判定，但 prompt
-        // 模板里本身就硬写了"如果日记是中文的…"这种中文字样 → `contains("中文")` 恒真，英文
-        // 用户报错时也看到中文错误提示。改成聚合原文再测 CJK 字符占比。
-        let isChinese = entries.contains { $0.text.containsChinese }
 
         let textBlock = entries.map { entry in
             "日期: \(entry.date)\n心情分数: \(Int(entry.moodValue * 100))\n摘要: \(entry.summary)\n正文: \(entry.text)"
@@ -295,6 +171,11 @@ Diary Entries:
             reasoning_effort: "low"
         )
 
+        guard !AppSecrets.appSharedSecret.isEmpty else {
+            await MainActor.run { onEvent(.failed(Self.missingSharedSecretError())) }
+            return
+        }
+
         let url = backendURL
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -313,11 +194,12 @@ Diary Entries:
         // 一旦断流后 NetworkRetryHelper 整段回放，生成的故事会出现前缀重复。一次成功 yield 过 chunk 后
         // 不允许重试，直接吐截断标记收尾。
         var hasEmittedAnyChunk = false
+        var didEmitTerminalStreamEvent = false
         do {
             // singleton method + escaping closure 不用 [weak self]，防 Release -O ARC 假早释放
             try await NetworkRetryHelper.performWithRetry {
                 Log.info("[OpenAIService] 开始安全数据流式请求...", category: .ai)
-                let (bytes, response) = try await URLSession.sslTolerantSession.bytes(for: request)
+                let (bytes, response) = try await URLSession.sharedRetrySession.bytes(for: request)
 
                 if let http = response as? HTTPURLResponse {
                     Log.info("[OpenAIService] 响应状态码: \(http.statusCode)", category: .ai)
@@ -332,9 +214,10 @@ Diary Entries:
                 }
 
                 guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                    let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    let httpResponse = response as? HTTPURLResponse
+                    let statusCode = httpResponse?.statusCode ?? -1
                     Log.error("[OpenAIService] 安全数据流式请求失败，状态码: \(statusCode)", category: .ai)
-                    throw Self.errorForStatus(statusCode)
+                    throw Self.errorForStatus(statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
                 }
                 Log.info("[OpenAIService] 流式请求响应正常，开始处理字节流...", category: .ai)
 
@@ -357,49 +240,42 @@ Diary Entries:
                     // 中途断流：已发过 chunk 就不重试（避免叙事正文前缀重复）；发 truncated 事件后正常返回
                     if hasEmittedAnyChunk {
                         Log.error("[OpenAIService] 报告流式中断; emitting truncation event: \(error)", category: .ai)
-                        let reason = isChinese
-                            ? NSLocalizedString("stream.truncated.report.zh", comment: "Report truncated marker")
-                            : NSLocalizedString("stream.truncated.report.en", comment: "Report truncated marker")
+                        let reason = NSLocalizedString("stream.truncated.report", comment: "Report truncated marker")
+                        didEmitTerminalStreamEvent = true
                         await MainActor.run { onEvent(.truncated(reason: reason)) }
                         return
                     }
                     throw error
                 }
             }
-            await MainActor.run { onEvent(.done) }
+            if !didEmitTerminalStreamEvent {
+                await MainActor.run { onEvent(.done) }
+            }
         } catch {
             Log.error("[OpenAIService] 安全数据流式请求错误: \(error)", category: .ai)
             if hasEmittedAnyChunk {
                 // 已经吐过内容才断 —— 依然归到 truncated（不是致命 failure）
-                let reason = isChinese
-                    ? NSLocalizedString("stream.truncated.report.zh", comment: "Report truncated marker")
-                    : NSLocalizedString("stream.truncated.report.en", comment: "Report truncated marker")
+                let reason = NSLocalizedString("stream.truncated.report", comment: "Report truncated marker")
+                didEmitTerminalStreamEvent = true
                 await MainActor.run { onEvent(.truncated(reason: reason)) }
             } else {
+                didEmitTerminalStreamEvent = true
                 await MainActor.run { onEvent(.failed(error)) }
             }
         }
     }
 
-    /// 从 Error 生成一个"面向用户"的本地化报告错误文案（保持旧 onChunk API 行为不变所用）。
-    fileprivate static func localizedReportError(_ error: Error) -> String {
-        let desc = error.localizedDescription
-        if desc.contains("Could not connect to the server") ||
-           desc.contains("The Internet connection appears to be offline") ||
-           desc.contains("The request timed out") {
-            return String(format: NSLocalizedString("error.stream.noConnection", comment: "Cannot connect to AI service"), "")
-        }
-        return String(format: NSLocalizedString("error.stream.reportGeneric", comment: "Generic error generating report"), desc)
-    }
-
     /// 状态码 → 本地化 NSError(domain: OpenAIService)。统一替换散落各处的硬编码中文错误。
-    fileprivate static func errorForStatus(_ statusCode: Int) -> NSError {
+    fileprivate static func errorForStatus(_ statusCode: Int, retryAfter: String? = nil) -> NSError {
         let message: String
         switch statusCode {
         case 401:
             message = NSLocalizedString("error.backend.auth", comment: "Backend auth failed")
         case 404:
-            message = String(format: NSLocalizedString("error.backend.notFound", comment: "Backend endpoint not found"), AppSecrets.backendURL)
+            message = String(
+                format: NSLocalizedString("error.backend.notFound", comment: "Backend endpoint not found"),
+                AppSecrets.backendURL
+            )
         case 429:
             message = NSLocalizedString("error.backend.rateLimited", comment: "Rate limited")
         case 502:
@@ -413,91 +289,19 @@ Diary Entries:
         default:
             message = String(format: NSLocalizedString("error.backend.generic", comment: "Generic backend error"), statusCode)
         }
-        return NSError(domain: "OpenAIService", code: statusCode, userInfo: [NSLocalizedDescriptionKey: message])
+        var userInfo: [String: Any] = [NSLocalizedDescriptionKey: message]
+        if let retryAfter {
+            userInfo["Retry-After"] = retryAfter
+        }
+        return NSError(domain: "OpenAIService", code: statusCode, userInfo: userInfo)
     }
 
-    func generateReport(entries: [DiaryEntry], onChunk: @escaping @MainActor (String) -> Void) async {
-        guard !entries.isEmpty else { return }
-        // 错误文案走 Localizable.strings,会跟随系统 / App 语言,不再从日记原文判定中/英。
-        let textBlock = entries.compactMap { entry in
-            // 安全访问Core Data属性，避免CloudKit同步时的编码问题
-            let entryDate = entry.date ?? Date()
-            let entryMood = Int(entry.moodValue * 100)
-            let entrySummary = entry.summary ?? ""
-            let entryText = entry.text ?? ""
-            
-            return "日期: \(entryDate)\n心情分数: \(entryMood)\n摘要: \(entrySummary)\n正文: \(entryText)"
-        }.joined(separator: "\n---\n")
-
-        let prompt = """
-阅读提供的日记条目，并基于内容撰写一份连贯的分析报告。
-# 指南
-- **写作风格与语言**：如果日记是中文的，请用中文进行分析；如果是英文的，请用英文进行分析。通过使用"你 xxxx"而非"他们 xxx"等直接称呼，与读者建立直接联系。确保行文生动有趣，富有吸引力。
-- **定性分析**：描述情感时避免使用数值或定量指标。
-- **主题与模式**：识别反复出现的主题、生活方式模式或情感变化，以加深自我理解。
-- **日期引用**：使用口语化的日期表达方式（如"四月初"），避免使用过于正式的数字格式（如2024-12-1）。
-- **结构**：不包含标题、小标题、引言或结论。使用1-4段落，段落之间用空行分隔。
-# 输出格式
-- 1-6段落的报告（Mac版本总字数不超过800字，其他平台不超过400字）。
-- 每个段落之间用空行（两行换行）分隔。
-- 不得使用括号、破折号，引号，星号，加粗，斜体或其他类似标点符号。
-
-Diary Entries:
-\(textBlock)
-"""
-        struct Message: Codable { let role: String; let content: String }
-        struct RequestBody: Codable {
-            let model: String
-            let messages: [Message]
-            let stream: Bool
-            let reasoning_effort: String?
-
-            enum CodingKeys: String, CodingKey { case model, messages, stream, reasoning_effort }
-        }
-        let requestBody = RequestBody(
-            model: "gpt-5.5",
-            messages: [Message(role: "user", content: prompt)],
-            stream: true,
-            reasoning_effort: "low"
+    fileprivate static func missingSharedSecretError() -> NSError {
+        NSError(
+            domain: "OpenAIService",
+            code: 401,
+            userInfo: [NSLocalizedDescriptionKey: "Backend shared secret not configured (xcconfig injection failed)."]
         )
-        // 改为走本地后端代理，不在客户端暴露 Key
-        let url = backendURL
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // 后端鉴权用 shared secret；后端 middleware `requireAppSecret` 会 time-safe compare。
-        request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
-        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
-        request.httpBody = try? jsonEncoder.encode(requestBody)
-
-        do {
-            // 不用 [weak self]：见 embed() 上方注释（Release `-O` ARC lifetime-shortening 咬）
-            try await NetworkRetryHelper.performWithRetry {
-                let (bytes, response) = try await URLSession.sslTolerantSession.bytes(for: request)
-                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                    let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-                    Log.error("[OpenAIService] Streaming request failed:", category: .ai)
-                    Log.info("  URL path: \(request.url?.path ?? "unknown")", category: .ai)
-                    Log.info("  Status Code: \(statusCode)", category: .ai)
-                    // 不再 dump allHeaderFields —— 可能含 Set-Cookie / X-Request-Id 等内部信息。
-                    throw Self.errorForStatus(statusCode)
-                }
-                // 统一走 SSEParser —— 不再 inline `for try await line in bytes.lines`
-                for try await streamResp in SSEParser.parse(
-                    bytes: bytes,
-                    type: OpenAIStreamResponse.self,
-                    decoder: self.jsonDecoder
-                ) {
-                    if let content = streamResp.choices.first?.delta.content, !content.isEmpty {
-                        await MainActor.run { onChunk(content) }
-                    }
-                }
-            }
-        } catch {
-            Log.error("[OpenAIService] Streaming error after retries: \(error)", category: .ai)
-            // 走本地化 —— 不再按日记内容判中/英,Localizable.strings 自己会跟随 App 语言。
-            await MainActor.run { onChunk(Self.localizedReportError(error)) }
-        }
     }
 
     // MARK: - Core
@@ -538,6 +342,11 @@ Diary Entries:
             maxCompletionTokens: maxTokens > 0 ? maxTokens : nil
         )
 
+        guard !AppSecrets.appSharedSecret.isEmpty else {
+            Log.error("[OpenAIService] Backend shared secret not configured", category: .ai)
+            return nil
+        }
+
         // 改为走本地后端代理，不在客户端暴露 Key
         let url = backendURL
         var request = URLRequest(url: url)
@@ -553,11 +362,12 @@ Diary Entries:
             do {
                 // 不用 [weak self]：见 embed() 上方注释
                 return try await NetworkRetryHelper.performWithRetry {
-                    let (bytes, response) = try await URLSession.sslTolerantSession.bytes(for: request)
+                    let (bytes, response) = try await URLSession.sharedRetrySession.bytes(for: request)
                     guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                        let httpResponse = response as? HTTPURLResponse
+                        let statusCode = httpResponse?.statusCode ?? -1
                         Log.info("[OpenAIService] Bad response. Status code: \(statusCode)", category: .ai)
-                        throw Self.errorForStatus(statusCode)
+                        throw Self.errorForStatus(statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
                     }
                     var result = ""
                     // 统一 SSE 解析
@@ -588,20 +398,24 @@ Diary Entries:
                 // 不用 [weak self]：见 embed() 上方注释
                 return try await NetworkRetryHelper.performWithRetry {
                     Log.info("[OpenAIService] 发送网络请求...", category: .ai)
-                    let (data, response) = try await URLSession.sslTolerantSession.data(for: request)
+                    let (data, response) = try await URLSession.sharedRetrySession.data(for: request)
                     guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                         if let httpResponse = response as? HTTPURLResponse {
                             let statusCode = httpResponse.statusCode
-                            _ = httpResponse // 避免 warning
                             // 诊断用最小信息：只 URL path + status + body 长度，不把 body 打进日志（避免泄日记/PII）
                             Log.error("[OpenAIService] Backend request failed — path=\(request.url?.path ?? "?") status=\(statusCode) bodyLen=\(data.count)", category: .ai)
-                            throw Self.errorForStatus(statusCode)
+                            throw Self.errorForStatus(statusCode, retryAfter: httpResponse.value(forHTTPHeaderField: "Retry-After"))
                         } else {
                             Log.info("[OpenAIService] Bad response. Not an HTTPURLResponse. Response: \(response)", category: .ai)
                             throw NSError(
                                 domain: "OpenAIService",
                                 code: -1,
-                                userInfo: [NSLocalizedDescriptionKey: NSLocalizedString("error.backend.invalidResponse", comment: "Invalid response from backend")]
+                                userInfo: [
+                                    NSLocalizedDescriptionKey: NSLocalizedString(
+                                        "error.backend.invalidResponse",
+                                        comment: "Invalid response from backend"
+                                    )
+                                ]
                             )
                         }
                     }
@@ -610,7 +424,12 @@ Diary Entries:
                         throw NSError(
                             domain: "OpenAIService",
                             code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: NSLocalizedString("error.backend.emptyContent", comment: "No content in response")]
+                            userInfo: [
+                                NSLocalizedDescriptionKey: NSLocalizedString(
+                                    "error.backend.emptyContent",
+                                    comment: "No content in response"
+                                )
+                            ]
                         )
                     }
                     return content
@@ -677,11 +496,12 @@ Diary Entries:
         request.httpBody = try jsonEncoder.encode(requestBody)
 
         return try await NetworkRetryHelper.performWithRetry {
-            let (data, response) = try await URLSession.sslTolerantSession.data(for: request)
+            let (data, response) = try await URLSession.sharedRetrySession.data(for: request)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                let httpResponse = response as? HTTPURLResponse
+                let statusCode = httpResponse?.statusCode ?? -1
                 Log.error("[OpenAIService] chatThrowing failed — status=\(statusCode) bodyLen=\(data.count)", category: .ai)
-                throw Self.errorForStatus(statusCode)
+                throw Self.errorForStatus(statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
             }
             let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
             guard let content = decoded.choices.first?.message.content
@@ -773,66 +593,6 @@ private final class ResultBox<T> {
     }
 }
 
-// MARK: - CloudKit-isolated report generation
-//
-// 这两个入口先在隔离的只读 Core Data 栈里把 `[DiaryEntry]` 提取成纯值类型
-// `[DiaryEntryData]`，再调 `generateReportFromData` 生成报告。目的是避免
-// 主 viewContext 在报告生成过程中被 CloudKit 同步触发的 fault/merge 打断。
-@available(iOS 15.0, macOS 12.0, *)
-extension OpenAIService {
-
-    func generateReport(from entries: [DiaryEntry], dateRange: ClosedRange<Date>) async -> String? {
-        let safe = await Self.extractDataSafely(from: entries, dateRange: dateRange)
-        guard !safe.isEmpty else { return nil }
-        // `[weak self]` + 空返 guard：Task.detached 原先强持 self 直到 gpt-5.5 流返完，
-        // 视图侧 owning 了这个 service 的 VM 被释放后 service 仍被挂住。
-        return await Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self else { return nil }
-            return await self.generateReportFromData(entries: safe)
-        }.value
-    }
-
-    func generateReport(
-        from entries: [DiaryEntry],
-        dateRange: ClosedRange<Date>,
-        onChunk: @escaping @MainActor (String) -> Void
-    ) async {
-        let safe = await Self.extractDataSafely(from: entries, dateRange: dateRange)
-        guard !safe.isEmpty else {
-            await MainActor.run { onChunk(NSLocalizedString("error.report.noValidEntries", comment: "No valid entries found to analyze")) }
-            return
-        }
-        await Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self else { return }
-            await self.generateReportFromData(entries: safe, onChunk: onChunk)
-        }.value
-    }
-
-    private static func extractDataSafely(
-        from entries: [DiaryEntry],
-        dateRange: ClosedRange<Date>
-    ) async -> [DiaryEntryData] {
-        // **不再** 开一个独立的 NSPersistentContainer 指向同一个 SQLite 文件。
-        // 两个容器共打 WAL 模式下的同一文件会和 NSPersistentCloudKitContainer 的镜像
-        // 抢 `-wal` / `-shm` 锁，少数情况下触发 torn read / 加载失败（静默返回 [] → 报告为空）。
-        // 改走主容器的 background context，CoreData 负责把读路径序列化到自己的 WAL 管理里。
-        let objectIDs = entries.map { $0.objectID }
-        let bg = PersistenceController.shared.container.newBackgroundContext()
-        return await withCheckedContinuation { continuation in
-            bg.perform {
-                var safeData: [DiaryEntryData] = []
-                for objectID in objectIDs {
-                    guard let entry = try? bg.existingObject(with: objectID) as? DiaryEntry else { continue }
-                    let entryDate = entry.date ?? Date()
-                    guard dateRange.contains(entryDate) else { continue }
-                    safeData.append(DiaryEntryData.from(fetchedEntry: entry))
-                }
-                continuation.resume(returning: safeData)
-            }
-        }
-    }
-}
-
 extension String {
     var containsChinese: Bool {
         return range(of: "[\u{4E00}-\u{9FFF}]", options: .regularExpression) != nil
@@ -857,6 +617,27 @@ extension String {
 // 调用方负责把 bytes 喂给我,我负责拆出 Decodable 对象流。
 @available(iOS 15.0, macOS 12.0, *)
 enum SSEParser {
+    enum ParserError: LocalizedError {
+        case missingDone
+        // 故意只带 byte 长度,不存 raw payload —— payload 可能含日记内容 / AI 响应碎片,
+        // 进了 LocalizedError 就会被 InsightsEngine / NarrativeReader 当 failure 文案
+        // 直接渲染给用户。upstreamError 的 message 由后端 OpenAIStreamErrorEnvelope 提供,
+        // 是控制平面的错误描述,不是 SSE 数据内容,所以保留。
+        case invalidEvent(byteCount: Int)
+        case upstreamError(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingDone:
+                return "SSE stream ended before [DONE]."
+            case .invalidEvent(let byteCount):
+                return "SSE stream contained an invalid event (\(byteCount) bytes)."
+            case .upstreamError(let message):
+                return message
+            }
+        }
+    }
+
     /// 解析 SSE 字节流到 Decodable 对象流。遇到 `[DONE]` 或自然结束就 finish;
     /// 网络异常会 throw (caller 自己决定重试 / 吐 truncated 标记)。
     static func parse<T: Decodable>(
@@ -864,25 +645,63 @@ enum SSEParser {
         type: T.Type,
         decoder: JSONDecoder
     ) -> AsyncThrowingStream<T, Error> {
+        parse(lineStream: bytes.lines, type: type, decoder: decoder)
+    }
+
+    static func parse<T: Decodable>(
+        lines: [String],
+        type: T.Type,
+        decoder: JSONDecoder
+    ) -> AsyncThrowingStream<T, Error> {
+        let lineStream = AsyncThrowingStream<String, Error> { continuation in
+            for line in lines {
+                continuation.yield(line)
+            }
+            continuation.finish()
+        }
+        return parse(lineStream: lineStream, type: type, decoder: decoder)
+    }
+
+    private static func parse<T: Decodable, Lines: AsyncSequence>(
+        lineStream: Lines,
+        type: T.Type,
+        decoder: JSONDecoder
+    ) -> AsyncThrowingStream<T, Error> where Lines.Element == String {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     var buffer = ""  // 当前 event 的 data 累加
-                    for try await line in bytes.lines {
-                        if Task.isCancelled { break }
+                    var seenDone = false
+                    func dispatch(_ payload: String) throws -> Bool {
+                        if payload == "[DONE]" {
+                            seenDone = true
+                            continuation.finish()
+                            return true
+                        }
+                        guard let data = payload.data(using: .utf8) else {
+                            throw ParserError.invalidEvent(byteCount: payload.utf8.count)
+                        }
+                        do {
+                            continuation.yield(try decoder.decode(T.self, from: data))
+                        } catch {
+                            if let upstreamError = try? decoder.decode(OpenAIStreamErrorEnvelope.self, from: data) {
+                                throw ParserError.upstreamError(upstreamError.error.message)
+                            }
+                            throw ParserError.invalidEvent(byteCount: data.count)
+                        }
+                        return false
+                    }
+                    for try await line in lineStream {
+                        if Task.isCancelled {
+                            continuation.finish(throwing: CancellationError())
+                            return
+                        }
                         // 注释行 -> 跳过
                         if line.hasPrefix(":") { continue }
                         // 空行 -> dispatch 当前 event
                         if line.isEmpty {
                             if !buffer.isEmpty {
-                                if buffer == "[DONE]" {
-                                    continuation.finish()
-                                    return
-                                }
-                                if let data = buffer.data(using: .utf8),
-                                   let decoded = try? decoder.decode(T.self, from: data) {
-                                    continuation.yield(decoded)
-                                }
+                                if try dispatch(buffer) { return }
                                 buffer = ""
                             }
                             continue
@@ -896,6 +715,7 @@ enum SSEParser {
                             buffer += String(payload)
                             // 兼容 "data: [DONE]" 单行无空行收尾的实现
                             if buffer == "[DONE]" {
+                                seenDone = true
                                 continuation.finish()
                                 return
                             }
@@ -903,12 +723,14 @@ enum SSEParser {
                         // 其他字段 (id: / event: / retry:) 忽略 —— 目前不需要
                     }
                     // 流正常结束 (到 EOF) 前还有未 flush 的 buffer:尝试 decode 一次
-                    if !buffer.isEmpty && buffer != "[DONE]",
-                       let data = buffer.data(using: .utf8),
-                       let decoded = try? decoder.decode(T.self, from: data) {
-                        continuation.yield(decoded)
+                    if !buffer.isEmpty {
+                        if try dispatch(buffer) { return }
                     }
-                    continuation.finish()
+                    if seenDone {
+                        continuation.finish()
+                    } else {
+                        throw ParserError.missingDone
+                    }
                 } catch {
                     continuation.finish(throwing: error)
                 }
@@ -928,10 +750,18 @@ private struct OpenAIStreamResponse: Decodable {
     let choices: [Choice]
 }
 
+@available(iOS 15.0, macOS 12.0, *)
+private struct OpenAIStreamErrorEnvelope: Decodable {
+    struct APIError: Decodable {
+        let message: String
+    }
+
+    let error: APIError
+}
+
 // MARK: - Phase 0: AI × 统计融合地基（主题 / 向量 / 对话 / 统一流式）
 @available(iOS 15.0, macOS 12.0, *)
 extension OpenAIService {
-
     // MARK: Themes
     /// 从日记里抽取 2-4 个「可聚合」标签：具体的人、地方、活动、项目、事件名。
     /// 情绪 / 心情 / 感受这类元描述是另一条线单独捕获的（见 analyzeMood），
@@ -1097,7 +927,7 @@ extension OpenAIService {
         // 主题清单
         let themesBlock: String = {
             guard !context.topThemes.isEmpty else { return zh ? "暂无" : "(none yet)" }
-            return context.topThemes.prefix(5).enumerated().map { (i, t) in
+            return context.topThemes.prefix(5).enumerated().map { i, t in
                 let moodInt = Int(t.avgMood * 100)
                 return zh
                     ? "\(i + 1). \(t.name)（出现 \(t.uniqueDays) 个不同的日子，平均情绪 \(moodInt)/100）"
@@ -1111,9 +941,9 @@ extension OpenAIService {
         // 输出里禁止重新出现 tag（由规则约束）。
         let recentBlock: String = {
             guard !context.recentEntries.isEmpty else { return zh ? "暂无" : "(none yet)" }
-            return context.recentEntries.enumerated().map { (i, e) in
-                let moodInt = Int(e.moodValue * 100)
-                let snippet = e.summary.isEmpty ? e.text : e.summary + "｜" + e.text
+            return context.recentEntries.map { entry in
+                let moodInt = Int(entry.moodValue * 100)
+                let snippet = entry.summary.isEmpty ? entry.text : entry.summary + "｜" + entry.text
                 return "[mood=\(moodInt)] \(snippet)"
             }.joined(separator: "\n\n")
         }()
@@ -1298,6 +1128,10 @@ extension OpenAIService {
             Log.error("[OpenAIService] Invalid embeddings URL", category: .ai)
             return nil
         }
+        guard !AppSecrets.appSharedSecret.isEmpty else {
+            Log.error("[OpenAIService] Backend shared secret not configured", category: .ai)
+            return nil
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1314,7 +1148,7 @@ extension OpenAIService {
         // 换成默认 strong capture（闭包里的 `self.`），singleton 本来就会自己活着，无泄漏风险。
         do {
             return try await NetworkRetryHelper.performWithRetry {
-                let (data, response) = try await URLSession.sslTolerantSession.data(for: request)
+                let (data, response) = try await URLSession.sharedRetrySession.data(for: request)
                 guard let http = response as? HTTPURLResponse else {
                     Log.error("[OpenAIService] Embed: non-HTTP response", category: .ai)
                     throw NSError(domain: "OpenAIService", code: -1)
@@ -1323,7 +1157,7 @@ extension OpenAIService {
                     // 只记 status + body 长度;body 内容可能夹带 embedding input(用户日记原文)或上游
                     // error payload,不进日志。需要原因的话在 backend 端按 req-id 反查。
                     Log.error("[OpenAIService] Embed request failed: status=\(http.statusCode) bodyLen=\(data.count)", category: .ai)
-                    throw NSError(domain: "OpenAIService", code: http.statusCode)
+                    throw Self.errorForStatus(http.statusCode, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
                 }
                 let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
                 return decoded.data.first?.embedding
@@ -1406,31 +1240,15 @@ extension OpenAIService {
         }
     }
 
-    // MARK: Unified streaming report
-    func streamReport(entries: [DiaryEntryData]) -> AsyncStream<String> {
-        AsyncStream { continuation in
-            let task = Task {
-                // `onChunk` 签名是 `@MainActor (String) -> Void`。`continuation.yield` 本身线程安全，
-                // 标一下 @MainActor 让签名对得上即可——真正的消费方（InsightsView 等）在 MainActor 侧读。
-                await self.generateReportFromData(entries: entries) { @MainActor chunk in
-                    continuation.yield(chunk)
-                }
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
     // MARK: Helpers
     private static func shortDate(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: date)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 
     /// 低层流式 chat（**结构化事件版本**）：把 SSE 解析成 `StreamEvent` 流。
     /// 三类事件:`.chunk` / `.truncated` / `.failed` / `.done`,caller 自己决定怎么渲染。
-    /// 这是内部真正干活的实现；下面 `streamChat(... onChunk:)` 是兼容 wrapper。
     fileprivate func streamChatEvents(prompt: String,
                                       model: String,
                                       reasoningEffort: String?,
@@ -1463,8 +1281,18 @@ extension OpenAIService {
                     continuation.yield(.failed(NSError(
                         domain: "OpenAIService",
                         code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: NSLocalizedString("error.backend.invalidResponse", comment: "Invalid response from backend")]
+                        userInfo: [
+                            NSLocalizedDescriptionKey: NSLocalizedString(
+                                "error.backend.invalidResponse",
+                                comment: "Invalid response from backend"
+                            )
+                        ]
                     )))
+                    continuation.finish()
+                    return
+                }
+                guard !AppSecrets.appSharedSecret.isEmpty else {
+                    continuation.yield(.failed(Self.missingSharedSecretError()))
                     continuation.finish()
                     return
                 }
@@ -1480,11 +1308,13 @@ extension OpenAIService {
                 // 否则 NetworkRetryHelper 会把整个请求从头回放，caller 把新 chunk 累加进
                 // 同一条 message，用户看到 "你好你好我今天…" 这种前缀重复。
                 var hasEmittedAnyChunk = false
+                var didEmitTerminalStreamEvent = false
                 do {
                     try await NetworkRetryHelper.performWithRetry {
-                        let (bytes, response) = try await URLSession.sslTolerantSession.bytes(for: request)
+                        let (bytes, response) = try await URLSession.sharedRetrySession.bytes(for: request)
                         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                            throw Self.errorForStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+                            let http = response as? HTTPURLResponse
+                            throw Self.errorForStatus(http?.statusCode ?? -1, retryAfter: http?.value(forHTTPHeaderField: "Retry-After"))
                         }
                         do {
                             for try await streamResp in SSEParser.parse(
@@ -1501,61 +1331,31 @@ extension OpenAIService {
                         } catch {
                             if hasEmittedAnyChunk {
                                 Log.error("[OpenAIService] streamChat interrupted mid-stream; emitting truncated event: \(error)", category: .ai)
-                                let reason = prompt.containsChinese
-                                    ? NSLocalizedString("stream.truncated.answer.zh", comment: "Answer truncated marker")
-                                    : NSLocalizedString("stream.truncated.answer.en", comment: "Answer truncated marker")
+                                let reason = NSLocalizedString("stream.truncated.answer", comment: "Answer truncated marker")
+                                didEmitTerminalStreamEvent = true
                                 continuation.yield(.truncated(reason: reason))
                                 return
                             }
                             throw error
                         }
                     }
-                    continuation.yield(.done)
+                    if !didEmitTerminalStreamEvent {
+                        continuation.yield(.done)
+                    }
                 } catch {
                     Log.error("[OpenAIService] streamChat error: \(error)", category: .ai)
                     if hasEmittedAnyChunk {
-                        let reason = prompt.containsChinese
-                            ? NSLocalizedString("stream.truncated.answer.zh", comment: "Answer truncated marker")
-                            : NSLocalizedString("stream.truncated.answer.en", comment: "Answer truncated marker")
+                        let reason = NSLocalizedString("stream.truncated.answer", comment: "Answer truncated marker")
+                        didEmitTerminalStreamEvent = true
                         continuation.yield(.truncated(reason: reason))
                     } else {
+                        didEmitTerminalStreamEvent = true
                         continuation.yield(.failed(error))
                     }
                 }
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
-    /// 兼容 wrapper —— 旧 caller 传 `onChunk: (String) -> Void` 仍可用。
-    /// 行为保持和历史版本一致:`.chunk` → onChunk;`.truncated` / `.failed` → 把本地化提示
-    /// 当 chunk 发出 (带 ⚠️ 前缀 + 换行)。新 caller 请直接消费 `streamChatEvents`。
-    fileprivate func streamChat(prompt: String,
-                                model: String,
-                                reasoningEffort: String?,
-                                maxTokens: Int = 4096,
-                                onChunk: @escaping (String) -> Void) async {
-        for await event in streamChatEvents(
-            prompt: prompt,
-            model: model,
-            reasoningEffort: reasoningEffort,
-            maxTokens: maxTokens
-        ) {
-            switch event {
-            case .chunk(let text):
-                onChunk(text)
-            case .truncated(let reason):
-                // UI 侧 MarkdownText 渲染 `⚠️` 前缀就能一眼辨认为警告。
-                onChunk("\n\n⚠️ " + reason)
-            case .failed(let error):
-                let msg = prompt.containsChinese
-                    ? String(format: NSLocalizedString("error.stream.answerGeneric.zh", comment: "Error answering zh"), error.localizedDescription)
-                    : String(format: NSLocalizedString("error.stream.answerGeneric.en", comment: "Error answering en"), error.localizedDescription)
-                onChunk("\n\n⚠️ " + msg)
-            case .done:
-                return
-            }
         }
     }
 
@@ -1577,7 +1377,7 @@ extension OpenAIService {
     // MARK: - Import parsing
     //
     // 旧实现:`DiaryImportService.parse` 是 static 函数,自己组 URLRequest /
-    // setValue("X-App-Secret") / `URLSession.sslTolerantSession` / 自己 catch 全部错误
+    // setValue("X-App-Secret") / `URLSession.sharedRetrySession` / 自己 catch 全部错误
     // 返回 `[]` —— 完全绕过 `AIServiceProtocol` 注入,Mock 测试无效,且无法把
     // 真实错误冒到 UI。
     //

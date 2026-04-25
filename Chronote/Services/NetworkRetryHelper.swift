@@ -6,6 +6,7 @@ struct NetworkRetryHelper {
     static let maxRetries = 3
     static let retryDelay: TimeInterval = 1.0
     static let maxRetryDelay: TimeInterval = 8.0
+    static let maxRetryAfterDelay: TimeInterval = 60.0
 
     /// Execute a network request with automatic retry on SSL/network errors.
     /// 指数回退 (1s → 2s → 4s, cap at maxRetryDelay)，避免 3× 平推在短 2s 内把下游打死。
@@ -30,8 +31,7 @@ struct NetworkRetryHelper {
 
                 // Check if it's a retryable error
                 if isRetryableError(error) && attempt < maxRetries - 1 {
-                    // Exponential backoff: 1s, 2s, 4s, ... capped at maxRetryDelay
-                    let backoff = min(retryDelay * pow(2.0, Double(attempt)), maxRetryDelay)
+                    let backoff = delayBeforeRetry(for: error, attempt: attempt, baseDelay: retryDelay)
                     Log.error("[NetworkRetryHelper] Attempt \(attempt + 1) failed: \(error.localizedDescription). Retrying in \(backoff)s...", category: .network)
                     try await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
                 } else {
@@ -40,7 +40,11 @@ struct NetworkRetryHelper {
             }
         }
 
-        throw lastError ?? NSError(domain: "NetworkRetryHelper", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unknown error after retries"])
+        throw lastError ?? NSError(
+            domain: "NetworkRetryHelper",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "Unknown error after retries"]
+        )
     }
     
     /// Check if an error is retryable (SSL, timeout, network issues, server errors)
@@ -90,25 +94,52 @@ struct NetworkRetryHelper {
             }
         }
         
-        // CFNetwork errors
-        if nsError.domain == kCFErrorDomainCFNetwork as String {
-            return true
-        }
-        
         return false
+    }
+
+    private static func delayBeforeRetry(for error: Error, attempt: Int, baseDelay: TimeInterval) -> TimeInterval {
+        if let retryAfter = retryAfterDelay(from: error) {
+            return min(retryAfter, maxRetryAfterDelay)
+        }
+        // Exponential backoff with jitter: 1s, 2s, 4s... ±25%, capped.
+        let base = min(baseDelay * pow(2.0, Double(attempt)), maxRetryDelay)
+        return min(base * Double.random(in: 0.75...1.25), maxRetryDelay)
+    }
+
+    private static func retryAfterDelay(from error: Error) -> TimeInterval? {
+        let nsError = error as NSError
+        // 后端 / 上游 OpenAI 在 429 / 502 / 503 / 504 上都会附 Retry-After。`errorForStatus`
+        // 已经把这些 status 上的 header 都塞进 userInfo,这里只读 429 会让 5xx 滑回指数回退,
+        // 维护窗口期反复撞墙。
+        guard nsError.domain == "OpenAIService",
+              [429, 502, 503, 504].contains(nsError.code),
+              let raw = nsError.userInfo["Retry-After"] as? String else {
+            return nil
+        }
+        if let seconds = TimeInterval(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return max(seconds, 0)
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
+        if let date = formatter.date(from: raw) {
+            return max(date.timeIntervalSinceNow, 0)
+        }
+        return nil
     }
 }
 
-// MARK: - URLSession Extension for Better SSL Handling
+// MARK: - Shared URLSession
 
 extension URLSession {
-    /// SSL-tolerant session for the AI backend proxy.
+    /// Shared session for the AI backend proxy.
     ///
     /// **`static let` not `static var`**：以前是 computed property，每次访问都 new 一个 URLSession
     /// 且从不 invalidate。日记保存 = 3 次 AI 请求，每次 new 一个 session → 持续累积 OS-level
     /// socket handle + 后台线程 + DNS 缓存，长会话下泄漏可观；同时绕过系统连接池白白增加延迟。
     /// 换成 `static let` 确保进程内只一个实例复用。
-    static let sslTolerantSession: URLSession = {
+    static let sharedRetrySession: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 30.0
         // **timeoutIntervalForResource 是整个资源传输的总 deadline**，不是每次读超时。

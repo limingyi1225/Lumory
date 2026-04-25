@@ -49,7 +49,11 @@ final class DatabaseRecoveryService {
         }
     }
     
-    private func executeRecovery(storeURL: URL, container: NSPersistentCloudKitContainer, completion: @escaping (Result<Void, Error>) -> Void) {
+    private func executeRecovery(
+        storeURL: URL,
+        container: NSPersistentCloudKitContainer,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
         let coordinator = container.persistentStoreCoordinator
         
         // Create backup first
@@ -69,7 +73,7 @@ final class DatabaseRecoveryService {
         deleteCorruptedFiles(at: storeURL)
         
         // Recreate the store
-        container.loadPersistentStores { storeDescription, error in
+        container.loadPersistentStores { _, error in
             if let error = error {
                 Log.error("[DatabaseRecovery] Failed to recreate store: \(error)", category: .persistence)
                 
@@ -192,14 +196,18 @@ final class DatabaseRecoveryService {
             // 会在用户看不到任何弹窗的情况下直接抹掉本地数据库。
             // 改成 `completion(false)`：取消这次 recovery，让下一次"有 UI 的"启动再确认。
             // 等不到 UI 的宁可暂时不 recover，也不能静默删用户数据。
-            Log.error("[DatabaseRecovery] No window available for confirmation alert — ABORTING recovery to avoid silent data loss", category: .persistence)
+            Log.error(
+                "[DatabaseRecovery] No window available for confirmation alert — ABORTING recovery to avoid silent data loss",
+                category: .persistence
+            )
             completion(false)
             return
         }
 
         let alert = UIAlertController(
             title: "Database Recovery Required",
-            message: "Your diary database appears to be corrupted. Would you like to attempt recovery? Your data will be restored from iCloud if available.",
+            message: "Your diary database appears to be corrupted. Would you like to attempt recovery? "
+                + "Your data will be restored from iCloud if available.",
             preferredStyle: .alert
         )
 

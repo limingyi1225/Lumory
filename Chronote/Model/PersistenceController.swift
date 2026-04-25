@@ -3,6 +3,7 @@ import CloudKit
 
 extension Notification.Name {
     static let databaseRecreated = Notification.Name("databaseRecreated")
+    static let persistentStoreLoadFailed = Notification.Name("persistentStoreLoadFailed")
 }
 
 final class PersistenceController {
@@ -93,7 +94,10 @@ final class PersistenceController {
 
                 // Database corruption (SQLITE_CORRUPT = 11) → 走 recovery，recovery 内部会弹窗确认。
                 if error.domain == NSSQLiteErrorDomain && error.code == 11 {
-                    Log.info("[PersistenceController] Database corruption detected — requesting user confirmation before recovery", category: .persistence)
+                    Log.info(
+                        "[PersistenceController] Database corruption detected — requesting user confirmation before recovery",
+                        category: .persistence
+                    )
 
                     DatabaseRecoveryService.shared.performRecovery(for: container) { [weak self] result in
                         switch result {
@@ -110,6 +114,7 @@ final class PersistenceController {
                             DispatchQueue.main.async {
                                 self?.isStoreLoadFailed = true
                                 self?.storeLoadError = error
+                                self?.postStoreLoadFailure(error)
                             }
                         }
                     }
@@ -121,6 +126,7 @@ final class PersistenceController {
                 DispatchQueue.main.async {
                     self?.isStoreLoadFailed = true
                     self?.storeLoadError = error
+                    self?.postStoreLoadFailure(error)
                 }
             } else {
                 Log.info("[PersistenceController] Core Data store loaded successfully", category: .persistence)
@@ -139,11 +145,10 @@ final class PersistenceController {
             forName: .NSPersistentStoreRemoteChange,
             object: container.persistentStoreCoordinator,
             queue: .main
-        ) { [weak self] notification in
+        ) { _ in
             Log.info("[PersistenceController] iCloud sync: Remote changes detected", category: .persistence)
-            
-            // Debounce notifications to avoid excessive updates
-            self?.container.viewContext.refreshAllObjects()
+            // automaticallyMergesChangesFromParent already merges CloudKit changes.
+            // A blanket refreshAllObjects() here would discard unsaved edits in viewContext.
         }
         observers.append(remoteChangeObserver)
 
@@ -154,7 +159,9 @@ final class PersistenceController {
                 object: container,
                 queue: .main
             ) { notification in
-                if let event = notification.userInfo?[NSPersistentCloudKitContainer.eventNotificationUserInfoKey] as? NSPersistentCloudKitContainer.Event {
+                if let event = notification.userInfo?[
+                    NSPersistentCloudKitContainer.eventNotificationUserInfoKey
+                ] as? NSPersistentCloudKitContainer.Event {
                     Log.info("[PersistenceController] CloudKit event: \(event.type.rawValue)", category: .persistence)
 
                     switch event.type {
@@ -180,36 +187,14 @@ final class PersistenceController {
         
         // 尝试初始化CloudKit schema
         initializeCloudKitSchema()
-        
-        // Check CloudKit readiness
-        checkCloudKitReadiness()
     }
-    
-    private func checkCloudKitReadiness() {
-        // Verify CloudKit container is properly configured
-        let ckContainer = CKContainer(identifier: "iCloud.com.Mingyi.Lumory")
-        
-        ckContainer.accountStatus { status, error in
-            if let error = error {
-                Log.error("[PersistenceController] CloudKit account status error: \(error)", category: .persistence)
-                return
-            }
-            
-            switch status {
-            case .available:
-                Log.info("[PersistenceController] iCloud account is available", category: .persistence)
-            case .noAccount:
-                Log.info("[PersistenceController] No iCloud account - sync will be disabled", category: .persistence)
-            case .restricted:
-                Log.info("[PersistenceController] iCloud account is restricted", category: .persistence)
-            case .couldNotDetermine:
-                Log.info("[PersistenceController] Could not determine iCloud account status", category: .persistence)
-            case .temporarilyUnavailable:
-                Log.info("[PersistenceController] iCloud temporarily unavailable", category: .persistence)
-            @unknown default:
-                Log.info("[PersistenceController] Unknown iCloud account status", category: .persistence)
-            }
-        }
+
+    private func postStoreLoadFailure(_ error: NSError) {
+        NotificationCenter.default.post(
+            name: .persistentStoreLoadFailed,
+            object: self,
+            userInfo: ["error": error]
+        )
     }
     
     deinit {
@@ -225,23 +210,23 @@ final class PersistenceController {
         #if DEBUG
         // NSPersistentCloudKitContainer automatically manages schema creation
         // Manual initialization is not required in recent versions
-        print("[PersistenceController] CloudKit schema is automatically managed by NSPersistentCloudKitContainer")
+        Log.info("[PersistenceController] CloudKit schema is automatically managed by NSPersistentCloudKitContainer", category: .persistence)
         
         // Verify the container is properly configured
         if let storeDescription = container.persistentStoreDescriptions.first {
             if let cloudKitOptions = storeDescription.cloudKitContainerOptions {
-                print("[PersistenceController] CloudKit container configured: \(cloudKitOptions.containerIdentifier)")
+                Log.info("[PersistenceController] CloudKit container configured: \(cloudKitOptions.containerIdentifier)", category: .persistence)
                 
                 // Check other important settings
                 if let historyTracking = storeDescription.options[NSPersistentHistoryTrackingKey] as? NSNumber {
-                    print("[PersistenceController] History tracking: \(historyTracking.boolValue ? "Enabled" : "Disabled")")
+                    Log.info("[PersistenceController] History tracking: \(historyTracking.boolValue ? "Enabled" : "Disabled")", category: .persistence)
                 }
                 
                 if let remoteNotifications = storeDescription.options[NSPersistentStoreRemoteChangeNotificationPostOptionKey] as? NSNumber {
-                    print("[PersistenceController] Remote notifications: \(remoteNotifications.boolValue ? "Enabled" : "Disabled")")
+                    Log.info("[PersistenceController] Remote notifications: \(remoteNotifications.boolValue ? "Enabled" : "Disabled")", category: .persistence)
                 }
             } else {
-                print("[PersistenceController] WARNING: CloudKit options not configured!")
+                Log.warning("[PersistenceController] WARNING: CloudKit options not configured!", category: .persistence)
             }
         }
         #else
@@ -249,7 +234,6 @@ final class PersistenceController {
         Log.info("[PersistenceController] Using established CloudKit schema in production", category: .persistence)
         #endif
     }
-    
 }
 
 extension URL {
@@ -299,7 +283,13 @@ extension URL {
             let ubiquityDocs = ubiquityContainer.appendingPathComponent("Documents")
             let legacyStoreURL = ubiquityDocs.appendingPathComponent("\(databaseName).sqlite")
             if fm.fileExists(atPath: legacyStoreURL.path) {
-                migrateFromLegacyDirectory(sourceDir: ubiquityDocs, targetURL: targetURL, databaseName: databaseName, label: "ubiquity", archive: true)
+                migrateFromLegacyDirectory(
+                    sourceDir: ubiquityDocs,
+                    targetURL: targetURL,
+                    databaseName: databaseName,
+                    label: "ubiquity",
+                    archive: true
+                )
                 // 搬完就返回，不再看本地 Documents（老数据以 ubiquity 的为准）
                 if fm.fileExists(atPath: targetURL.path) { return }
             }
@@ -312,7 +302,13 @@ extension URL {
         }
         let legacyLocalStore = localDocs.appendingPathComponent("\(databaseName).sqlite")
         if fm.fileExists(atPath: legacyLocalStore.path) {
-            migrateFromLegacyDirectory(sourceDir: localDocs, targetURL: targetURL, databaseName: databaseName, label: "local-documents", archive: true)
+            migrateFromLegacyDirectory(
+                sourceDir: localDocs,
+                targetURL: targetURL,
+                databaseName: databaseName,
+                label: "local-documents",
+                archive: true
+            )
         }
     }
 
@@ -389,7 +385,6 @@ extension URL {
 
 // MARK: - CloudKit Debugging
 extension PersistenceController {
-    
     /// Debug method to check and fix CloudKit issues
     func debugCloudKitIssues() {
         Log.info("[PersistenceController] Starting CloudKit debug...", category: .persistence)
@@ -419,7 +414,7 @@ extension PersistenceController {
         
         // Try to reset the schema if needed
         #if DEBUG
-        SyncDiagnosticService.resetCloudKitSchema(container: container)
+        SyncDiagnosticService.logCloudKitSchemaHints(container: container)
         #endif
         
         // Additional debugging for recordname issues
@@ -459,7 +454,7 @@ extension PersistenceController {
 extension PersistenceController {
     // Batch delete with performance optimization - uses background context for thread safety
     func batchDelete<T: NSManagedObject>(_ type: T.Type, predicate: NSPredicate? = nil) async throws {
-        try await container.performBackgroundTask { context in
+        let objectIDArray: [NSManagedObjectID] = try await container.performBackgroundTask { context in
             let fetchRequest = NSFetchRequest<NSFetchRequestResult>(entityName: String(describing: type))
             fetchRequest.predicate = predicate
 
@@ -467,16 +462,12 @@ extension PersistenceController {
             batchDeleteRequest.resultType = .resultTypeObjectIDs
 
             let result = try context.execute(batchDeleteRequest) as? NSBatchDeleteResult
-            let objectIDArray = result?.result as? [NSManagedObjectID] ?? []
-            let changes = [NSDeletedObjectsKey: objectIDArray]
+            return result?.result as? [NSManagedObjectID] ?? []
+        }
 
-            // Merge changes to view context on main thread (use async to avoid blocking)
-            // Capture viewContext reference before async to satisfy Sendable requirements
-            let viewContext = self.container.viewContext
-            DispatchQueue.main.async {
-                NSManagedObjectContext.mergeChanges(fromRemoteContextSave: changes, into: [viewContext])
-            }
+        await MainActor.run {
+            let changes = [NSDeletedObjectsKey: objectIDArray]
+            NSManagedObjectContext.mergeChanges(fromRemoteContextSave: changes, into: [container.viewContext])
         }
     }
-
 }

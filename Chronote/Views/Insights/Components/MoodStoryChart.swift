@@ -59,6 +59,14 @@ struct MoodStoryChart: View {
         }
         .padding(16)
         .insightsCard()
+        .onChange(of: points.map(\.id)) { _, _ in
+            selectedPointID = nil
+            rawSelectionDate = nil
+        }
+        .onChange(of: bucket) { _, _ in
+            selectedPointID = nil
+            rawSelectionDate = nil
+        }
     }
 
     // MARK: Header
@@ -127,8 +135,8 @@ struct MoodStoryChart: View {
         .chartYAxis {
             AxisMarks(position: .leading, values: [0, 0.5, 1]) { value in
                 AxisValueLabel {
-                    if let v = value.as(Double.self) {
-                        Text(moodLabel(for: v))
+                    if let mood = value.as(Double.self) {
+                        Text(moodLabel(for: mood))
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -236,17 +244,17 @@ struct MoodStoryChart: View {
 
     /// 仅日号,locale-aware。zh-Hans → "13日";en → "13"。
     private static let dayOnlyFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.setLocalizedDateFormatFromTemplate("d")
-        return f
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("d")
+        return formatter
     }()
 
     private var lineGradient: LinearGradient {
         // 按路径上的每个点采样，颜色跟随 mood 真实变化
         let stops: [Gradient.Stop]
         if points.count <= 1 {
-            let c = Color.moodSpectrum(value: points.first?.mood ?? 0.5)
-            stops = [Gradient.Stop(color: c, location: 0), Gradient.Stop(color: c, location: 1)]
+            let color = Color.moodSpectrum(value: points.first?.mood ?? 0.5)
+            stops = [Gradient.Stop(color: color, location: 0), Gradient.Stop(color: color, location: 1)]
         } else {
             let span = max(0.0001, (points.last?.date.timeIntervalSince1970 ?? 0) - (points.first?.date.timeIntervalSince1970 ?? 0))
             let base = points.first?.date.timeIntervalSince1970 ?? 0
@@ -302,8 +310,8 @@ struct MoodStoryChart: View {
         )
     }
 
-    private func moodLabel(for v: Double) -> String {
-        switch v {
+    private func moodLabel(for mood: Double) -> String {
+        switch mood {
         case 0: return NSLocalizedString("低落", comment: "Mood low")
         case 0.5: return NSLocalizedString("平静", comment: "Mood neutral")
         case 1: return NSLocalizedString("开心", comment: "Mood high")
@@ -337,18 +345,18 @@ struct MoodStoryChart: View {
 
     /// 三个 bucket 各自一份模板,setLocalizedDateFormatFromTemplate 自动适配中英语序。
     private static let dayTagFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.setLocalizedDateFormatFromTemplate("MMMd")
-        return f
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        return formatter
     }()
     private static let weekTagFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.setLocalizedDateFormatFromTemplate("MMMd")
-        return f
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        return formatter
     }()
     private static let monthTagFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.setLocalizedDateFormatFromTemplate("yMMM")
-        return f
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("yMMM")
+        return formatter
     }()
 }

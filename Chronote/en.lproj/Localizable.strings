@@ -71,6 +71,7 @@
 "松开结束" = "Release to Stop";
 "按住说话" = "Hold to Speak";
 "日记已删除" = "Entry Deleted";
+"调整心情" = "Adjust Mood";
 "English (US)" = "English (US)";
 "Tap to Stop" = "Tap to Stop";
 "Hold to Speak" = "Hold to Speak";
@@ -306,6 +307,8 @@
 "error.backend.emptyContent" = "The AI service returned an empty response.";
 
 /* Streaming — truncation markers + fallback error text (reasoning-report and ask modes) */
+"stream.truncated.report" = "⚠️ Report incomplete (connection interrupted). Please regenerate.";
+"stream.truncated.answer" = "Response incomplete (connection interrupted). Please retry.";
 "stream.truncated.report.zh" = "⚠️ Report incomplete (connection interrupted). Please regenerate.";
 "stream.truncated.report.en" = "⚠️ Report incomplete (connection interrupted). Please regenerate.";
 "stream.truncated.answer.zh" = "Response incomplete (connection interrupted). Please retry.";
@@ -356,3 +359,40 @@
 "import.alert.error.title" = "Import Failed";
 "import.alert.empty.title" = "No Entries Detected";
 "import.alert.empty.message" = "No diary entries were detected in the pasted text. Please check the format and try again.";
+
+/* Store load failure / speech permission recovery */
+"store.load.failed.title" = "Diary Store Unavailable";
+"store.load.failed.message" = "Lumory could not load the local diary database. Some features may be unavailable until the app is restarted or the database is repaired.";
+"speech.permission.settings.title" = "Speech Recognition Disabled";
+"speech.permission.settings.message" = "Enable Speech Recognition for Lumory in Settings to transcribe recordings.";
+"speech.permission.settings.open" = "Open Settings";
+
+/* Sync Diagnostic */
+"sync.diagnostic.title" = "Sync Diagnostic";
+"sync.diagnostic.noIssues.title" = "No Issues Found";
+"sync.diagnostic.noIssues.message" = "Your iCloud sync appears to be working correctly.";
+"sync.diagnostic.issuesFound" = "Issues Found";
+"sync.diagnostic.criticalIssue" = "Critical Issue";
+"sync.diagnostic.recommendations" = "Recommendations";
+"sync.diagnostic.generated" = "Generated";
+"sync.diagnostic.showFullReport" = "Show Full Report";
+"sync.diagnostic.noResult.title" = "No Diagnostic Result";
+"sync.diagnostic.noResult.message" = "Please run the diagnostic again.";
+"sync.diagnostic.fullReport.title" = "Full Diagnostic Report";
+"sync.diagnostic.severity.healthy" = "Healthy";
+"sync.diagnostic.severity.warning" = "Warning";
+"sync.diagnostic.severity.critical" = "Critical";
+"sync.diagnostic.issue.iCloudNotSignedIn" = "Not signed in to iCloud";
+"sync.diagnostic.issue.networkUnavailable" = "Network connection unavailable";
+"sync.diagnostic.issue.iCloudContainerInaccessible" = "iCloud container is not accessible";
+"sync.diagnostic.issue.coreDataStoreCorrupted" = "Core Data store may be corrupted";
+"sync.diagnostic.issue.cloudKitMisconfigured" = "CloudKit is not properly configured";
+"sync.diagnostic.recommendation.signIn" = "Please sign in to iCloud in System Settings";
+"sync.diagnostic.recommendation.network" = "Check your internet connection";
+"sync.diagnostic.recommendation.container" = "iCloud container is not accessible";
+"sync.diagnostic.recommendation.coreData" = "Core Data store may be corrupted";
+"sync.diagnostic.recommendation.cloudKit" = "CloudKit configuration is incorrect";
+"sync.diagnostic.report.header" = "=== iCloud Sync Diagnostic Report ===";
+"sync.diagnostic.report.generated" = "Generated: %@";
+"sync.diagnostic.report.status" = "Overall Status: %@";
+"sync.diagnostic.report.noIssues" = "No issues detected. Sync should be working properly.";

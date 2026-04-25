@@ -16,7 +16,6 @@ import Accelerate
 //  4. 所有聚合的"纯函数"核心暴露为 `static func`，便于单元测试。
 
 final class InsightsEngine {
-
     // MARK: Public value types
 
     struct MoodPoint: Identifiable, Equatable {
@@ -36,6 +35,13 @@ final class InsightsEngine {
         let longestStreak: Int
         let totalWords: Int
         let avgMood: Double
+    }
+
+    struct SuggestionSnapshot {
+        let topThemes: [Theme]
+        let moodHighEntry: DiaryEntryData?
+        let moodLowEntry: DiaryEntryData?
+        let moodPoints: [MoodPoint]
     }
 
     struct Theme: Identifiable, Equatable {
@@ -70,7 +76,7 @@ final class InsightsEngine {
 
     static let shared = InsightsEngine(
         persistence: .shared,
-        ai: OpenAIService(apiKey: "")
+        ai: OpenAIService.shared
     )
 
     init(persistence: PersistenceController, ai: AIServiceProtocol) {
@@ -84,6 +90,20 @@ final class InsightsEngine {
     func moodSeries(in range: DateInterval, bucket: Bucket) async -> [MoodPoint] {
         let entries = await fetchEntryData(in: range)
         return Self.aggregateMoodSeries(entries: entries, bucket: bucket)
+    }
+
+    /// Prompt suggestions need 90d themes plus 30d mood stats. Fetch the 90d superset once,
+    /// then slice in memory for the 30d aggregates.
+    func suggestionSnapshot(themeRange: DateInterval, moodRange: DateInterval, themeLimit: Int = 5) async -> SuggestionSnapshot {
+        let entries = await fetchEntryData(in: themeRange)
+        let moodEntries = entries.filter { moodRange.contains($0.date) }
+        let moodExtremes = Self.computeMoodExtremes(entries: moodEntries)
+        return SuggestionSnapshot(
+            topThemes: Self.aggregateThemes(entries: entries, range: themeRange, limit: themeLimit),
+            moodHighEntry: moodExtremes.high,
+            moodLowEntry: moodExtremes.low,
+            moodPoints: Self.aggregateMoodSeries(entries: moodEntries, bucket: .day)
+        )
     }
 
     /// 纯函数版本，便于单元测试。
@@ -247,7 +267,6 @@ final class InsightsEngine {
     // MARK: - 4. Streaming narrative
 
     /// 事件流 —— 消费方能感知 `.truncated` / `.failed` 做 UI banner。
-    /// 旧 `streamNarrative` 保留作 String 适配器。
     @available(iOS 15.0, macOS 12.0, *)
     func streamNarrativeEvents(in range: DateInterval) -> AsyncStream<StreamEvent> {
         AsyncStream { continuation in
@@ -262,25 +281,6 @@ final class InsightsEngine {
                 for await event in self.ai.streamReportEvents(entries: entries) {
                     if Task.isCancelled { break }
                     continuation.yield(event)
-                }
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
-    func streamNarrative(in range: DateInterval) -> AsyncStream<String> {
-        AsyncStream { continuation in
-            let task = Task {
-                let entries = await self.fetchEntryData(in: range)
-                guard !entries.isEmpty else {
-                    continuation.yield(NSLocalizedString("这段时间还没有日记。", comment: "Empty narrative"))
-                    continuation.finish()
-                    return
-                }
-                for await chunk in self.ai.streamReport(entries: entries) {
-                    if Task.isCancelled { break }
-                    continuation.yield(chunk)
                 }
                 continuation.finish()
             }
@@ -327,14 +327,7 @@ final class InsightsEngine {
         }
     }
 
-    // MARK: - 6. Semantic search
-
-    func semanticSearch(_ query: String, topK: Int = 20) async -> [DiaryEntryData] {
-        let qVec = await ai.embed(text: query)
-        return await retrieve(query: query, queryVector: qVec, topK: topK)
-    }
-
-    // MARK: - 7. 近 N 条（给 prompt suggestion 做 grounding 用）
+    // MARK: - 6. 近 N 条（给 prompt suggestion 做 grounding 用）
 
     /// 返回最近 `limit` 条日记，按时间倒序。每条的 `text` 会被截到 `textCharCap` 字符以内，
     /// 避免塞给 LLM 的 context 膨胀。
@@ -370,6 +363,10 @@ final class InsightsEngine {
     /// 是无意义的；让上游知道"没有显著差异"比给它俩同一个值更好。
     func moodExtremes(in range: DateInterval) async -> (high: DiaryEntryData?, low: DiaryEntryData?) {
         let entries = await fetchEntryData(in: range)
+        return Self.computeMoodExtremes(entries: entries)
+    }
+
+    private static func computeMoodExtremes(entries: [DiaryEntryData]) -> (high: DiaryEntryData?, low: DiaryEntryData?) {
         guard !entries.isEmpty else { return (nil, nil) }
         // 按 summary 不空优先（空 summary 对 grounding 没用）
         let withSummary = entries.filter { !$0.summary.isEmpty }
@@ -377,7 +374,7 @@ final class InsightsEngine {
         let high = pool.max { $0.moodValue < $1.moodValue }
         let low = pool.min { $0.moodValue < $1.moodValue }
         // 如果 mood 值相同，说明没有显著波动——返回 nil，让下游判定"数据不足"
-        if let h = high, let l = low, h.moodValue == l.moodValue {
+        if let highEntry = high, let lowEntry = low, highEntry.moodValue == lowEntry.moodValue {
             return (nil, nil)
         }
         return (high, low)
@@ -385,7 +382,7 @@ final class InsightsEngine {
 
     // MARK: - Private
 
-    private func fetchEntryData(in range: DateInterval) async -> [DiaryEntryData] {
+    private func fetchEntryData(in range: DateInterval, includeEmbedding: Bool = false) async -> [DiaryEntryData] {
         await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
             let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
             request.predicate = NSPredicate(format: "date >= %@ AND date <= %@",
@@ -401,7 +398,7 @@ final class InsightsEngine {
                     moodValue: entry.moodValue,
                     summary: entry.summary ?? "",
                     themes: entry.themeArray,
-                    embedding: entry.embeddingVector,
+                    embedding: includeEmbedding ? entry.embeddingVector : nil,
                     wordCount: Int(entry.wordCount)
                 )
             }
@@ -476,7 +473,7 @@ final class InsightsEngine {
             let now = Date()
             let hasFreshUnindexed = withoutVecIDs.contains { now.timeIntervalSince($0.date) < 300 }
             let minRecencyReserve: Int
-            if !withoutVecIDs.isEmpty, (indexCoverage < 0.95 || hasFreshUnindexed) {
+            if !withoutVecIDs.isEmpty, indexCoverage < 0.95 || hasFreshUnindexed {
                 minRecencyReserve = min(max(2, topK / 3), withoutVecIDs.count)
             } else {
                 minRecencyReserve = 0
@@ -555,7 +552,7 @@ final class InsightsEngine {
         let now = Date()
         let hasFreshUnindexed = withoutVectors.contains { now.timeIntervalSince($0.date) < 300 }
         let minRecencyReserve: Int
-        if !withoutVectors.isEmpty, (indexCoverage < 0.95 || hasFreshUnindexed) {
+        if !withoutVectors.isEmpty, indexCoverage < 0.95 || hasFreshUnindexed {
             minRecencyReserve = min(max(2, topK / 3), withoutVectors.count)
         } else {
             minRecencyReserve = 0
@@ -576,15 +573,15 @@ final class InsightsEngine {
     // MARK: - Math helpers
 
     /// 余弦相似度。长度不等时返回 0（而不是截断比较），避免误导。空向量返回 0。
-    static func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
-        guard !a.isEmpty, a.count == b.count else { return 0 }
-        let n = vDSP_Length(a.count)
+    static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Float {
+        guard !lhs.isEmpty, lhs.count == rhs.count else { return 0 }
+        let count = vDSP_Length(lhs.count)
         var dot: Float = 0
-        vDSP_dotpr(a, 1, b, 1, &dot, n)
+        vDSP_dotpr(lhs, 1, rhs, 1, &dot, count)
         var aNorm: Float = 0
-        vDSP_svesq(a, 1, &aNorm, n)
+        vDSP_svesq(lhs, 1, &aNorm, count)
         var bNorm: Float = 0
-        vDSP_svesq(b, 1, &bNorm, n)
+        vDSP_svesq(rhs, 1, &bNorm, count)
         let denom = sqrt(aNorm) * sqrt(bNorm)
         guard denom > 0 else { return 0 }
         return dot / denom

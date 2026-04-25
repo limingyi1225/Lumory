@@ -33,6 +33,7 @@ struct ChronoteApp: App {
     @State private var showSplash: Bool = true
     @State private var remoteChangeObserver: NSObjectProtocol?
     @State private var memoryWarningObserver: NSObjectProtocol?
+    @State private var storeLoadErrorMessage: String?
     init() {
         #if canImport(UIKit)
         UITableView.appearance().separatorStyle = .none
@@ -110,7 +111,7 @@ struct ChronoteApp: App {
 
         // Pre-warm CADisplayLink if needed
         #if canImport(UIKit)
-        let _ = CAFrameRateRange.uiUpdates
+        _ = CAFrameRateRange.uiUpdates
         #endif
     }
     
@@ -200,10 +201,28 @@ struct ChronoteApp: App {
             .environment(\.aiService, OpenAIService.shared)
             .environmentObject(importService)
             .environmentObject(syncMonitor)
+            .alert(
+                NSLocalizedString("store.load.failed.title", comment: "Persistent store load failed title"),
+                isPresented: Binding(
+                    get: { storeLoadErrorMessage != nil },
+                    set: { if !$0 { storeLoadErrorMessage = nil } }
+                )
+            ) {
+                Button(NSLocalizedString("好", comment: "OK button"), role: .cancel) {}
+            } message: {
+                Text(
+                    storeLoadErrorMessage
+                        ?? NSLocalizedString("store.load.failed.message", comment: "Persistent store load failed message")
+                )
+            }
             .onAppear {
                 showSplash = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     showSplash = false
+                }
+                if persistenceController.isStoreLoadFailed {
+                    storeLoadErrorMessage = persistenceController.storeLoadError?.localizedDescription
+                        ?? NSLocalizedString("store.load.failed.message", comment: "Persistent store load failed message")
                 }
                 // CloudKit pull 进来新 entries 时触发一次 wordCount 回算——
                 // NSPersistentCloudKitContainer 不会自动补派生字段，我们必须自己扫。
@@ -243,6 +262,13 @@ struct ChronoteApp: App {
             }
             .onChange(of: scenePhase) { _, newPhase in
                 handleScenePhaseChange(newPhase)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .persistentStoreLoadFailed)) { note in
+                if let error = note.userInfo?["error"] as? NSError {
+                    storeLoadErrorMessage = error.localizedDescription
+                } else {
+                    storeLoadErrorMessage = NSLocalizedString("store.load.failed.message", comment: "Persistent store load failed message")
+                }
             }
         }
     }

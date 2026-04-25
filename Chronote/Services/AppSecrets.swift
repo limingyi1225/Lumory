@@ -28,16 +28,10 @@ enum AppSecrets {
         #if DEBUG
         Log.error(
             "[AppSecrets] APP_SHARED_SECRET missing from Info.plist. 后端会返 401。"
-            + " 配置步骤见 AppSecrets.swift 顶部注释或 CodeReview/SECRET_ROTATION.md。",
+            + " 配置步骤见 AppSecrets.swift 顶部注释或 Lumory.local.xcconfig.sample。",
             category: .general
         )
         #endif
         return ""
     }()
-
-    /// OpenAI API Key，用于音频转录等功能，若不使用可留空
-    static let openAIKey = ""
-
-    /// 检查后端代理地址是否已配置 + 共享密钥已注入
-    static var isValidKey: Bool { !backendURL.isEmpty && !appSharedSecret.isEmpty }
 }

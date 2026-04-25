@@ -41,16 +41,6 @@ enum Log {
     // 只让 file / line（源码位置元数据）保持 .public，便于定位。
     // message() 作为 @autoclosure 保持原样，OSLog 看到 log level 没开启会跳过求值。
 
-    static func debug(
-        _ message: @autoclosure () -> String,
-        category: Category = .general,
-        file: String = #fileID,
-        line: Int = #line
-    ) {
-        let text = message()
-        logger(category).debug("[\(file, privacy: .public):\(line, privacy: .public)] \(text, privacy: .private)")
-    }
-
     static func info(
         _ message: @autoclosure () -> String,
         category: Category = .general,

@@ -88,18 +88,18 @@ struct DiaryDetailView: View {
         detailFormatterLock.lock()
         defer { detailFormatterLock.unlock() }
         if let cached = detailFormatterCache[key] { return cached }
-        let f = DateFormatter()
-        f.locale = Locale(identifier: language)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: language)
         switch kind {
         case .longDate:
-            f.dateStyle = .long
-            f.timeStyle = .none
+            formatter.dateStyle = .long
+            formatter.timeStyle = .none
         case .shortTime:
-            f.dateStyle = .none
-            f.timeStyle = .short
+            formatter.dateStyle = .none
+            formatter.timeStyle = .short
         }
-        detailFormatterCache[key] = f
-        return f
+        detailFormatterCache[key] = formatter
+        return formatter
     }
 
     private func formatDate(_ date: Date) -> String {
@@ -271,106 +271,6 @@ struct DiaryDetailView: View {
         }
     }
 
-    
-    // MARK: - View Components (Available for all platforms)
-    
-    @ViewBuilder
-    private var headerSection: some View {
-        VStack(spacing: 24) {
-            // Date and mood header
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(formatDate(entry.wrappedDate))
-                        .font(.largeTitle)
-                        .fontWeight(.bold)
-                    Text(formatTime(entry.wrappedDate))
-                        .font(.title3)
-                        .foregroundColor(.secondary)
-                }
-                
-                Spacer()
-                
-                // Mood visualization
-                VStack(alignment: .trailing, spacing: 12) {
-                    Circle()
-                        .fill(
-                            RadialGradient(
-                                gradient: Gradient(colors: [
-                                    isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor,
-                                    (isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor).opacity(0.3)
-                                ]),
-                                center: .center,
-                                startRadius: 5,
-                                endRadius: 30
-                            )
-                        )
-                        .frame(width: 60, height: 60)
-                        .overlay(
-                            Circle()
-                                .stroke(Color.white.opacity(0.8), lineWidth: 3)
-                        )
-                        .shadow(color: (isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor).opacity(0.3), radius: 10)
-                    
-                    Text(getMoodDescription(isEditing ? editedMoodValue : entry.moodValue))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(isEditing ? Color.moodSpectrum(value: editedMoodValue) : entry.moodColor)
-                }
-            }
-            
-            // Mood selector in edit mode
-            if isEditing {
-                VStack(alignment: .leading, spacing: 16) {
-                    Label("调整心情", systemImage: "heart.fill")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                    
-                    // Mood selection buttons
-                    HStack(spacing: 12) {
-                        ForEach(moodOptions, id: \.value) { mood in
-                            Button(action: {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                    editedMoodValue = mood.value
-                                    hasUnsavedChanges = true
-                                }
-                            }) {
-                                VStack(spacing: 8) {
-                                    Text(mood.emoji)
-                                        .font(.system(size: 32))
-                                    Text(mood.label)
-                                        .font(.system(size: 12, weight: .medium))
-                                        .foregroundColor(.primary)
-                                }
-                                .frame(width: 80, height: 80)
-                                // 选中和未选中都走 liquidGlass + mood 色 tint —— 不再饱和实色,
-                                // 视觉饱和度对齐首页 spectrum bar(那个是 0.32 透明度叠在玻璃上)。
-                                // 区分"已选"靠更强的 tint(0.42 vs 0.12) + 1.05 缩放 + mood 色阴影,
-                                // 不再靠"实色 vs 玻璃"的材质对比。
-                                .background {
-                                    Color.clear
-                                        .liquidGlassCard(
-                                            cornerRadius: 12,
-                                            tint: Color.moodSpectrum(value: mood.value),
-                                            tintStrength: editedMoodValue == mood.value ? 0.42 : 0.12,
-                                            interactive: true
-                                        )
-                                }
-                                .scaleEffect(editedMoodValue == mood.value ? 1.05 : 1.0)
-                                .shadow(color: editedMoodValue == mood.value ? Color.moodSpectrum(value: mood.value).opacity(0.3) : Color.clear, radius: 8)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                .padding(20)
-                // 整个 mood selector 容器换成 liquidGlassCard,和 App 整体玻璃语言对齐。
-                .liquidGlassCard(cornerRadius: 16)
-                .shadow(color: Color.primary.opacity(0.05), radius: 10, y: 5)
-                .transition(.asymmetric(insertion: .scale.combined(with: .opacity), removal: .scale.combined(with: .opacity)))
-            }
-        }
-    }
-    
     /// 主题来自 AI 自动抽取（写入/编辑后台流水线里 extractThemes），
     /// 用户手动编辑主题容易污染聚合结果 —— 只做只读展示，非空才渲染。
     @ViewBuilder
@@ -581,7 +481,7 @@ struct DiaryDetailView: View {
                 .foregroundStyle(.secondary)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
-                    ForEach(Array(entry.imageFileNameArray.enumerated()), id: \.offset) { index, fileName in
+                    ForEach(Array(entry.imageFileNameArray.enumerated()), id: \.element) { index, fileName in
                         photoThumbnail(fileName: fileName, index: index)
                     }
                 }
@@ -623,11 +523,16 @@ struct DiaryDetailView: View {
                 .buttonStyle(PlainButtonStyle())
 
                 VStack(alignment: .leading, spacing: 6) {
+                    let isCurrentFile = audioPlaybackController.currentPlayingFileName == audioFileName
+                    let playbackTime = isCurrentFile ? audioPlaybackController.currentTime : 0
+                    let playbackDuration = isCurrentFile && audioPlaybackController.duration > 0
+                        ? audioPlaybackController.duration
+                        : displayableAudioDuration
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.secondary.opacity(0.18))
                                 .frame(height: 5)
-                            if audioPlaybackController.currentPlayingFileName == audioFileName && displayableAudioDuration > 0 {
+                            if isCurrentFile && displayableAudioDuration > 0 {
                                 Capsule()
                                     .fill(entry.moodColor)
                                     .frame(width: geo.size.width * audioPlaybackController.progress, height: 5)
@@ -636,8 +541,8 @@ struct DiaryDetailView: View {
                     }
                     .frame(height: 5)
                     Text(formattedDuration(
-                        currentTime: audioPlaybackController.currentPlayingFileName == audioFileName ? audioPlaybackController.currentTime : 0,
-                        totalDuration: (audioPlaybackController.currentPlayingFileName == audioFileName && audioPlaybackController.duration > 0) ? audioPlaybackController.duration : displayableAudioDuration
+                        currentTime: playbackTime,
+                        totalDuration: playbackDuration
                     ))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -650,7 +555,6 @@ struct DiaryDetailView: View {
             }
         }
     }
-
 
     // MARK: - 编辑相关方法
     
@@ -685,30 +589,6 @@ struct DiaryDetailView: View {
         #if canImport(UIKit)
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         #endif
-    }
-    
-    /// 5 个 mood 锚点和首页光谱的色阶严格对齐(0 / 0.25 / 0.5 / 0.75 / 1.0)。
-    /// 之前用 0.1 / 0.3 / 0.7 / 0.9 是软化色,导致 pill 颜色和首页 spectrum bar 上同名情绪
-    /// 显示出来的颜色不一致 —— 用户在两处看到同一情绪却是不同的红/蓝。统一到光谱端点。
-    private var moodOptions: [(emoji: String, label: String, value: Double)] {
-        [
-            ("😢", "非常低落", 0.0),
-            ("😞", "有些低落", 0.25),
-            ("😐", "平静", 0.5),
-            ("😊", "愉快", 0.75),
-            ("😄", "非常开心", 1.0)
-        ]
-    }
-    
-    private func getMoodDescription(_ value: Double) -> String {
-        switch value {
-        case 0..<0.2: return "非常低落"
-        case 0.2..<0.4: return "有些低落"
-        case 0.4..<0.6: return "平静"
-        case 0.6..<0.8: return "愉快"
-        case 0.8...1: return "非常开心"
-        default: return "平静"
-        }
     }
     
     private func saveChanges() {

@@ -182,13 +182,13 @@ struct WritingHeatmap: View {
 
         var lookup: [Date: DailyCell] = [:]
         lookup.reserveCapacity(cells.count)
-        for c in cells { lookup[calendar.startOfDay(for: c.date)] = c }
+        for cell in cells { lookup[calendar.startOfDay(for: cell.date)] = cell }
 
         var result: [HeatCellModel] = []
         result.reserveCapacity(weeksToShow * 7)
         for i in 0..<(weeksToShow * 7) {
-            guard let d = calendar.date(byAdding: .day, value: i, to: gridStart) else { continue }
-            let day = calendar.startOfDay(for: d)
+            guard let date = calendar.date(byAdding: .day, value: i, to: gridStart) else { continue }
+            let day = calendar.startOfDay(for: date)
             let isFuture = day > today
             if !isFuture, let cell = lookup[day] {
                 result.append(HeatCellModel(date: day, hasEntry: true, mood: cell.mood, wordCount: cell.wordCount, isFuture: false))
@@ -200,9 +200,7 @@ struct WritingHeatmap: View {
     }
 
     private func dayA11yLabel(_ day: HeatCellModel) -> String {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        let dateStr = f.string(from: day.date)
+        let dateStr = day.date.formatted(date: .abbreviated, time: .omitted)
         if day.isFuture {
             return dateStr + "，" + NSLocalizedString("未来", comment: "A11y future day")
         }
@@ -215,12 +213,12 @@ struct WritingHeatmap: View {
         return dateStr + "，" + NSLocalizedString("无日记", comment: "A11y heat cell empty")
     }
 
-    private func compactNumber(_ n: Int) -> String {
-        if n >= 10000 {
-            return String(format: "%.1fw", Double(n) / 10000.0)
-        } else if n >= 1000 {
-            return String(format: "%.1fk", Double(n) / 1000.0)
+    private func compactNumber(_ number: Int) -> String {
+        if number >= 10000 {
+            return String(format: "%.1fw", Double(number) / 10000.0)
+        } else if number >= 1000 {
+            return String(format: "%.1fk", Double(number) / 1000.0)
         }
-        return "\(n)"
+        return "\(number)"
     }
 }

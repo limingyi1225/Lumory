@@ -67,6 +67,7 @@
 "松开结束" = "松开结束";
 "按住说话" = "按住说话";
 "日记已删除" = "日记已删除";
+"调整心情" = "调整心情";
 "English (US)" = "English (US)";
 "Tap to Stop" = "点击停止";
 "Hold to Speak" = "按住说话";
@@ -305,6 +306,8 @@
 "error.backend.emptyContent" = "后端返回的内容为空。";
 
 /* 流式输出 —— 截断标记与错误兜底文案（报告、回顾两类场景） */
+"stream.truncated.report" = "⚠️ 报告未完整（网络中断），请重新生成。";
+"stream.truncated.answer" = "回答未完整（网络中断），请重试。";
 "stream.truncated.report.zh" = "⚠️ 报告未完整（网络中断），请重新生成。";
 "stream.truncated.report.en" = "⚠️ 报告未完整（网络中断），请重新生成。";
 "stream.truncated.answer.zh" = "回答未完整（网络中断），请重试。";
@@ -355,3 +358,40 @@
 "import.alert.error.title" = "导入失败";
 "import.alert.empty.title" = "未识别到日记";
 "import.alert.empty.message" = "没有从粘贴的内容里识别到任何日记。请检查格式后重试。";
+
+/* 存储加载失败 / 语音权限恢复 */
+"store.load.failed.title" = "日记数据库不可用";
+"store.load.failed.message" = "Lumory 无法加载本地日记数据库。重启 App 或修复数据库前，部分功能可能不可用。";
+"speech.permission.settings.title" = "语音识别未开启";
+"speech.permission.settings.message" = "请在系统设置中允许 Lumory 使用语音识别，才能转写录音。";
+"speech.permission.settings.open" = "打开设置";
+
+/* 同步诊断 */
+"sync.diagnostic.title" = "同步诊断";
+"sync.diagnostic.noIssues.title" = "未发现问题";
+"sync.diagnostic.noIssues.message" = "你的 iCloud 同步看起来工作正常。";
+"sync.diagnostic.issuesFound" = "发现的问题";
+"sync.diagnostic.criticalIssue" = "严重问题";
+"sync.diagnostic.recommendations" = "建议";
+"sync.diagnostic.generated" = "生成时间";
+"sync.diagnostic.showFullReport" = "显示完整报告";
+"sync.diagnostic.noResult.title" = "没有诊断结果";
+"sync.diagnostic.noResult.message" = "请重新运行诊断。";
+"sync.diagnostic.fullReport.title" = "完整诊断报告";
+"sync.diagnostic.severity.healthy" = "健康";
+"sync.diagnostic.severity.warning" = "警告";
+"sync.diagnostic.severity.critical" = "严重";
+"sync.diagnostic.issue.iCloudNotSignedIn" = "未登录 iCloud";
+"sync.diagnostic.issue.networkUnavailable" = "网络连接不可用";
+"sync.diagnostic.issue.iCloudContainerInaccessible" = "无法访问 iCloud 容器";
+"sync.diagnostic.issue.coreDataStoreCorrupted" = "Core Data 存储可能已损坏";
+"sync.diagnostic.issue.cloudKitMisconfigured" = "CloudKit 配置不正确";
+"sync.diagnostic.recommendation.signIn" = "请前往系统设置登录 iCloud";
+"sync.diagnostic.recommendation.network" = "请检查网络连接";
+"sync.diagnostic.recommendation.container" = "无法访问 iCloud 容器";
+"sync.diagnostic.recommendation.coreData" = "Core Data 存储可能已损坏";
+"sync.diagnostic.recommendation.cloudKit" = "CloudKit 配置不正确";
+"sync.diagnostic.report.header" = "=== iCloud 同步诊断报告 ===";
+"sync.diagnostic.report.generated" = "生成时间：%@";
+"sync.diagnostic.report.status" = "整体状态：%@";
+"sync.diagnostic.report.noIssues" = "未检测到问题，同步应可正常工作。";

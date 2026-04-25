@@ -1,5 +1,8 @@
 // ESLint flat config (v9+).
+const js = require('@eslint/js');
+
 module.exports = [
+  js.configs.recommended,
   {
     files: ['**/*.js'],
     languageOptions: {
@@ -10,6 +13,7 @@ module.exports = [
         require: 'readonly',
         module: 'readonly',
         __dirname: 'readonly',
+        Buffer: 'readonly',
         console: 'readonly',
         setTimeout: 'readonly',
       },

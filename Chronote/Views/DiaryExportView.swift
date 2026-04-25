@@ -6,13 +6,10 @@ struct DiaryExportView: View {
     @Environment(\.dismiss) private var dismiss
     
     @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)],
-        animation: .default
+        sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
     ) private var entries: FetchedResults<DiaryEntry>
     
     @State private var isExporting = false
-    @State private var exportFileURL: URL? = nil
-    @State private var showShareSheet = false
     @State private var showExportError = false
     
     private var dateRange: String {
@@ -126,8 +123,6 @@ struct DiaryExportView: View {
                     HapticManager.shared.click()
                     // 直接弹出分享菜单
                     presentShareSheet(for: fileURL)
-                    #else
-                    exportFileURL = fileURL
                     #endif
                 }
             } else {

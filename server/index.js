@@ -4,13 +4,12 @@ require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const express = require('express');
 const axios = require('axios');
-const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const pino = require('pino');
 const pinoHttp = require('pino-http');
 
 const log = pino({
-  level: process.env.LOG_LEVEL || 'info',
+  level: process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'warn' : 'info'),
   base: { service: 'lumory-backend' },
   timestamp: pino.stdTimeFunctions.isoTime,
   // pino-http 默认 info 级打 req.headers 快照，
@@ -24,9 +23,15 @@ const log = pino({
       'req.headers.cookie',
       'req.headers["x-api-key"]',
       'req.headers["x-app-secret"]',
+      'req.headers["x-install-id"]',
       'req.body.messages[*].content',
       'req.body.input',
       'err.response.data',
+      'err.config.headers.authorization',
+      'err.config.headers.Authorization',
+      'err.config.headers["x-app-secret"]',
+      'err.config.headers["X-App-Secret"]',
+      'err.request._header',
     ],
     censor: '[REDACTED]',
   },
@@ -58,17 +63,21 @@ const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const REQUEST_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS) || 120_000;
 const MAX_MESSAGES_CHARS = Number(process.env.MAX_MESSAGES_CHARS) || 32_000;
 const MAX_EMBEDDING_INPUT_CHARS = Number(process.env.MAX_EMBEDDING_INPUT_CHARS) || 8_192;
+const MAX_CHAT_COMPLETION_TOKENS = Number(process.env.MAX_CHAT_COMPLETION_TOKENS) || 16_384;
+const DEFAULT_CHAT_COMPLETION_TOKENS = Number(process.env.DEFAULT_CHAT_COMPLETION_TOKENS) || 4_096;
+const GLOBAL_IP_LIMIT_MAX = Number(process.env.GLOBAL_IP_LIMIT_MAX) || 600;
+const CHAT_MODEL_ALLOWLIST = new Set(['gpt-5.5', 'gpt-5.4-mini']);
+const CHAT_DEFAULT_MODEL = 'gpt-5.5';
+const EMBEDDING_MODEL = 'text-embedding-3-small';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 const app = express();
+app.disable('x-powered-by');
 // 后端永远在 nginx:443 (loopback) 后面——信任 loopback 的 X-Forwarded-For 让
 // `req.ip` 反映真实客户端 IP，而不是 127.0.0.1。不这样的话 express-rate-limit 的
 // per-IP 桶会退化成"全 app 共享一个桶"。只 trust loopback，避免被非 nginx 来源伪造。
 app.set('trust proxy', 'loopback');
 
-// Express 5 不带 CORS。native client 并不会触发 preflight，但如果以后挂 web 面板 / 调试页，
-// 默认 deny 比默认 open 安全——明确允许域名时再改。
-app.use(cors({ origin: false }));
 app.use(express.json({ limit: '1mb' }));
 app.use(
   pinoHttp({
@@ -107,9 +116,15 @@ function requireAppSecret(req, res, next) {
 // 格式校验挡掉伪造 / 空 / 不合规字符串，fallback 回 IP（开发环境 simulator 也能跑通）。
 const installKey = (req) => {
   const id = req.get('x-install-id');
-  if (id && /^[A-F0-9-]{36}$/i.test(id)) return 'install:' + id;
+  const normalized = normalizeInstallId(id);
+  if (normalized) return 'install:' + normalized;
   return 'ip:' + req.ip;
 };
+
+function normalizeInstallId(id) {
+  if (typeof id === 'string' && /^[A-F0-9-]{36}$/i.test(id)) return id.toLowerCase();
+  return null;
+}
 
 // 速率限制。分端点 + per-install (`X-Install-Id`) 按"单用户"计额。
 //
@@ -144,7 +159,7 @@ const embeddingsLimiter = rateLimit({
 // 一家人共用 NAT 也不会撞到；只有单 IP > 10/s 才会被挡。
 const globalIPLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 600,
+  max: GLOBAL_IP_LIMIT_MAX,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: { error: 'rate_limited_global' },
@@ -155,11 +170,85 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', message: 'Backend is running' });
 });
 
-// 鉴权挂到整个 /api；rate limit 按路径分别挂，避免 chat 和 embeddings 互相干扰。
+// 鉴权挂到整个 /api；通过鉴权后再计入 globalIPLimiter，避免未授权流量耗尽正常用户配额。
 // globalIPLimiter 在 per-path limiter 前面：per-install 配额 + per-IP 上限两层保险。
 app.use('/api', requireAppSecret, globalIPLimiter);
 app.use('/api/openai/chat/completions', chatLimiter);
 app.use('/api/openai/embeddings', embeddingsLimiter);
+
+function countContentChars(content) {
+  if (typeof content === 'string') return content.length;
+  if (Array.isArray(content)) {
+    return content.reduce((total, part) => {
+      if (part && part.type === 'text' && typeof part.text === 'string') {
+        return total + part.text.length;
+      }
+      return total;
+    }, 0);
+  }
+  return 0;
+}
+
+function countMessageContentChars(messages) {
+  if (!Array.isArray(messages)) return 0;
+  return messages.reduce((total, message) => total + countContentChars(message?.content), 0);
+}
+
+function sanitizeMessageContent(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((part) => part && part.type === 'text' && typeof part.text === 'string')
+    .map((part) => ({ type: 'text', text: part.text }));
+}
+
+function sanitizeReasoningEffort(model, effort) {
+  if (model === 'gpt-5.4-mini') {
+    return effort === 'low' ? 'low' : 'none';
+  }
+  if (effort === 'medium' || effort === 'high') return effort;
+  return 'low';
+}
+
+function clampCompletionTokens(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return Math.min(DEFAULT_CHAT_COMPLETION_TOKENS, MAX_CHAT_COMPLETION_TOKENS);
+  }
+  return Math.min(Math.floor(numeric), MAX_CHAT_COMPLETION_TOKENS);
+}
+
+function sanitizeChatBody(body) {
+  const requestedModel = typeof body?.model === 'string' ? body.model : CHAT_DEFAULT_MODEL;
+  const model = CHAT_MODEL_ALLOWLIST.has(requestedModel) ? requestedModel : CHAT_DEFAULT_MODEL;
+  const messages = (Array.isArray(body?.messages) ? body.messages : []).map((message) => ({
+    role: ['system', 'user', 'assistant'].includes(message?.role) ? message.role : 'user',
+    content: sanitizeMessageContent(message?.content),
+  }));
+
+  const sanitized = {
+    model,
+    messages,
+    stream: body?.stream === true ? true : undefined,
+    reasoning_effort: sanitizeReasoningEffort(model, body?.reasoning_effort),
+    max_completion_tokens: clampCompletionTokens(body?.max_completion_tokens),
+  };
+
+  if (body?.response_format?.type === 'json_object') {
+    sanitized.response_format = { type: 'json_object' };
+  }
+
+  return sanitized;
+}
+
+function safeUpstreamError(err) {
+  return {
+    name: err?.name,
+    message: err?.message,
+    code: err?.code,
+    status: err?.response?.status,
+  };
+}
 
 // OpenAI proxy. Streaming vs buffered decided by `req.body.stream`.
 app.post('/api/openai/chat/completions', async (req, res) => {
@@ -170,11 +259,9 @@ app.post('/api/openai/chat/completions', async (req, res) => {
     res.status(400).json({ error: 'Request body must include a non-empty `messages` array.' });
     return;
   }
+  const upstreamBody = sanitizeChatBody(req.body);
   // 防止恶意超长 prompt（也挡了意外拼错 prompt 模板浪费 tokens 的失误）
-  const totalChars = req.body.messages.reduce(
-    (acc, m) => acc + (typeof m?.content === 'string' ? m.content.length : 0),
-    0
-  );
+  const totalChars = countMessageContentChars(upstreamBody.messages);
   if (totalChars > MAX_MESSAGES_CHARS) {
     res.status(413).json({ error: 'messages too large' });
     return;
@@ -192,7 +279,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       const upstream = await axios({
         method: 'post',
         url: `${OPENAI_BASE_URL}/chat/completions`,
-        data: req.body,
+        data: upstreamBody,
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
           'Content-Type': 'application/json',
@@ -204,14 +291,25 @@ app.post('/api/openai/chat/completions', async (req, res) => {
 
       activeStreams.add(upstream.data);
 
-      upstream.data.on('data', (chunk) => res.write(chunk));
+      let sawDone = false;
+      let doneScanTail = '';
+      upstream.data.on('data', (chunk) => {
+        const text = chunk.toString('utf8');
+        doneScanTail = (doneScanTail + text).slice(-128);
+        if (doneScanTail.includes('data: [DONE]')) sawDone = true;
+        res.write(chunk);
+      });
       upstream.data.on('end', () => {
         activeStreams.delete(upstream.data);
+        if (!sawDone) {
+          res.destroy(new Error('upstream ended without [DONE]'));
+          return;
+        }
         res.end();
       });
       upstream.data.on('error', (error) => {
         activeStreams.delete(upstream.data);
-        req.log.error({ err: error }, 'upstream stream errored');
+        req.log.error({ err: safeUpstreamError(error) }, 'upstream stream errored');
         // 不能写 `data: [DONE]`—— 那是 SSE 的**成功**终止帧，iOS 端的
         // `streamChat` 看到 `[DONE]` 会 `break` 并 `return result`，把半截
         // 流当完整响应回调给用户。硬破连接让客户端 `bytes.lines` 抛错，
@@ -229,7 +327,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
     } else {
       req.log.info('non-streaming request started');
 
-      const upstream = await axios.post(`${OPENAI_BASE_URL}/chat/completions`, req.body, {
+      const upstream = await axios.post(`${OPENAI_BASE_URL}/chat/completions`, upstreamBody, {
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
           'Content-Type': 'application/json',
@@ -240,7 +338,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
     }
   } catch (err) {
     const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
-    req.log.error({ err, status }, 'OpenAI request failed');
+    req.log.error({ err: safeUpstreamError(err), status }, 'OpenAI request failed');
     if (!res.headersSent) {
       const retryAfter = err.response?.headers?.['retry-after'];
       if (status === 429 && retryAfter) {
@@ -268,7 +366,7 @@ app.post('/api/openai/embeddings', async (req, res) => {
     const upstream = await axios.post(
       `${OPENAI_BASE_URL}/embeddings`,
       {
-        model: req.body.model || 'text-embedding-3-small',
+        model: EMBEDDING_MODEL,
         input: req.body.input,
       },
       {
@@ -282,7 +380,7 @@ app.post('/api/openai/embeddings', async (req, res) => {
     res.json(upstream.data);
   } catch (err) {
     const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
-    req.log.error({ err, status }, 'OpenAI embeddings request failed');
+    req.log.error({ err: safeUpstreamError(err), status }, 'OpenAI embeddings request failed');
     if (!res.headersSent) {
       const retryAfter = err.response?.headers?.['retry-after'];
       if (status === 429 && retryAfter) {
@@ -323,13 +421,15 @@ function sanitizeUpstreamError(err, status) {
   // 非 prod：仍然不回传上游原始 body，只回 HTTP status + axios 侧的 err.code
   // （ECONNABORTED / ENOTFOUND 等），避免 OpenAI error.type/error.param 等内部
   // 标识泄漏给客户端调试控制台。
-  return { code: err.code, status };
+  return { code: err.code || 'upstream_error', status };
 }
 
-const port = process.env.PORT || 3000;
-const server = app.listen(port, () => {
-  log.info({ port, upstream: OPENAI_BASE_URL, timeoutMs: REQUEST_TIMEOUT_MS }, 'server listening');
-});
+function startServer() {
+  const port = process.env.PORT || 3000;
+  return app.listen(port, () => {
+    log.info({ port, upstream: OPENAI_BASE_URL, timeoutMs: REQUEST_TIMEOUT_MS }, 'server listening');
+  });
+}
 
 // Graceful shutdown — give in-flight requests up to 10s to finish before exit.
 const shutdown = (signal) => {
@@ -349,13 +449,13 @@ const shutdown = (signal) => {
     try {
       s.destroy(shutdownErr);
     } catch (e) {
-      log.warn({ err: e }, 'error destroying active stream during shutdown');
+      log.warn({ err: safeUpstreamError(e) }, 'error destroying active stream during shutdown');
     }
   }
   activeStreams.clear();
-  server.close((err) => {
+  activeServer.close((err) => {
     if (err) {
-      log.error({ err }, 'error during server.close');
+      log.error({ err: safeUpstreamError(err) }, 'error during server.close');
       process.exit(1);
     }
     process.exit(0);
@@ -367,14 +467,29 @@ const shutdown = (signal) => {
   }, 10_000).unref();
 };
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGHUP', () => shutdown('SIGHUP'));
+let activeServer;
+if (require.main === module) {
+  activeServer = startServer();
 
-process.on('unhandledRejection', (reason) => {
-  log.error({ err: reason }, 'unhandledRejection');
-});
-process.on('uncaughtException', (err) => {
-  log.fatal({ err }, 'uncaughtException');
-  process.exit(1);
-});
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGHUP', () => shutdown('SIGHUP'));
+
+  process.on('unhandledRejection', (reason) => {
+    log.error({ err: safeUpstreamError(reason) }, 'unhandledRejection');
+    process.exit(1);
+  });
+  process.on('uncaughtException', (err) => {
+    log.fatal({ err: safeUpstreamError(err) }, 'uncaughtException');
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  app,
+  countMessageContentChars,
+  sanitizeChatBody,
+  sanitizeUpstreamError,
+  normalizeInstallId,
+  startServer,
+};

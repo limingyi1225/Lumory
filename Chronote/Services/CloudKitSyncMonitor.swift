@@ -5,7 +5,6 @@ import CloudKit
 @available(iOS 13.0, macOS 10.15, *)
 class CloudKitSyncMonitor: ObservableObject {
     @Published var syncStatus: SyncStatus = .unknown
-    @Published var lastSyncDate: Date?
     @Published var errorMessage: String?
     
     private let container: NSPersistentCloudKitContainer
@@ -20,41 +19,13 @@ class CloudKitSyncMonitor: ObservableObject {
     /// 直接绕过冷却。
     private var lastCheckDate: Date?
 
-    enum SyncStatus: String, CaseIterable {
+    enum SyncStatus: String {
         case unknown = "Unknown"
         case syncing = "Syncing"
         case synced = "Synced"
         case error = "Error"
         case notSignedIn = "Not Signed In"
         case networkUnavailable = "Network Unavailable"
-
-        var displayName: String {
-            switch self {
-            case .unknown:
-                return NSLocalizedString("sync.status.unknown", value: "未知", comment: "CloudKit sync status: unknown")
-            case .syncing:
-                return NSLocalizedString("sync.status.syncing", value: "同步中…", comment: "CloudKit sync status: syncing")
-            case .synced:
-                return NSLocalizedString("sync.status.synced", value: "已同步", comment: "CloudKit sync status: synced")
-            case .error:
-                return NSLocalizedString("sync.status.error", value: "同步出错", comment: "CloudKit sync status: error")
-            case .notSignedIn:
-                return NSLocalizedString("sync.status.notSignedIn", value: "未登录 iCloud", comment: "CloudKit sync status: user not signed in")
-            case .networkUnavailable:
-                return NSLocalizedString("sync.status.networkUnavailable", value: "网络不可用", comment: "CloudKit sync status: network unavailable")
-            }
-        }
-        
-        var iconName: String {
-            switch self {
-            case .unknown: return "questionmark.circle"
-            case .syncing: return "arrow.triangle.2.circlepath"
-            case .synced: return "checkmark.circle"
-            case .error: return "exclamationmark.triangle"
-            case .notSignedIn: return "person.crop.circle.badge.xmark"
-            case .networkUnavailable: return "wifi.slash"
-            }
-        }
     }
     
     init(container: NSPersistentCloudKitContainer) {
@@ -72,10 +43,8 @@ class CloudKitSyncMonitor: ObservableObject {
         ) { [weak self] _ in
             Log.info("[CloudKitSyncMonitor] Remote changes detected", category: .sync)
             self?.syncStatus = .synced
-            self?.lastSyncDate = Date()
             self?.errorMessage = nil
         })
-
 
         // 监听Core Data保存通知
         observerTokens.append(NotificationCenter.default.addObserver(
@@ -103,15 +72,6 @@ class CloudKitSyncMonitor: ObservableObject {
             Log.info("[CloudKitSyncMonitor] Local changes saved, initiating CloudKit sync", category: .sync)
             self?.syncStatus = .syncing
             self?.errorMessage = nil
-
-            // Give CloudKit some time to process the changes
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                // Only update to synced if we're still in syncing state
-                if self?.syncStatus == .syncing {
-                    self?.syncStatus = .synced
-                    self?.lastSyncDate = Date()
-                }
-            }
         })
 
         // 监听CloudKit容器事件 (iOS 14+ / macOS 11+)
@@ -121,7 +81,8 @@ class CloudKitSyncMonitor: ObservableObject {
                 object: container,
                 queue: .main
             ) { [weak self] notification in
-                if let event = notification.userInfo?[NSPersistentCloudKitContainer.eventNotificationUserInfoKey] as? NSPersistentCloudKitContainer.Event {
+                let eventKey = NSPersistentCloudKitContainer.eventNotificationUserInfoKey
+                if let event = notification.userInfo?[eventKey] as? NSPersistentCloudKitContainer.Event {
                     self?.handleCloudKitEvent(event)
                 }
             })
@@ -139,10 +100,18 @@ class CloudKitSyncMonitor: ObservableObject {
                 syncStatus = .synced
                 errorMessage = nil
             } else {
-                let detail = event.error?.localizedDescription ?? NSLocalizedString("sync.error.unknownDetail", value: "未知错误", comment: "Fallback when CloudKit event has no description")
+                let detail = event.error?.localizedDescription ?? NSLocalizedString(
+                    "sync.error.unknownDetail",
+                    value: "未知错误",
+                    comment: "Fallback when CloudKit event has no description"
+                )
                 Log.error("[CloudKitSyncMonitor] CloudKit setup failed: \(detail)", category: .sync)
                 syncStatus = .error
-                let template = NSLocalizedString("sync.error.setupFailed", value: "CloudKit 初始化失败：%@", comment: "Shown when CloudKit setup event fails; %@ is system error")
+                let template = NSLocalizedString(
+                    "sync.error.setupFailed",
+                    value: "CloudKit 初始化失败：%@",
+                    comment: "Shown when CloudKit setup event fails; %@ is system error"
+                )
                 errorMessage = String(format: template, detail)
             }
 
@@ -150,13 +119,20 @@ class CloudKitSyncMonitor: ObservableObject {
             if event.succeeded {
                 Log.info("[CloudKitSyncMonitor] CloudKit import completed successfully", category: .sync)
                 syncStatus = .synced
-                lastSyncDate = Date()
                 errorMessage = nil
             } else {
-                let detail = event.error?.localizedDescription ?? NSLocalizedString("sync.error.unknownDetail", value: "未知错误", comment: "Fallback when CloudKit event has no description")
+                let detail = event.error?.localizedDescription ?? NSLocalizedString(
+                    "sync.error.unknownDetail",
+                    value: "未知错误",
+                    comment: "Fallback when CloudKit event has no description"
+                )
                 Log.error("[CloudKitSyncMonitor] CloudKit import failed: \(detail)", category: .sync)
                 syncStatus = .error
-                let template = NSLocalizedString("sync.error.importFailed", value: "导入失败：%@", comment: "Shown when CloudKit import event fails; %@ is system error")
+                let template = NSLocalizedString(
+                    "sync.error.importFailed",
+                    value: "导入失败：%@",
+                    comment: "Shown when CloudKit import event fails; %@ is system error"
+                )
                 errorMessage = String(format: template, detail)
             }
 
@@ -164,13 +140,20 @@ class CloudKitSyncMonitor: ObservableObject {
             if event.succeeded {
                 Log.info("[CloudKitSyncMonitor] CloudKit export completed successfully", category: .sync)
                 syncStatus = .synced
-                lastSyncDate = Date()
                 errorMessage = nil
             } else {
-                let detail = event.error?.localizedDescription ?? NSLocalizedString("sync.error.unknownDetail", value: "未知错误", comment: "Fallback when CloudKit event has no description")
+                let detail = event.error?.localizedDescription ?? NSLocalizedString(
+                    "sync.error.unknownDetail",
+                    value: "未知错误",
+                    comment: "Fallback when CloudKit event has no description"
+                )
                 Log.error("[CloudKitSyncMonitor] CloudKit export failed: \(detail)", category: .sync)
                 syncStatus = .error
-                let template = NSLocalizedString("sync.error.exportFailed", value: "导出失败：%@", comment: "Shown when CloudKit export event fails; %@ is system error")
+                let template = NSLocalizedString(
+                    "sync.error.exportFailed",
+                    value: "导出失败：%@",
+                    comment: "Shown when CloudKit export event fails; %@ is system error"
+                )
                 errorMessage = String(format: template, detail)
             }
 
@@ -196,7 +179,11 @@ class CloudKitSyncMonitor: ObservableObject {
                 if let error = error {
                     Log.error("[CloudKitSyncMonitor] Account status error: \(error)", category: .sync)
                     self?.syncStatus = .error
-                    let template = NSLocalizedString("sync.error.accountError", value: "iCloud 账户错误：%@", comment: "iCloud account-status error; %@ is system message")
+                    let template = NSLocalizedString(
+                        "sync.error.accountError",
+                        value: "iCloud 账户错误：%@",
+                        comment: "iCloud account-status error; %@ is system message"
+                    )
                     self?.errorMessage = String(format: template, error.localizedDescription)
                     return
                 }
@@ -207,19 +194,39 @@ class CloudKitSyncMonitor: ObservableObject {
                     self?.checkDatabaseAccessibility(container: ckContainer)
                 case .noAccount:
                     self?.syncStatus = .notSignedIn
-                    self?.errorMessage = NSLocalizedString("sync.error.noAccount", value: "请前往系统设置登录 iCloud", comment: "Error shown when user has no iCloud account")
+                    self?.errorMessage = NSLocalizedString(
+                        "sync.error.noAccount",
+                        value: "请前往系统设置登录 iCloud",
+                        comment: "Error shown when user has no iCloud account"
+                    )
                 case .restricted:
                     self?.syncStatus = .notSignedIn
-                    self?.errorMessage = NSLocalizedString("sync.error.restricted", value: "iCloud 访问受限", comment: "Error shown when iCloud access is restricted (e.g. Screen Time)")
+                    self?.errorMessage = NSLocalizedString(
+                        "sync.error.restricted",
+                        value: "iCloud 访问受限",
+                        comment: "Error shown when iCloud access is restricted (e.g. Screen Time)"
+                    )
                 case .couldNotDetermine:
                     self?.syncStatus = .unknown
-                    self?.errorMessage = NSLocalizedString("sync.error.couldNotDetermine", value: "无法确定 iCloud 状态", comment: "Error shown when iCloud account status is indeterminate")
+                    self?.errorMessage = NSLocalizedString(
+                        "sync.error.couldNotDetermine",
+                        value: "无法确定 iCloud 状态",
+                        comment: "Error shown when iCloud account status is indeterminate"
+                    )
                 case .temporarilyUnavailable:
                     self?.syncStatus = .networkUnavailable
-                    self?.errorMessage = NSLocalizedString("sync.error.temporarilyUnavailable", value: "iCloud 暂时不可用", comment: "Error shown when iCloud is temporarily unavailable")
+                    self?.errorMessage = NSLocalizedString(
+                        "sync.error.temporarilyUnavailable",
+                        value: "iCloud 暂时不可用",
+                        comment: "Error shown when iCloud is temporarily unavailable"
+                    )
                 @unknown default:
                     self?.syncStatus = .unknown
-                    self?.errorMessage = NSLocalizedString("sync.error.unknown", value: "未知的 iCloud 状态", comment: "Fallback error for unknown iCloud account status")
+                    self?.errorMessage = NSLocalizedString(
+                        "sync.error.unknown",
+                        value: "未知的 iCloud 状态",
+                        comment: "Fallback error for unknown iCloud account status"
+                    )
                 }
             }
         }
@@ -263,13 +270,25 @@ class CloudKitSyncMonitor: ObservableObject {
                 switch ckError?.code {
                 case .networkUnavailable, .networkFailure:
                     self?.syncStatus = .networkUnavailable
-                    self?.errorMessage = NSLocalizedString("sync.error.networkUnavailable", value: "iCloud 同步无法连接网络", comment: "Shown when CloudKit DB access fails due to network")
+                    self?.errorMessage = NSLocalizedString(
+                        "sync.error.networkUnavailable",
+                        value: "iCloud 同步无法连接网络",
+                        comment: "Shown when CloudKit DB access fails due to network"
+                    )
                 case .notAuthenticated:
                     self?.syncStatus = .notSignedIn
-                    self?.errorMessage = NSLocalizedString("sync.error.notAuthenticated", value: "请登录 iCloud", comment: "Shown when CloudKit DB access fails due to missing auth")
+                    self?.errorMessage = NSLocalizedString(
+                        "sync.error.notAuthenticated",
+                        value: "请登录 iCloud",
+                        comment: "Shown when CloudKit DB access fails due to missing auth"
+                    )
                 case .quotaExceeded:
                     self?.syncStatus = .error
-                    self?.errorMessage = NSLocalizedString("sync.error.quotaExceeded", value: "iCloud 存储空间不足", comment: "Shown when CloudKit returns quota exceeded")
+                    self?.errorMessage = NSLocalizedString(
+                        "sync.error.quotaExceeded",
+                        value: "iCloud 存储空间不足",
+                        comment: "Shown when CloudKit returns quota exceeded"
+                    )
                 case .zoneNotFound, .userDeletedZone:
                     // This is expected for new installations
                     Log.info("[CloudKitSyncMonitor] Zone not found (expected for new installations)", category: .sync)
@@ -278,7 +297,11 @@ class CloudKitSyncMonitor: ObservableObject {
                 default:
                     Log.error("[CloudKitSyncMonitor] Database access error: \(error)", category: .sync)
                     self?.syncStatus = .error
-                    let template = NSLocalizedString("sync.error.generic", value: "iCloud 同步错误：%@", comment: "Generic CloudKit DB error; %@ is system message")
+                    let template = NSLocalizedString(
+                        "sync.error.generic",
+                        value: "iCloud 同步错误：%@",
+                        comment: "Generic CloudKit DB error; %@ is system message"
+                    )
                     self?.errorMessage = String(format: template, error.localizedDescription)
                 }
             } else {
@@ -307,7 +330,11 @@ class CloudKitSyncMonitor: ObservableObject {
                 Log.info("[CloudKitSyncMonitor] Local changes saved, triggering CloudKit sync", category: .sync)
             } catch {
                 syncStatus = .error
-                let template = NSLocalizedString("sync.error.saveFailed", value: "保存本地修改失败：%@", comment: "Shown when forceSync fails to save the viewContext; %@ is system error")
+                let template = NSLocalizedString(
+                    "sync.error.saveFailed",
+                    value: "保存本地修改失败：%@",
+                    comment: "Shown when forceSync fails to save the viewContext; %@ is system error"
+                )
                 errorMessage = String(format: template, error.localizedDescription)
                 return
             }
@@ -324,7 +351,11 @@ class CloudKitSyncMonitor: ObservableObject {
             if let error = error {
                 DispatchQueue.main.async {
                     self?.syncStatus = .error
-                    let template = NSLocalizedString("sync.error.accountCheckFailed", value: "账户检查失败：%@", comment: "Shown when account-status check fails inside forceSync; %@ is system error")
+                    let template = NSLocalizedString(
+                        "sync.error.accountCheckFailed",
+                        value: "账户检查失败：%@",
+                        comment: "Shown when account-status check fails inside forceSync; %@ is system error"
+                    )
                     self?.errorMessage = String(format: template, error.localizedDescription)
                 }
                 return
@@ -333,7 +364,11 @@ class CloudKitSyncMonitor: ObservableObject {
             guard status == .available else {
                 DispatchQueue.main.async {
                     self?.syncStatus = .notSignedIn
-                    self?.errorMessage = NSLocalizedString("sync.error.accountUnavailable", value: "iCloud 账户不可用", comment: "Shown when forceSync sees a non-available iCloud account")
+                    self?.errorMessage = NSLocalizedString(
+                        "sync.error.accountUnavailable",
+                        value: "iCloud 账户不可用",
+                        comment: "Shown when forceSync sees a non-available iCloud account"
+                    )
                 }
                 return
             }
@@ -391,12 +426,15 @@ class CloudKitSyncMonitor: ObservableObject {
                 if ckError?.code == .zoneNotFound || ckError?.code == .userDeletedZone {
                     // This is normal for new installations
                     self?.syncStatus = .synced
-                    self?.lastSyncDate = Date()
                     self?.errorMessage = nil
                     Log.info("[CloudKitSyncMonitor] Sync verified (new installation)", category: .sync)
                 } else {
                     self?.syncStatus = .error
-                    let template = NSLocalizedString("sync.error.verifyFailed", value: "同步校验失败：%@", comment: "Shown when forceSync's verify-step query fails; %@ is system error")
+                    let template = NSLocalizedString(
+                        "sync.error.verifyFailed",
+                        value: "同步校验失败：%@",
+                        comment: "Shown when forceSync's verify-step query fails; %@ is system error"
+                    )
                     self?.errorMessage = String(format: template, error.localizedDescription)
                     Log.error("[CloudKitSyncMonitor] Sync verification error: \(error)", category: .sync)
                 }
@@ -408,9 +446,11 @@ class CloudKitSyncMonitor: ObservableObject {
                 // 是为了让用户主动 pull-to-refresh 后立刻看到一个非"unknown/error"的反馈,
                 // 不要把它当成 export 完成的权威信号。
                 self?.syncStatus = .synced
-                self?.lastSyncDate = Date()
                 self?.errorMessage = nil
-                Log.info("[CloudKitSyncMonitor] CloudKit reachable (export completion is confirmed via eventChangedNotification, not this query)", category: .sync)
+                Log.info(
+                    "[CloudKitSyncMonitor] CloudKit reachable; export completion is confirmed via eventChangedNotification",
+                    category: .sync
+                )
             }
         }
     }

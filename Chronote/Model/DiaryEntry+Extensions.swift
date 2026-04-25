@@ -25,53 +25,27 @@ extension DiaryEntry {
             .replacingOccurrences(of: "\"", with: "")
         return filtered
     }
-    
+
     /// 包装器属性，避免强制解包
     var wrappedText: String {
         text ?? ""
     }
-    
+
     var wrappedDate: Date {
         date ?? Date()
     }
-    
+
     var wrappedSummary: String? {
         summary
     }
-    
-    var wrappedId: UUID {
-        id ?? UUID()
-    }
-    
+
     var wrappedAudioFileName: String? {
         audioFileName
     }
-    
-    var wrappedImageFileNames: String? {
-        imageFileNames
-    }
-    
-    /// 格式化日期用于显示
-    var formattedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter.string(from: wrappedDate)
-    }
-    
+
     /// 心情颜色
     var moodColor: Color {
         Color.moodSpectrum(value: moodValue)
-    }
-    
-    /// Content property (alias for text)
-    var content: String? {
-        text
-    }
-    
-    /// Mood as integer (1-5)
-    var mood: Int16 {
-        Int16(min(max(Int(moodValue * 4 + 1), 1), 5))
     }
 }
 
@@ -148,7 +122,11 @@ extension DiaryEntry {
     /// 对源端的对齐就没有任何要求，memcpy 本身是逐字节的。
     var embeddingVector: [Float]? {
         guard let data = embedding, !data.isEmpty else { return nil }
+        return Self.decodeEmbeddingVector(data)
+    }
 
+    static func decodeEmbeddingVector(_ data: Data) -> [Float]? {
+        guard !data.isEmpty else { return nil }
         // V1 header 检测：前 4 字节等于 "EMB1"，后 4 字节是 LE UInt32 dimension
         let headerLen = 8
         if data.count >= headerLen {
@@ -201,16 +179,17 @@ extension DiaryEntry {
 
     /// 写入 embedding 向量（永远写 V1 格式）
     func setEmbedding(_ vector: [Float]) {
+        embedding = Self.encodeEmbeddingVector(vector)
+    }
+
+    static func encodeEmbeddingVector(_ vector: [Float]) -> Data {
         var payload = Data(Self.embeddingMagicV1)
         var dim = UInt32(vector.count).littleEndian
         payload.append(Data(bytes: &dim, count: MemoryLayout<UInt32>.size))
-        vector.withUnsafeBufferPointer { buf in
-            payload.append(UnsafeBufferPointer(start: buf.baseAddress, count: buf.count).withMemoryRebound(to: UInt8.self) { raw in
-                guard let base = raw.baseAddress else { return Data() }
-                return Data(bytes: base, count: raw.count)
-            })
+        vector.withUnsafeBytes { rawBuffer in
+            payload.append(contentsOf: rawBuffer)
         }
-        embedding = payload
+        return payload
     }
 }
 
@@ -244,11 +223,11 @@ extension DiaryEntry {
         guard let names = imageFileNames, !names.isEmpty else { return [] }
         return names.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
     }
-    
+
     /// Loads images from synced data
     func loadImagesFromSync() -> [Data] {
         guard let data = imagesData else { return [] }
-        
+
         do {
             if let images = try NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSArray.self, NSData.self], from: data) as? [Data] {
                 Log.info("[DiaryEntry] Loaded \(images.count) images from sync", category: .persistence)
@@ -257,52 +236,73 @@ extension DiaryEntry {
         } catch {
             Log.error("[DiaryEntry] Failed to decode images: \(error)", category: .persistence)
         }
-        
+
         return []
     }
-    
+
     /// Saves image data to iCloud-synced documents directory and returns the file name
     static func saveImageToDocuments(_ imageData: Data, fileName: String? = nil) throws -> String {
         let fileName = fileName ?? "\(UUID().uuidString).jpg"
-        
+
         // Always save to local first
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let localImagesDir = documentsPath.appendingPathComponent("LumoryImages")
-        
+
         // Create directory if needed
         if !FileManager.default.fileExists(atPath: localImagesDir.path) {
             try FileManager.default.createDirectory(at: localImagesDir, withIntermediateDirectories: true, attributes: nil)
         }
-        
+
         let localFileURL = localImagesDir.appendingPathComponent(fileName)
         try imageData.write(to: localFileURL)
         Log.info("[DiaryEntry] Saved image locally to: \(localFileURL.path)", category: .persistence)
-        
+
         // Also try to save to iCloud if available
         if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
             let iCloudImagesDir = iCloudURL.appendingPathComponent("Documents/LumoryImages")
-            
+
             if !FileManager.default.fileExists(atPath: iCloudImagesDir.path) {
                 try? FileManager.default.createDirectory(at: iCloudImagesDir, withIntermediateDirectories: true, attributes: nil)
             }
-            
+
             let iCloudFileURL = iCloudImagesDir.appendingPathComponent(fileName)
             try? imageData.write(to: iCloudFileURL)
             Log.info("[DiaryEntry] Also saved image to iCloud: \(iCloudFileURL.path)", category: .persistence)
         }
-        
+
         return fileName
     }
-    
+
     /// Deletes an image file from documents directory
     static func deleteImageFromDocuments(_ fileName: String) throws {
-        let fileURL = getImageURL(for: fileName)
-        
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            try FileManager.default.removeItem(at: fileURL)
+        let fm = FileManager.default
+        var urls: [URL] = []
+
+        if let iCloudURL = fm.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
+            urls.append(iCloudURL.appendingPathComponent("Documents/LumoryImages").appendingPathComponent(fileName))
+        }
+        let documentsPath = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        urls.append(documentsPath.appendingPathComponent("LumoryImages").appendingPathComponent(fileName))
+        urls.append(documentsPath.appendingPathComponent(fileName))
+
+        var firstError: Error?
+        for fileURL in urls {
+            guard fm.fileExists(atPath: fileURL.path) else { continue }
+            do {
+                try fm.removeItem(at: fileURL)
+            } catch {
+                if firstError == nil { firstError = error }
+                Log.error("[DiaryEntry] Failed to delete image copy \(fileURL.path): \(error)", category: .persistence)
+            }
+        }
+        DiaryEntry.cacheQueue.async(flags: .barrier) {
+            DiaryEntry.imageCache.removeObject(forKey: fileName as NSString)
+        }
+        if let firstError {
+            throw firstError
         }
     }
-    
+
     /// Gets the proper URL for image storage (iCloud or local)
     private static func getImageURL(for fileName: String) -> URL {
         // Try to use iCloud container
@@ -319,7 +319,7 @@ extension DiaryEntry {
             return imagesURL.appendingPathComponent(fileName)
         }
     }
-    
+
     /// Loads image data from file name with caching — **静态版本**，不需要 DiaryEntry 实例。
     /// 用在后台 Task 里做缩略图加载（列表 cell）——避免捕获 managed object 跨线程。
     /// 逻辑和实例方法一致：iCloud / LumoryImages / 老位置依次回退。
@@ -371,17 +371,17 @@ extension DiaryEntry {
     func loadImageData(fileName: String) -> Data? {
         // Check cache first
         let cacheKey = fileName as NSString
-        
+
         // Thread-safe cache read
         var cachedData: Data?
         DiaryEntry.cacheQueue.sync {
             cachedData = DiaryEntry.imageCache.object(forKey: cacheKey) as Data?
         }
-        
+
         if let data = cachedData {
             return data
         }
-        
+
         // Try iCloud first
         if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
             let iCloudFileURL = iCloudURL.appendingPathComponent("Documents/LumoryImages").appendingPathComponent(fileName)
@@ -431,7 +431,7 @@ extension DiaryEntry {
         Log.info("[DiaryEntry] Image not found: \(fileName)", category: .persistence)
         return nil
     }
-    
+
     /// 异步加载所有图片（避免阻塞主线程）
     func loadAllImageDataAsync() async -> [Data] {
         // First try to load from synced data
@@ -439,28 +439,26 @@ extension DiaryEntry {
         if !syncedImages.isEmpty {
             return syncedImages
         }
-        
+
         // Fallback to loading from files with concurrent loading
         let fileNames = imageFileNameArray
         guard !fileNames.isEmpty else { return [] }
-        
-        return await withTaskGroup(of: Data?.self, returning: [Data].self) { group in
-            for fileName in fileNames {
-                group.addTask { [weak self] in
-                    self?.loadImageData(fileName: fileName)
+
+        return await withTaskGroup(of: (Int, Data?).self, returning: [Data].self) { group in
+            for (index, fileName) in fileNames.enumerated() {
+                group.addTask {
+                    (index, DiaryEntry.loadImageData(fileName: fileName))
                 }
             }
-            
-            var results: [Data] = []
-            for await data in group {
-                if let data = data {
-                    results.append(data)
-                }
+
+            var results = [Data?](repeating: nil, count: fileNames.count)
+            for await (index, data) in group where index < results.count {
+                results[index] = data
             }
-            return results
+            return results.compactMap { $0 }
         }
     }
-    
+
     /// 删除此 entry 绑定的音频文件。覆盖 iCloud / LumoryAudio / 老扁平 Documents 三处——
     /// 同一个 fileName 可能在多处都有副本（iCloud 下载缓存 + 本地原始），漏删任意一处都会
     /// 留成孤儿 .m4a 文件在用户的磁盘/iCloud 上累积。
@@ -470,6 +468,10 @@ extension DiaryEntry {
     /// DiaryDetailView delete button / SettingsView.deleteAllEntries）都调用本方法。
     func deleteAudioFile() {
         guard let fileName = audioFileName, !fileName.isEmpty else { return }
+        DiaryEntry.deleteAudioFromDocuments(fileName)
+    }
+
+    static func deleteAudioFromDocuments(_ fileName: String) {
         let fm = FileManager.default
 
         // iCloud 位置
@@ -496,20 +498,17 @@ extension DiaryEntry {
         }
     }
 
-    /// Deletes all images associated with this entry
+    /// Deletes all images associated with this entry.
+    /// Also clears managed-object fields; callers must save the context or delete the entry afterward.
     func deleteAllImages() {
         for fileName in imageFileNameArray {
-            // Remove from cache
-            DiaryEntry.cacheQueue.async(flags: .barrier) {
-                DiaryEntry.imageCache.removeObject(forKey: fileName as NSString)
-            }
             // Delete from disk
             try? DiaryEntry.deleteImageFromDocuments(fileName)
         }
         imageFileNames = nil
         imagesData = nil
     }
-    
+
     // MARK: - Helper Methods
     static func compressImageData(_ imageData: Data) -> Data {
         #if os(iOS)
@@ -567,11 +566,11 @@ extension DiaryEntry {
 
         #else
         guard let nsImage = NSImage(data: imageData) else { return imageData }
-        
+
         // For macOS, similar logic
         let pixelCount = Int(nsImage.size.width * nsImage.size.height)
         let compressionQuality: Float
-        
+
         switch pixelCount {
         case 0..<1_000_000:
             compressionQuality = 0.9
@@ -582,20 +581,20 @@ extension DiaryEntry {
         default:
             compressionQuality = 0.3
         }
-        
+
         if let tiffData = nsImage.tiffRepresentation,
            let bitmapRep = NSBitmapImageRep(data: tiffData) {
             return bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: compressionQuality]) ?? imageData
         }
-        
+
         return imageData
         #endif
     }
-    
+
     /// Clear all cached images
     static func clearImageCache() {
         cacheQueue.async(flags: .barrier) {
             imageCache.removeAllObjects()
         }
     }
-} 
+}

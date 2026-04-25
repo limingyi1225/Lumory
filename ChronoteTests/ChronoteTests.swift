@@ -917,6 +917,104 @@ struct ContextPromptStreakTests {
     }
 }
 
+// MARK: - DiaryEntry embedding codec
+
+struct EmbeddingCodecTests {
+    @Test func v1RoundTrip() {
+        let vector: [Float] = [0, 1, -2, 3.25]
+
+        let data = DiaryEntry.encodeEmbeddingVector(vector)
+
+        #expect(DiaryEntry.decodeEmbeddingVector(data) == vector)
+    }
+
+    @Test func legacyRawFloatFallback() {
+        let vector: [Float] = [0.25, -0.5, 2.0]
+        var raw = Data()
+        vector.withUnsafeBytes { raw.append(contentsOf: $0) }
+
+        #expect(DiaryEntry.decodeEmbeddingVector(raw) == vector)
+    }
+
+    @Test func malformedV1HeaderReturnsNil() {
+        var data = Data("EMB1".utf8)
+        var declaredDim = UInt32(2).littleEndian
+        data.append(Data(bytes: &declaredDim, count: MemoryLayout<UInt32>.size))
+        var oneFloat: Float = 1
+        data.append(Data(bytes: &oneFloat, count: MemoryLayout<Float>.size))
+
+        #expect(DiaryEntry.decodeEmbeddingVector(data) == nil)
+    }
+}
+
+// MARK: - SSE parser
+
+struct SSEParserTests {
+    private struct Chunk: Decodable, Equatable {
+        let value: String
+    }
+
+    @Test func doneTerminatesStream() async throws {
+        let events = try await collectSSEEvents([
+            #"data: {"value":"hello"}"#,
+            "",
+            "data: [DONE]"
+        ])
+
+        #expect(events == [Chunk(value: "hello")])
+    }
+
+    @Test func eofWithoutDoneThrowsMissingDone() async {
+        do {
+            _ = try await collectSSEEvents([
+                #"data: {"value":"partial"}"#,
+                ""
+            ])
+            #expect(Bool(false), "Expected missingDone")
+        } catch let error as SSEParser.ParserError {
+            #expect(error.localizedDescription == SSEParser.ParserError.missingDone.localizedDescription)
+        } catch {
+            #expect(Bool(false), "Unexpected error: \(error)")
+        }
+    }
+
+    @Test func upstreamErrorPayloadThrowsMessage() async {
+        do {
+            _ = try await collectSSEEvents([
+                #"data: {"error":{"message":"rate limited"}}"#,
+                ""
+            ])
+            #expect(Bool(false), "Expected upstream error")
+        } catch let error as SSEParser.ParserError {
+            #expect(error.localizedDescription == "rate limited")
+        } catch {
+            #expect(Bool(false), "Unexpected error: \(error)")
+        }
+    }
+
+    @Test func invalidJSONThrowsInvalidEvent() async {
+        do {
+            _ = try await collectSSEEvents([
+                "data: {not-json}",
+                ""
+            ])
+            #expect(Bool(false), "Expected invalid event")
+        } catch let error as SSEParser.ParserError {
+            #expect(error.localizedDescription.contains("invalid event"))
+        } catch {
+            #expect(Bool(false), "Unexpected error: \(error)")
+        }
+    }
+
+    private func collectSSEEvents(_ lines: [String]) async throws -> [Chunk] {
+        var events: [Chunk] = []
+        for try await event in SSEParser.parse(lines: lines, type: Chunk.self, decoder: JSONDecoder()) {
+            events.append(event)
+        }
+        return events
+    }
+}
+
 private func makeEntry(date: Date, mood: Double = 0.5, themes: [String] = []) -> DiaryEntryData {
     DiaryEntryData(
         id: UUID(),

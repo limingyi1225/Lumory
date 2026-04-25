@@ -25,7 +25,7 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,target/sch
     - [CoreDataImportService.swift](Chronote/Services/CoreDataImportService.swift) · [DiaryImportService.swift](Chronote/Services/DiaryImportService.swift) · [DiaryExportService.swift](Chronote/Services/DiaryExportService.swift) — 导入导出。
     - [NetworkRetryHelper.swift](Chronote/Services/NetworkRetryHelper.swift) — SSE / HTTP 重试。
     - [AppSecrets.swift](Chronote/Services/AppSecrets.swift) — 后端 URL + `X-App-Secret` 共享密钥(⚠️ 目前硬编码,见下方"约定")。
-    - [UITestSampleData.swift](Chronote/Services/UITestSampleData.swift) — `#if DEBUG`,启动参数 `-LumoryUITestSampleData YES` 触发同步擦库 + 种入 30 条手写 + ~60 条模板化样例日记(主角"林子衿"),给 App Store screenshot / demo 用。`ChronoteApp.init()` 里调 `seedIfNeeded(into:)`。
+    - [UITestSampleData.swift](Chronote/Services/UITestSampleData.swift) — `#if DEBUG`,启动参数 `-LumoryUITestSampleData YES` 让 `PersistenceController.shared` 自动构造 in-memory store(NSInMemoryStoreType + url=/dev/null,完全旁路 CloudKit),然后 `seedIfNeeded` 种 30 条手写 + ~60 条模板化样例(主角"林子衿"),给 App Store screenshot / demo 用。Guard 强制要求 NSInMemoryStoreType——历史踩过擦真实日记同步到所有设备的坑。
     - `HapticManager.swift` — 触觉反馈统一入口。
   - `Views/`
     - [HomeView.swift](Chronote/Views/HomeView.swift) + `HomeView/`(3 个 `@Observable` VM:`HomeInputViewModel` / `HomeRecordingViewModel` / `HomePhotoViewModel`,+ `Components/` 下的 `DiaryEntryRow` · `DiaryTextEditor` · `PhotosCollectionView`)。**注意:`recorder` / `audioPlaybackController` 故意留 HomeView 作 `@StateObject`,不搬进 @Observable VM —— Observation 宏不 bridge 嵌套 `ObservableObject` 的 `@Published`,搬进去 UI 就不 react 了。**
@@ -90,7 +90,8 @@ iOS:
 ## 约定 / 踩过的坑
 
 - **⚠️ Secrets**:
-  - `Chronote/Services/AppSecrets.swift` 里硬编码 `appSharedSecret`,已知问题,TODO 迁到 xcconfig / CI secret injection。
+  - `appSharedSecret` 现在走 xcconfig 注入链:`Lumory.local.xcconfig`(gitignored 真实值)→ `#include?` 到 `Lumory.xcconfig`(committed)→ pbxproj base config → `Lumory-Info.plist` 里 `$(APP_SHARED_SECRET)` 替换 → `AppSecrets` 运行时 `Bundle.main.infoDictionary` 读。fallback 是空字符串(读不到 → 401),**不**硬编码。新 clone 后 setup:`cp Lumory.local.xcconfig.sample Lumory.local.xcconfig` + 填值 + Cmd+B。
+  - 轮换流程:本机改 `Lumory.local.xcconfig` + SSH 改 server `/root/server/.env` + `pm2 restart lumory-server` + 出新 build。
   - 后端 `OPENAI_API_KEY` 和 `APP_SHARED_SECRET` 都必须来自 `server/.env`,缺任一立刻 `process.exit(1)`。
 - **Info.plist 的 ATS 例外**已删(历史上为旧明文 origin `64.176.209.155` 留的,现在全 HTTPS 走 `lumory.isaabby.com`,不再需要)。
 - **CoreData 迁移**不要同步跑在 `init()`。回填用 `*BackfillService` 模式:`WordCountBackfillService` 走后台 context `fetch(predicate: wordCount == 0)` + 遍历 + save(无 UserDefaults flag,天然幂等 —— 没 pending 就是空数组,代价只是一次 SQL 扫);`Embedding/ThemeBackfillService` 的 `runningTask` 已改 `@MainActor` 隔离,所有 start/cancel 入口都会汇合到 MainActor 排队,多入口 race 被锁死。
@@ -107,6 +108,14 @@ iOS:
 - **`@Environment` 只能在 instance scope 访问**。SwiftUI `private static func` / 属性初始化器里用 `@Environment` 会报 "instance member cannot be used on type"。静态辅助方法需要 AIService 时,在调用点 `let ai = aiService` 捕获后作参数传进去(参见 `DiaryDetailView.refreshAIIndex(... ai:)`)。
 - **SwiftUI `@FetchRequest(animation:)` 不要用**。和 List 原生 row-removal 动画 + `withAnimation { delete }` 三层叠加会错位。当前用 `@FetchRequest(sortDescriptors:)` 无 animation + `ForEach(Array(entries.enumerated()), id: \.element.objectID)` 组合,动画由 `withAnimation` 单层控制,identity 由 objectID 稳定。
 - **bash `cmd1 | cmd2 || true` 会覆盖 `PIPESTATUS`**。`|| true` 之后 `${PIPESTATUS[0]}` 只剩 `true` 的 exit code,原 pipeline 状态丢光。需要真实 exit code 时改用 `set +e` + 直接 pipeline(不加 `|| true`),然后读 `PIPESTATUS[0]`,最后 `set -e`(参见 `Scripts/generate-screenshots.sh`)。
+- **xcconfig 注入自定义 Info.plist key 的三个坑**:
+  (1) `INFOPLIST_KEY_*` build setting 只对 Apple 已知 plist key(NS*UsageDescription / CFBundle*)有效,自定义 key 必须直接在 `Lumory-Info.plist` 写 `<string>$(VAR_NAME)</string>` 让 Xcode 在 build 时变量替换。
+  (2) Run Script PBXShellScriptBuildPhase 默认 `showEnvVarsInLog = 1`,会把所有 build setting `export VAR=value` echo 到 xcodebuild 日志(包括 secret)。涉及 secret 时 pbxproj 里手动加 `showEnvVarsInLog = 0;`。
+  (3) `PBXFileSystemSynchronizedRootGroup` 只自动收 `Chronote/` 下的 swift,**根目录的 xcconfig 不会被识别**。需要手动加 `PBXFileReference`(`lastKnownFileType = text.xcconfig`)到 PBXFileReference section + 加到 root PBXGroup children + 在 project-level Debug + Release 的 XCBuildConfiguration 里写 `baseConfigurationReference = <FILE_ID>`。
+- **日志 API**:`Log.warning(...)` 不是 `Log.warn`(后者编译报 "type 'Log' has no member 'warn'")。`Log.Category` 仅 8 个:`general / ai / network / persistence / sync / audio / ui / migration`,新分类要先在 `Log.swift` 注册。
+- **`URLSession.sslTolerantSession` 命名误导,不要被吓到**:`NetworkRetryHelper.swift:104` 里这个名字暗示 SSL 绕过,实际**只是**共享 session + `timeoutIntervalForResource = 300s` 超时配置。全仓 `URLSessionDelegate` / `didReceiveChallenge` 零命中。安全扫描看到这个名字别紧张,以后有空可以重命名为 `sharedRetrySession`。
+- **Swift 6 严格并发 × NSManagedObject**:`NSManagedObject` 在 iOS 上**不是** `Sendable`(`Conformance of 'NSManagedObject' to 'Sendable' is unavailable in iOS`)。`async` 函数返回 `[DiaryEntry]` / 单个 `DiaryEntry` 必然跨 await boundary,Swift 6 编译报错。修法:**函数整体标 `@MainActor`** + 把 `MainActor.run { ... }` wrapper 直接拆掉(本来就是冗余,函数已锁主线程)。后台 fetch 仍走 `performBackgroundTask` 拿 `[NSManagedObjectID]`(Sendable),回 main 后 `viewContext.existingObject(with:)` 物化。参考 [SearchView.keywordHits](Chronote/Views/Search/SearchView.swift) 和 [HomeView.keywordHits](Chronote/Views/HomeView.swift)。
+- **后端 `/root/server` 不是 git working copy**,手动维护。改 devDep / dep:直接 SSH 跑 `npm uninstall <pkg>` / `npm install <pkg>@x.y.z` —— 同时同步 `package.json` + `node_modules`,不会 touch 其他字段。改 `index.js` 没自动化部署链,得手工 scp 或自带其他 deploy 流程(目前未文档化)。健康检查走 `curl https://lumory.isaabby.com/health`。
 
 ## Claude Code 自动化(本地,非生产)
 - **MCP servers**(`~/.claude.json` 本项目 scope):

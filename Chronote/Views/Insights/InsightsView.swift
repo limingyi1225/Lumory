@@ -20,6 +20,7 @@ struct InsightsView: View {
     @State private var themes: [InsightsEngine.Theme] = []
     @State private var stats: InsightsEngine.WritingStats = .empty
     @State private var dailyCells: [DailyCell] = []
+    @State private var dailyCellsCache: [String: [DailyCell]] = [:]
     @State private var facts: [CorrelationFact] = []
 
     @State private var isLoadingCharts = false
@@ -246,11 +247,23 @@ struct InsightsView: View {
         // - CalendarMonthModule 需要覆盖用户可能切换到的较早月份(例如 .all 或 .year)
         // 取并集:min(today - lookbackDays, range.start) → max(today, range.end)
         // 之前硬编码只取 140 天导致用户切到 .year 或往前翻 6 个月时月历空白。
-        let today = Date()
-        let lookbackStart = Calendar.current.date(byAdding: .day, value: -lookbackDays, to: today) ?? today
-        let start = min(lookbackStart, range.start)
-        let end = max(today, range.end)
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let lookbackStart = calendar.date(byAdding: .day, value: -lookbackDays, to: today) ?? today
+        let rangeStart = calendar.startOfDay(for: range.start)
+        let rangeEndDay = calendar.startOfDay(for: range.end)
+        let rangeEnd = calendar.date(byAdding: .day, value: 1, to: rangeEndDay) ?? range.end
+        let start = min(lookbackStart, rangeStart)
+        let end = max(today, rangeEnd)
         let fetchRange = DateInterval(start: start, end: end)
+        let cacheKey = "\(Int(start.timeIntervalSinceReferenceDate))-\(Int(end.timeIntervalSinceReferenceDate))"
+
+        let cached = await MainActor.run {
+            dailyCellsCache[cacheKey]
+        }
+        if let cached {
+            return cached
+        }
 
         // Fix #23: 入口先 short-circuit。外层 SwiftUI .task(id: range) 已经被 cancel 过的话,
         // 没必要再去 store coordinator 排队抢锁。
@@ -259,7 +272,7 @@ struct InsightsView: View {
         // 把外层 cancellation 传到 bg 闭包内的关键 checkpoint。`performBackgroundTask` 自己
         // 不感知 Task cancellation,只能在闭包里手动读 `Task.isCancelled` 在快速来回切 range
         // 时让旧 fetch 早 bail —— 至少省掉聚合循环。Fetch 本身已经发出去了,不可中断。
-        return await PersistenceController.shared.container.performBackgroundTask { context in
+        let cells: [DailyCell] = await PersistenceController.shared.container.performBackgroundTask { context -> [DailyCell] in
             // checkpoint 1: fetch 之前
             if Task.isCancelled { return [] }
 
@@ -279,25 +292,39 @@ struct InsightsView: View {
             // checkpoint 2: fetch 完成后,聚合循环之前。大数据集时这里能省掉 N 次 dict lookup。
             if Task.isCancelled { return [] }
 
-            let calendar = Calendar.current
-            var grouped: [Date: (moodSum: Double, count: Int, words: Int)] = [:]
+            var grouped: [Date: DailyAggregate] = [:]
             grouped.reserveCapacity(rows.count)
             for row in rows {
                 guard let date = row["date"] as? Date else { continue }
                 let mood = (row["moodValue"] as? Double) ?? 0
-                let words = (row["wordCount"] as? Int) ?? 0
+                let words = (row["wordCount"] as? NSNumber)?.intValue ?? 0
                 let day = calendar.startOfDay(for: date)
-                var agg = grouped[day] ?? (0, 0, 0)
+                var agg = grouped[day] ?? DailyAggregate()
                 agg.moodSum += mood
                 agg.count += 1
                 agg.words += words
                 grouped[day] = agg
             }
-            return grouped.map { (day, agg) in
+            return grouped.map { day, agg in
                 DailyCell(date: day, mood: agg.moodSum / Double(agg.count), wordCount: agg.words)
             }
         }
+        if !Task.isCancelled {
+            await MainActor.run {
+                dailyCellsCache[cacheKey] = cells
+                if dailyCellsCache.count > 6 {
+                    dailyCellsCache.removeValue(forKey: dailyCellsCache.keys.min() ?? cacheKey)
+                }
+            }
+        }
+        return cells
     }
+}
+
+private struct DailyAggregate {
+    var moodSum = 0.0
+    var count = 0
+    var words = 0
 }
 
 extension InsightsEngine.WritingStats {
@@ -416,9 +443,7 @@ private struct PointDetailSheet: View {
     }
 
     private var dateLabel: String {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        return f.string(from: point.date)
+        point.date.formatted(date: .abbreviated, time: .omitted)
     }
 
     private func fetch() {

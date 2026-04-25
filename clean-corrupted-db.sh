@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 echo "Lumory Database Cleanup Script"
 echo "=============================="
@@ -17,6 +18,7 @@ fi
 
 # Define the iCloud container path
 ICLOUD_PATH="$HOME/Library/Mobile Documents/iCloud~com~Mingyi~Lumory/Documents"
+BACKUP_DIR=""
 
 # Check if the path exists
 if [ -d "$ICLOUD_PATH" ]; then
@@ -61,4 +63,6 @@ echo "Cleanup complete!"
 echo "Please restart Lumory. The database will be recreated automatically."
 echo "Your iCloud data will sync once the app starts."
 echo ""
-echo "Backup saved to: $BACKUP_DIR"
+if [[ -n "$BACKUP_DIR" ]]; then
+    echo "Backup saved to: $BACKUP_DIR"
+fi

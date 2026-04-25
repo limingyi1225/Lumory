@@ -24,8 +24,6 @@ disabled_rules:
   # SwiftUI 视图树经常超长，行内表达更可读，这两个规则噪音大。
   - trailing_whitespace
   - todo
-  # `_ =` 在 init 里 pre-warm 动画时要用，不要误报。
-  - unused_capture_list
 
 opt_in_rules:
   - force_unwrapping

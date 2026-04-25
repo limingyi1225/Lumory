@@ -1,4 +1,8 @@
-// Requires: pm2 install pm2-logrotate (on host)
+// Requires on host:
+//   pm2 install pm2-logrotate
+//   pm2 set pm2-logrotate:max_size 10M
+//   pm2 set pm2-logrotate:retain 10
+//   pm2 set pm2-logrotate:compress true
 // PM2 ecosystem config. Usage: `pm2 start ecosystem.config.js`
 module.exports = {
   apps: [
@@ -19,10 +23,6 @@ module.exports = {
       merge_logs: true,
       out_file: './logs/backend-out.log',
       error_file: './logs/backend-err.log',
-      // Log rotation — picked up by pm2-logrotate module on host.
-      max_size: '10M',
-      retain: 10,
-      compress: true,
       env: {
         NODE_ENV: 'production',
         LOG_LEVEL: 'info',

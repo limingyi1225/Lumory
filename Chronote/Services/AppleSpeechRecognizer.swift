@@ -6,17 +6,37 @@ import AVFoundation
 // 把"转录"抽象成协议，让 caller 能注入 mock 做测试。线上实现是
 // AppleSpeechRecognizer，测试侧可用 MockTranscriber（在 AIService.swift）。
 
+@MainActor
 protocol TranscriberProtocol: AnyObject {
+    var lastFailure: TranscriptionFailure? { get }
     func transcribeAudio(fileURL: URL, localeIdentifier: String) async -> String?
 }
 
-@available(iOS 13.0, macOS 10.15, *)
-final class AppleSpeechRecognizer: TranscriberProtocol {
+enum TranscriptionFailure: Equatable {
+    case speechPermissionDenied
+    case speechPermissionRestricted
+    case recognizerUnavailable
+    case unsupportedOnDeviceLocale
+    case recognitionFailed
 
+    var shouldOfferSettings: Bool {
+        switch self {
+        case .speechPermissionDenied, .speechPermissionRestricted:
+            return true
+        case .recognizerUnavailable, .unsupportedOnDeviceLocale, .recognitionFailed:
+            return false
+        }
+    }
+}
+
+@available(iOS 13.0, macOS 10.15, *)
+@MainActor
+final class AppleSpeechRecognizer: TranscriberProtocol {
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let audioEngine = AVAudioEngine()
+    private(set) var lastFailure: TranscriptionFailure?
 
     deinit {
         // 原来没有 deinit：视图被释放但 `recognitionTask` 还挂着 Speech framework，
@@ -31,15 +51,22 @@ final class AppleSpeechRecognizer: TranscriberProtocol {
     func transcribeAudio(fileURL: URL, localeIdentifier: String) async -> String? {
         Log.info("[AppleSpeechRecognizer] Starting transcription for file: \(fileURL.path)", category: .ai)
         Log.info("[AppleSpeechRecognizer] File exists: \(FileManager.default.fileExists(atPath: fileURL.path))", category: .ai)
+        lastFailure = nil
         
         // 检查并请求授权
-        await requestAuthorization()
-
-        let authStatus = SFSpeechRecognizer.authorizationStatus()
+        let authStatus = await requestAuthorization()
         Log.info("[AppleSpeechRecognizer] Authorization status: \(authStatus.rawValue)", category: .ai)
         
         guard authStatus == .authorized else {
             Log.info("[AppleSpeechRecognizer] Speech recognition not authorized.", category: .ai)
+            switch authStatus {
+            case .denied:
+                lastFailure = .speechPermissionDenied
+            case .restricted:
+                lastFailure = .speechPermissionRestricted
+            default:
+                lastFailure = .recognitionFailed
+            }
             return nil
         }
         
@@ -50,11 +77,13 @@ final class AppleSpeechRecognizer: TranscriberProtocol {
 
         guard let recognizer = speechRecognizer else {
             Log.error("[AppleSpeechRecognizer] Failed to create speech recognizer", category: .ai)
+            lastFailure = .recognizerUnavailable
             return nil
         }
         
         guard recognizer.isAvailable else {
             Log.info("[AppleSpeechRecognizer] Speech recognizer is not available for locale: \(locale.identifier)", category: .ai)
+            lastFailure = .recognizerUnavailable
             return nil
         }
         
@@ -74,8 +103,9 @@ final class AppleSpeechRecognizer: TranscriberProtocol {
             Log.error("[AppleSpeechRecognizer] Error checking file: \(error)", category: .ai)
         }
         
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
+        let failureBox = LockWrap<TranscriptionFailure?>(nil)
+        let transcript = await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
                 let request = SFSpeechURLRecognitionRequest(url: fileURL)
                 request.shouldReportPartialResults = false // 我们只需要最终结果
                 request.addsPunctuation = true // 添加标点符号
@@ -88,6 +118,7 @@ final class AppleSpeechRecognizer: TranscriberProtocol {
                     request.requiresOnDeviceRecognition = true
                 } else {
                     Log.info("[AppleSpeechRecognizer] Locale \(localeIdentifier) 不支持 on-device，拒绝转录以兑现隐私声明", category: .ai)
+                    failureBox.set(.unsupportedOnDeviceLocale)
                     continuation.resume(returning: nil)
                     return
                 }
@@ -111,14 +142,16 @@ final class AppleSpeechRecognizer: TranscriberProtocol {
                     continuation.resume(returning: value)
                 }
 
-                let task = recognizer.recognitionTask(with: request) { (result, error) in
+                let task = recognizer.recognitionTask(with: request) { result, error in
                     if let error = error {
                         Log.error("[AppleSpeechRecognizer] Recognition error: \(error.localizedDescription)", category: .ai)
+                        failureBox.set(.recognitionFailed)
                         safeResume(nil)
                         return
                     }
                     guard let result = result else {
                         Log.error("[AppleSpeechRecognizer] Recognition returned nil result with no error", category: .ai)
+                        failureBox.set(.recognitionFailed)
                         safeResume(nil)
                         return
                     }
@@ -133,14 +166,23 @@ final class AppleSpeechRecognizer: TranscriberProtocol {
             }
         } onCancel: { [weak self] in
             // Task 被取消时（视图消失 / swipe back）立即释放麦克风与 Speech framework。
-            self?.recognitionTask?.cancel()
+            Task { @MainActor in
+                self?.recognitionTask?.cancel()
+            }
         }
+        if transcript == nil {
+            let failure = failureBox.get()
+            if let failure {
+                lastFailure = failure
+            }
+        }
+        return transcript
     }
 
-    private func requestAuthorization() async {
+    private func requestAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
         await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { authStatus in
-                continuation.resume()
+                continuation.resume(returning: authStatus)
             }
         }
     }
@@ -152,4 +194,16 @@ private final class LockWrap<T> {
     var value: T
     let lock = NSLock()
     init(_ value: T) { self.value = value }
+
+    func set(_ newValue: T) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = newValue
+    }
+
+    func get() -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
 }

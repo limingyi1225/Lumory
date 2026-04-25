@@ -37,6 +37,12 @@ struct ParsedDiaryEntry: Sendable, Equatable {
     let text: String
 }
 
+struct AnalysisResult {
+    let summary: String?
+    let mood: Double
+    let themes: [String]
+}
+
 /// 导入解析层错误。**与"成功但 0 条"(`[]`)严格区分**——后者是合法的"粘贴里没找到日记",
 /// 前者是网络 / 后端 / 模型解析失败,UI 必须给两种不同提示。
 enum DiaryImportError: LocalizedError, Sendable {
@@ -74,17 +80,6 @@ protocol AIServiceProtocol {
     /// 根据文本分析心情，返回 0.0 ~ 1.0
     func analyzeMood(text: String) async -> Double
 
-    /// 根据多条日记生成情绪+内容分析报告
-    func generateReport(entries: [DiaryEntry]) async -> String?
-
-    /// 流式生成情绪+内容分析报告，逐步返回内容
-    /// `onChunk` 必须 MainActor——调用方普遍更新 `@Published` / SwiftUI state，
-    /// 后台线程触发 UI 写会在 strict concurrency 下崩。
-    func generateReport(entries: [DiaryEntry], onChunk: @escaping @MainActor (String) -> Void) async
-
-    /// 同时分析情绪并生成摘要
-    func analyzeAndSummarize(text: String) async -> (summary: String?, mood: Double)
-
     // MARK: - Phase 0: AI × 统计融合地基
 
     /// 从日记文本抽取 2-4 个主题标签（如：工作 / 家人 / 健康 / 睡眠）。
@@ -104,12 +99,7 @@ protocol AIServiceProtocol {
     @available(iOS 15.0, macOS 12.0, *)
     func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent>
 
-    /// 统一的流式报告 API（AsyncStream 封装，取代回调式 onChunk）。
-    /// 用于 Insights Dashboard 的叙事面板、Ask 之外的长文生成等场景。
-    func streamReport(entries: [DiaryEntryData]) -> AsyncStream<String>
-
-    /// 结构化流式报告事件 —— 内部实现发的是 `StreamEvent`,UI 想区分"断流"和"正常"
-    /// 可以直接消费这个流。旧 `streamReport` 仍可用,行为上只吐 `.chunk` 的文本。
+    /// 结构化流式报告事件 —— UI 可区分 `.chunk` / `.truncated` / `.failed` / `.done`。
     @available(iOS 15.0, macOS 12.0, *)
     func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent>
 
@@ -129,11 +119,11 @@ protocol AIServiceProtocol {
 extension AIServiceProtocol {
     /// 一次调用同时拿到摘要、心情、主题三件套。默认实现并发调用三个子接口，
     /// OpenAI 实现可以覆盖以合并成单次请求省 token。
-    func analyze(text: String) async -> (summary: String?, mood: Double, themes: [String]) {
-        async let s = summarize(text: text)
-        async let m = analyzeMood(text: text)
-        async let t = extractThemes(text: text)
-        return (await s, await m, await t)
+    func analyze(text: String) async -> AnalysisResult {
+        async let summary = summarize(text: text)
+        async let mood = analyzeMood(text: text)
+        async let themes = extractThemes(text: text)
+        return await AnalysisResult(summary: summary, mood: mood, themes: themes)
     }
 }
 
@@ -151,25 +141,6 @@ struct MockAIService: AIServiceProtocol {
         } else {
             return 0.5
         }
-    }
-
-    func generateReport(entries: [DiaryEntry]) async -> String? {
-        let total = entries.count
-        guard total > 0 else { return "无数据" }
-        let avg = entries.map { $0.moodValue }.reduce(0, +) / Double(total)
-        return "共 \(total) 条日记，平均情绪得分 \(String(format: "%.0f", avg * 100))/100\n(示例 mock，可接入 GPT)"
-    }
-
-    func generateReport(entries: [DiaryEntry], onChunk: @escaping @MainActor (String) -> Void) async {
-        if let fullReport = await generateReport(entries: entries) {
-            await MainActor.run { onChunk(fullReport) }
-        }
-    }
-
-    func analyzeAndSummarize(text: String) async -> (summary: String?, mood: Double) {
-        let summary = String(text.prefix(50)) + (text.count > 50 ? "..." : "")
-        let mood = await analyzeMood(text: text)
-        return (summary, mood)
     }
 
     // MARK: - Phase 0 stubs
@@ -217,18 +188,6 @@ struct MockAIService: AIServiceProtocol {
             continuation.yield(.chunk("Mock 回答：你问了『\(question)』，基于 \(entries.count) 条日记。"))
             continuation.yield(.done)
             continuation.finish()
-        }
-    }
-
-    func streamReport(entries: [DiaryEntryData]) -> AsyncStream<String> {
-        AsyncStream { continuation in
-            Task {
-                let total = entries.count
-                let avg = entries.isEmpty ? 0.5 : entries.map { $0.moodValue }.reduce(0, +) / Double(total)
-                continuation.yield("共 \(total) 条日记，")
-                continuation.yield("平均情绪 \(String(format: "%.0f", avg * 100))/100。")
-                continuation.finish()
-            }
         }
     }
 
@@ -300,11 +259,14 @@ extension EnvironmentValues {
 // MARK: - Mock Transcriber
 //
 // 测试侧使用：固定返回一段预设文本，不触碰 Apple Speech / 权限 / 音频引擎。
+@MainActor
 final class MockTranscriber: TranscriberProtocol {
     let stubbedResult: String?
+    let lastFailure: TranscriptionFailure?
 
-    init(stubbedResult: String? = "mock transcription") {
+    init(stubbedResult: String? = "mock transcription", lastFailure: TranscriptionFailure? = nil) {
         self.stubbedResult = stubbedResult
+        self.lastFailure = lastFailure
     }
 
     func transcribeAudio(fileURL: URL, localeIdentifier: String) async -> String? {

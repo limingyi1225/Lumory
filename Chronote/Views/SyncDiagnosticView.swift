@@ -6,7 +6,7 @@ struct SyncDiagnosticView: View {
     @State private var showingFullReport = false
     
     var body: some View {
-        NavigationView {
+        NavigationStack {
             VStack(spacing: 20) {
                 if let result = result {
                     // Header
@@ -15,7 +15,7 @@ struct SyncDiagnosticView: View {
                             .font(.system(size: 48))
                             .foregroundColor(colorForSeverity(result.severity))
                         
-                        Text("Sync Diagnostic")
+                        Text(NSLocalizedString("sync.diagnostic.title", comment: "Sync diagnostic title"))
                             .font(.title)
                             .fontWeight(.bold)
                         
@@ -37,10 +37,10 @@ struct SyncDiagnosticView: View {
                                         .font(.system(size: 32))
                                         .foregroundColor(.green)
                                     
-                                    Text("No Issues Found")
+                                    Text(NSLocalizedString("sync.diagnostic.noIssues.title", comment: "No sync issues title"))
                                         .font(.headline)
                                     
-                                    Text("Your iCloud sync appears to be working correctly.")
+                                    Text(NSLocalizedString("sync.diagnostic.noIssues.message", comment: "No sync issues message"))
                                         .font(.subheadline)
                                         .foregroundColor(.secondary)
                                         .multilineTextAlignment(.center)
@@ -52,13 +52,16 @@ struct SyncDiagnosticView: View {
                             } else {
                                 // Issues found
                                 VStack(alignment: .leading, spacing: 12) {
-                                    Text("Issues Found")
+                                    Text(NSLocalizedString("sync.diagnostic.issuesFound", comment: "Issues found heading"))
                                         .font(.headline)
                                         .foregroundColor(.red)
                                     
-                                    ForEach(Array(result.issues.enumerated()), id: \.offset) { index, issue in
+                                    ForEach(Array(result.issues.enumerated()), id: \.offset) { _, issue in
                                         HStack(alignment: .top, spacing: 12) {
-                                            Image(systemName: issue.isCritical ? "exclamationmark.triangle.fill" : "exclamationmark.circle.fill")
+                                            let iconName = issue.isCritical
+                                                ? "exclamationmark.triangle.fill"
+                                                : "exclamationmark.circle.fill"
+                                            Image(systemName: iconName)
                                                 .foregroundColor(issue.isCritical ? .red : .orange)
                                             
                                             VStack(alignment: .leading, spacing: 4) {
@@ -67,7 +70,10 @@ struct SyncDiagnosticView: View {
                                                     .fontWeight(.medium)
                                                 
                                                 if issue.isCritical {
-                                                    Text("Critical Issue")
+                                                    Text(NSLocalizedString(
+                                                        "sync.diagnostic.criticalIssue",
+                                                        comment: "Critical issue badge"
+                                                    ))
                                                         .font(.caption)
                                                         .foregroundColor(.red)
                                                         .padding(.horizontal, 8)
@@ -88,11 +94,11 @@ struct SyncDiagnosticView: View {
                                 // Recommendations
                                 if !result.recommendations.isEmpty {
                                     VStack(alignment: .leading, spacing: 12) {
-                                        Text("Recommendations")
+                                        Text(NSLocalizedString("sync.diagnostic.recommendations", comment: "Recommendations heading"))
                                             .font(.headline)
                                             .foregroundColor(.blue)
                                         
-                                        ForEach(Array(result.recommendations.enumerated()), id: \.offset) { index, recommendation in
+                                        ForEach(Array(result.recommendations.enumerated()), id: \.offset) { _, recommendation in
                                             HStack(alignment: .top, spacing: 12) {
                                                 Image(systemName: "lightbulb.fill")
                                                     .foregroundColor(.blue)
@@ -111,7 +117,7 @@ struct SyncDiagnosticView: View {
                             }
                             
                             // Timestamp
-                            Text("Generated: \(result.timestamp, style: .date) at \(result.timestamp, style: .time)")
+                            Text("\(NSLocalizedString("sync.diagnostic.generated", comment: "Generated timestamp label")): \(result.timestamp, style: .date) \(result.timestamp, style: .time)")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .center)
@@ -122,20 +128,19 @@ struct SyncDiagnosticView: View {
                     
                     // Action buttons
                     HStack(spacing: 16) {
-                        Button("Show Full Report") {
+                        Button(NSLocalizedString("sync.diagnostic.showFullReport", comment: "Show full diagnostic report button")) {
                             showingFullReport = true
                         }
                         .buttonStyle(.glass)
 
                         Spacer()
 
-                        Button("Done") {
+                        Button(NSLocalizedString("完成", comment: "Done button")) {
                             dismiss()
                         }
                         .buttonStyle(.glassProminent)
                     }
                     .padding()
-
                 } else {
                     // No result
                     VStack(spacing: 16) {
@@ -143,21 +148,21 @@ struct SyncDiagnosticView: View {
                             .font(.system(size: 48))
                             .foregroundColor(.secondary)
                         
-                        Text("No Diagnostic Result")
+                        Text(NSLocalizedString("sync.diagnostic.noResult.title", comment: "No diagnostic result title"))
                             .font(.headline)
                         
-                        Text("Please run the diagnostic again.")
+                        Text(NSLocalizedString("sync.diagnostic.noResult.message", comment: "No diagnostic result message"))
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                         
-                        Button("Close") {
+                        Button(NSLocalizedString("关闭", comment: "Close")) {
                             dismiss()
                         }
                         .buttonStyle(.glassProminent)
                     }
                 }
             }
-            .navigationTitle("Sync Diagnostic")
+            .navigationTitle(NSLocalizedString("sync.diagnostic.title", comment: "Sync diagnostic title"))
             #if !os(macOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -198,7 +203,7 @@ struct FullDiagnosticReportView: View {
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     Text(SyncDiagnosticService.generateDiagnosticReport(result))
@@ -209,13 +214,13 @@ struct FullDiagnosticReportView: View {
                 }
                 .padding()
             }
-            .navigationTitle("Full Diagnostic Report")
+            .navigationTitle(NSLocalizedString("sync.diagnostic.fullReport.title", comment: "Full diagnostic report title"))
             #if !os(macOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Button("Done") {
+                    Button(NSLocalizedString("完成", comment: "Done button")) {
                         dismiss()
                     }
                 }
@@ -229,7 +234,7 @@ struct FullDiagnosticReportView: View {
     SyncDiagnosticView(result: SyncDiagnosticResult(
         severity: .warning,
         issues: [.networkUnavailable],
-        recommendations: ["Check your internet connection"],
+        recommendations: [NSLocalizedString("sync.diagnostic.recommendation.network", comment: "Check network recommendation")],
         timestamp: Date()
     ))
 }

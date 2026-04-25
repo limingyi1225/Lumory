@@ -20,7 +20,6 @@ import Combine
 
 @available(iOS 15.0, macOS 12.0, *)
 final class ThemeBackfillService: ObservableObject {
-
     static let shared = ThemeBackfillService()
 
     struct Progress: Equatable {
@@ -43,10 +42,12 @@ final class ThemeBackfillService: ObservableObject {
     // runningTask 加 @MainActor 隔离：任何 start/cancel 都要到 MainActor 读写，
     // 多入口（Settings 一键重建、manual 按钮、未来 auto）race 下不会出现两份 run 同时跑。
     @MainActor private var runningTask: Task<Void, Never>?
+    @MainActor private var runningRunID: UUID?
+    @MainActor private var pendingCache: (value: Int, date: Date)?
 
     init(
         persistence: PersistenceController = .shared,
-        ai: AIServiceProtocol = OpenAIService(apiKey: ""),
+        ai: AIServiceProtocol = OpenAIService.shared,
         // 原来 batch=5, throttle=800ms → peak ~375 req/min，会撞服务端 120/min 的 chat limit。
         // 现改 batch=2, throttle=1400ms → peak ~85 req/min，正常运行时无 429 风险。
         // 500 条日记跑完约 6 分钟——比原来慢，但换来"重建不会半拉"。
@@ -79,6 +80,8 @@ final class ThemeBackfillService: ObservableObject {
     func cancel() {
         runningTask?.cancel()
         runningTask = nil
+        runningRunID = nil
+        pendingCache = nil
     }
 
     // MARK: Core loop
@@ -87,31 +90,38 @@ final class ThemeBackfillService: ObservableObject {
 
     @MainActor
     private func run(mode: Mode) async -> Progress {
-        if runningTask != nil {
+        if let runningTask, !runningTask.isCancelled {
             Log.info("[ThemeBackfill] 已在运行，忽略重复调用", category: .migration)
             return progress
         }
 
+        pendingCache = nil
+        let runID = UUID()
         // [weak self]：service 是 `shared` singleton 正常不会释放；但如果未来被注入/换掉，
         // Task 对 self 的强引用会把 service + 它持有的 AI 客户端 + 一整批 objectIDs 拖住。
         let task: Task<Void, Never> = Task { [weak self] in
             guard let self else { return }
-            await self.execute(mode: mode)
+            await self.execute(mode: mode, runID: runID)
         }
         runningTask = task
+        runningRunID = runID
         await task.value
-        runningTask = nil
+        if runningRunID == runID {
+            runningTask = nil
+            runningRunID = nil
+            pendingCache = nil
+        }
         return progress
     }
 
-    private func execute(mode: Mode) async {
+    private func execute(mode: Mode, runID: UUID) async {
         let objectIDs = await fetchCandidates(mode: mode)
         Log.info("[ThemeBackfill] 待处理条目数: \(objectIDs.count) (mode=\(mode))", category: .migration)
 
-        await publish(Progress(processed: 0, total: objectIDs.count, failed: 0, isRunning: true))
+        await publish(Progress(processed: 0, total: objectIDs.count, failed: 0, isRunning: true), runID: runID)
 
         guard !objectIDs.isEmpty else {
-            await publish(Progress(processed: 0, total: 0, failed: 0, isRunning: false))
+            await publish(Progress(processed: 0, total: 0, failed: 0, isRunning: false), runID: runID)
             return
         }
 
@@ -124,13 +134,13 @@ final class ThemeBackfillService: ObservableObject {
                 if Task.isCancelled { break }
                 let ok = await processOne(objectID: objectID)
                 if ok { processed += 1 } else { failed += 1 }
-                await publish(Progress(processed: processed, total: objectIDs.count, failed: failed, isRunning: true))
+                await publish(Progress(processed: processed, total: objectIDs.count, failed: failed, isRunning: true), runID: runID)
             }
             try? await Task.sleep(nanoseconds: throttleNanos)
         }
 
         Log.info("[ThemeBackfill] 完成: 成功 \(processed) / 失败 \(failed)", category: .migration)
-        await publish(Progress(processed: processed, total: objectIDs.count, failed: failed, isRunning: false))
+        await publish(Progress(processed: processed, total: objectIDs.count, failed: failed, isRunning: false), runID: runID)
     }
 
     // MARK: Public count
@@ -138,8 +148,12 @@ final class ThemeBackfillService: ObservableObject {
     /// 当前"主题为空 OR 含 banned 词"的待修条目数。Settings 用来判断"需要重建"。
     /// 不能纯靠 SQL count —— banned 检测要走 Swift 字符串集合,所以还是 fetch 一遍 themes 字符串
     /// 但 propertiesToFetch 限定只读 themes 一列,代价远小于实例化整个 entry。
+    @MainActor
     func pendingCount() async -> Int {
-        await persistence.container.performBackgroundTask { context -> Int in
+        if let pendingCache, Date().timeIntervalSince(pendingCache.date) < 5 {
+            return pendingCache.value
+        }
+        let count = await persistence.container.performBackgroundTask { context -> Int in
             let request: NSFetchRequest<NSDictionary> = NSFetchRequest(entityName: "DiaryEntry")
             request.predicate = NSPredicate(format: "text != nil AND text != %@", "")
             request.resultType = .dictionaryResultType
@@ -158,6 +172,8 @@ final class ThemeBackfillService: ObservableObject {
             }
             return count
         }
+        pendingCache = (count, Date())
+        return count
     }
 
     // MARK: DB helpers
@@ -167,6 +183,7 @@ final class ThemeBackfillService: ObservableObject {
             let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
             request.predicate = NSPredicate(format: "text != nil AND text != %@", "")
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+            request.fetchBatchSize = 200
             guard let entries = try? context.fetch(request) else { return [] }
 
             switch mode {
@@ -219,7 +236,8 @@ final class ThemeBackfillService: ObservableObject {
     }
 
     @MainActor
-    private func publish(_ value: Progress) {
+    private func publish(_ value: Progress, runID: UUID) {
+        guard runningRunID == runID else { return }
         self.progress = value
     }
 }

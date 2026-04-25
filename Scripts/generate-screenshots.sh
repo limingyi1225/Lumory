@@ -13,7 +13,6 @@
 #
 # 依赖:
 #   - Xcode 16+
-#   - 可选:`xcparse` (`brew install chargepoint/xcparse/xcparse`) —— 没装时会用 xcresulttool fallback
 
 set -euo pipefail
 

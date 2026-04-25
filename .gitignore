@@ -37,6 +37,7 @@ Lumory.local.xcconfig
 fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
+Screenshots/**/*.png
 fastlane/test_output
 
 # Node / backend
@@ -70,6 +71,7 @@ lumory-backend.tar.gz
 
 # Claude Code local config (per-user permission allowlist)
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 .claude/worktrees/
 
 # Build / tool caches that don't belong in source

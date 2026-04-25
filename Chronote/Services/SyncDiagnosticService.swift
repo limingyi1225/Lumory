@@ -4,25 +4,24 @@ import CloudKit
 
 /// 同步诊断服务，用于检测和报告iCloud同步问题
 struct SyncDiagnosticService {
-    
-    static func resetCloudKitSchema(container: NSPersistentCloudKitContainer) {
+    static func logCloudKitSchemaHints(container: NSPersistentCloudKitContainer) {
         Log.info("[SyncDiagnosticService] Attempting to check CloudKit schema...", category: .sync)
         
         #if DEBUG
         // The initializeCloudKitSchema method doesn't throw errors in newer versions
         // It's also only available for initializing, not resetting
-        print("[SyncDiagnosticService] Note: CloudKit schema initialization is automatic with NSPersistentCloudKitContainer")
-        print("[SyncDiagnosticService] Schema issues typically require:")
-        print("[SyncDiagnosticService] 1. Deleting the app and reinstalling")
-        print("[SyncDiagnosticService] 2. Resetting the CloudKit development environment in CloudKit Dashboard")
-        print("[SyncDiagnosticService] 3. Ensuring proper entitlements and container configuration")
+        Log.info("[SyncDiagnosticService] Note: CloudKit schema initialization is automatic with NSPersistentCloudKitContainer", category: .sync)
+        Log.info("[SyncDiagnosticService] Schema issues typically require:", category: .sync)
+        Log.info("[SyncDiagnosticService] 1. Deleting the app and reinstalling", category: .sync)
+        Log.info("[SyncDiagnosticService] 2. Resetting the CloudKit development environment in CloudKit Dashboard", category: .sync)
+        Log.info("[SyncDiagnosticService] 3. Ensuring proper entitlements and container configuration", category: .sync)
         
         // Verify container configuration
         if let storeDescription = container.persistentStoreDescriptions.first,
            let cloudKitOptions = storeDescription.cloudKitContainerOptions {
-            print("[SyncDiagnosticService] CloudKit container: \(cloudKitOptions.containerIdentifier)")
+            Log.info("[SyncDiagnosticService] CloudKit container: \(cloudKitOptions.containerIdentifier)", category: .sync)
         } else {
-            print("[SyncDiagnosticService] WARNING: No CloudKit options found in store description")
+            Log.warning("[SyncDiagnosticService] WARNING: No CloudKit options found in store description", category: .sync)
         }
         #else
         Log.info("[SyncDiagnosticService] Schema diagnostics are only available in DEBUG mode", category: .sync)
@@ -40,35 +39,44 @@ struct SyncDiagnosticService {
         let accountStatus = await checkiCloudAccountStatus()
         if !accountStatus.isAvailable {
             issues.append(.iCloudNotSignedIn)
-            recommendations.append("Please sign in to iCloud in System Settings")
+            recommendations.append(NSLocalizedString("sync.diagnostic.recommendation.signIn", comment: "Sign in to iCloud recommendation"))
         }
         
         // 2. 检查网络连接
         let networkStatus = await checkNetworkConnectivity()
         if !networkStatus {
             issues.append(.networkUnavailable)
-            recommendations.append("Check your internet connection")
+            recommendations.append(NSLocalizedString("sync.diagnostic.recommendation.network", comment: "Check network recommendation"))
         }
         
         // 3. 检查iCloud容器访问
         let containerAccess = checkiCloudContainerAccess()
         if !containerAccess {
             issues.append(.iCloudContainerInaccessible)
-            recommendations.append("iCloud container is not accessible")
+            recommendations.append(NSLocalizedString(
+                "sync.diagnostic.recommendation.container",
+                comment: "iCloud container recommendation"
+            ))
         }
         
         // 4. 检查Core Data存储状态
         let storeStatus = checkCoreDataStoreStatus()
         if !storeStatus.isHealthy {
             issues.append(.coreDataStoreCorrupted)
-            recommendations.append("Core Data store may be corrupted")
+            recommendations.append(NSLocalizedString(
+                "sync.diagnostic.recommendation.coreData",
+                comment: "Core Data store recommendation"
+            ))
         }
         
         // 5. 检查CloudKit配置
         let cloudKitConfig = checkCloudKitConfiguration()
         if !cloudKitConfig {
             issues.append(.cloudKitMisconfigured)
-            recommendations.append("CloudKit configuration is incorrect")
+            recommendations.append(NSLocalizedString(
+                "sync.diagnostic.recommendation.cloudKit",
+                comment: "CloudKit configuration recommendation"
+            ))
         }
         
         let severity: SyncDiagnosticSeverity
@@ -195,20 +203,26 @@ struct SyncDiagnosticService {
     
     /// 生成诊断报告文本
     static func generateDiagnosticReport(_ result: SyncDiagnosticResult) -> String {
-        var report = "=== iCloud Sync Diagnostic Report ===\n"
-        report += "Generated: \(DateFormatter.localizedString(from: result.timestamp, dateStyle: .medium, timeStyle: .medium))\n\n"
+        var report = NSLocalizedString("sync.diagnostic.report.header", comment: "Diagnostic report header") + "\n"
+        report += String(
+            format: NSLocalizedString("sync.diagnostic.report.generated", comment: "Diagnostic report generated line"),
+            DateFormatter.localizedString(from: result.timestamp, dateStyle: .medium, timeStyle: .medium)
+        ) + "\n\n"
         
-        report += "Overall Status: \(result.severity.displayName)\n\n"
+        report += String(
+            format: NSLocalizedString("sync.diagnostic.report.status", comment: "Diagnostic report status line"),
+            result.severity.displayName
+        ) + "\n\n"
         
         if result.issues.isEmpty {
-            report += "✅ No issues detected. Sync should be working properly.\n"
+            report += NSLocalizedString("sync.diagnostic.report.noIssues", comment: "Diagnostic report no issues") + "\n"
         } else {
-            report += "Issues Found:\n"
+            report += NSLocalizedString("sync.diagnostic.issuesFound", comment: "Issues found heading") + ":\n"
             for issue in result.issues {
                 report += "• \(issue.description)\n"
             }
             
-            report += "\nRecommendations:\n"
+            report += "\n" + NSLocalizedString("sync.diagnostic.recommendations", comment: "Recommendations heading") + ":\n"
             for recommendation in result.recommendations {
                 report += "• \(recommendation)\n"
             }
@@ -234,9 +248,12 @@ enum SyncDiagnosticSeverity {
     
     var displayName: String {
         switch self {
-        case .healthy: return "Healthy"
-        case .warning: return "Warning"
-        case .critical: return "Critical"
+        case .healthy:
+            return NSLocalizedString("sync.diagnostic.severity.healthy", comment: "Healthy diagnostic severity")
+        case .warning:
+            return NSLocalizedString("sync.diagnostic.severity.warning", comment: "Warning diagnostic severity")
+        case .critical:
+            return NSLocalizedString("sync.diagnostic.severity.critical", comment: "Critical diagnostic severity")
         }
     }
 }
@@ -251,15 +268,15 @@ enum SyncIssue {
     var description: String {
         switch self {
         case .iCloudNotSignedIn:
-            return "Not signed in to iCloud"
+            return NSLocalizedString("sync.diagnostic.issue.iCloudNotSignedIn", comment: "Not signed in to iCloud issue")
         case .networkUnavailable:
-            return "Network connection unavailable"
+            return NSLocalizedString("sync.diagnostic.issue.networkUnavailable", comment: "Network unavailable issue")
         case .iCloudContainerInaccessible:
-            return "iCloud container is not accessible"
+            return NSLocalizedString("sync.diagnostic.issue.iCloudContainerInaccessible", comment: "iCloud container inaccessible issue")
         case .coreDataStoreCorrupted:
-            return "Core Data store may be corrupted"
+            return NSLocalizedString("sync.diagnostic.issue.coreDataStoreCorrupted", comment: "Core Data store corrupted issue")
         case .cloudKitMisconfigured:
-            return "CloudKit is not properly configured"
+            return NSLocalizedString("sync.diagnostic.issue.cloudKitMisconfigured", comment: "CloudKit misconfigured issue")
         }
     }
     

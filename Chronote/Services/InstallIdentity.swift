@@ -26,7 +26,7 @@ enum InstallIdentity {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         #if !os(macOS)
         query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
@@ -44,19 +44,19 @@ enum InstallIdentity {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecValueData as String: data,
+            kSecValueData as String: data
         ]
         #if !os(macOS)
         attrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         #endif
         let status = SecItemAdd(attrs as CFDictionary, nil)
         if status == errSecDuplicateItem {
-            let q: [String: Any] = [
+            let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: service,
-                kSecAttrAccount as String: account,
+                kSecAttrAccount as String: account
             ]
-            SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         }
     }
 }

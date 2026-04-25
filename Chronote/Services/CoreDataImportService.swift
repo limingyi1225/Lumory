@@ -4,6 +4,14 @@ import SwiftUI
 
 @MainActor
 class CoreDataImportService: ObservableObject {
+    struct ImportResult: Equatable {
+        let succeeded: Int
+        let failed: Int
+        let skipped: Int
+
+        static let empty = ImportResult(succeeded: 0, failed: 0, skipped: 0)
+    }
+
     @Published var isImporting: Bool = false
     @Published var importProgress: Double = 0.0
 
@@ -16,13 +24,13 @@ class CoreDataImportService: ObservableObject {
     }
 
     /// 根据用户粘贴的原始文本批量导入日记到 Core Data
-    /// 返回 (成功条数, 失败条数) 供 UI 向用户反馈。
+    /// 返回导入结果计数(成功 / 失败 / 跳过重复)供 UI 向用户反馈。
     /// **抛错语义**:解析层(网络 / 后端 / JSON)失败时抛 `DiaryImportError`,UI 应 catch
     /// 后展示真错误,而非把它当 "succeeded=0" 的 happy-path。
-    /// 解析返回 `[]`(粘贴内容里没识别到日记)是合法情况,这里仍返回 `(0, 0)`,UI 在
+    /// 解析返回 `[]`(粘贴内容里没识别到日记)是合法情况,这里仍返回 `.empty`,UI 在
     /// `DiaryImportView` 里用专门的 "no entries detected" 文案区分。
     @discardableResult
-    func importEntries(from rawText: String, context: NSManagedObjectContext) async throws -> (succeeded: Int, failed: Int) {
+    func importEntries(from rawText: String, context: NSManagedObjectContext) async throws -> ImportResult {
         Log.info("[CoreDataImportService] importEntries: rawText length = \(rawText.count)", category: .migration)
         isImporting = true
         importProgress = 0.0
@@ -44,15 +52,25 @@ class CoreDataImportService: ObservableObject {
             Log.info("[CoreDataImportService] importEntries: parsed isEmpty (no entries detected in paste)", category: .migration)
             isImporting = false
             importProgress = 0.0
-            return (0, 0)
+            return .empty
         }
 
         let total = parsed.count
         var succeeded = 0
         var failed = 0
+        var skipped = 0
+        var insertedCount = 0
+        var seenFingerprints = existingEntryFingerprints(in: context)
         for (index, entry) in parsed.enumerated() {
             let date = entry.date
             let text = entry.text
+            let fingerprint = Self.fingerprint(date: date, text: text)
+            guard seenFingerprints.insert(fingerprint).inserted else {
+                Log.info("[CoreDataImportService] 跳过重复导入条目: \(date)", category: .migration)
+                skipped += 1
+                importProgress = Double(index + 1) / Double(total)
+                continue
+            }
             // 和 HomeView.addEntry 保持一致的四件套流水线：summary / mood / themes / embedding
             // 并行发 AI 请求，避免一条日记串行等 4 轮。wordCount 本地算，免费。
             async let summaryTask = aiService.summarize(text: text)
@@ -67,6 +85,7 @@ class CoreDataImportService: ObservableObject {
             let raw = NSEntityDescription.insertNewObject(forEntityName: "DiaryEntry", into: context)
             guard let newEntry = raw as? DiaryEntry else {
                 Log.error("[CoreDataImportService] DiaryEntry 类型转换失败，跳过", category: .migration)
+                context.delete(raw)
                 failed += 1
                 continue
             }
@@ -80,31 +99,44 @@ class CoreDataImportService: ObservableObject {
                 newEntry.setEmbedding(vector)
             }
             newEntry.recomputeWordCount()
-
-            // **错误时 rollback**：以前 save 失败只 log 继续循环，但失败的 NSManagedObject 已经
-            // `insertNewObject` 进 context 了，仍挂在脏集合里——下一次 save（别的 entry、或 CloudKit
-            // 触发的 merge）会连带尝试再提交一次，context 持续中毒。
-            // `context.delete(newEntry)` 把这条从 context 里摘掉（save 前的 delete 是免 disk round-trip 的）。
-            do {
-                try context.save()
-                succeeded += 1
-            } catch {
-                Log.error("[CoreDataImportService] 保存条目失败，回滚此条: \(error)", category: .migration)
-                context.delete(newEntry)
-                // rollback 把未提交状态全丢掉；对已经 save 过的前面的条目没影响
-                context.rollback()
-                failed += 1
-            }
+            insertedCount += 1
 
             // 更新进度
             importProgress = Double(index + 1) / Double(total)
             Log.info("[CoreDataImportService] importEntries: imported entry \(index + 1)/\(total)", category: .migration)
         }
 
+        if insertedCount > 0 {
+            do {
+                try context.save()
+                succeeded += insertedCount
+            } catch {
+                Log.error("[CoreDataImportService] 批量保存导入条目失败，回滚 \(insertedCount) 条: \(error)", category: .migration)
+                context.rollback()
+                failed += insertedCount
+            }
+        }
+
         // 导入完成后
         isImporting = false
         importProgress = 1.0
-        Log.info("[CoreDataImportService] importEntries: import completed succeeded=\(succeeded) failed=\(failed)", category: .migration)
-        return (succeeded, failed)
+        Log.info("[CoreDataImportService] importEntries: import completed succeeded=\(succeeded) failed=\(failed) skipped=\(skipped)", category: .migration)
+        return ImportResult(succeeded: succeeded, failed: failed, skipped: skipped)
     }
-} 
+
+    private func existingEntryFingerprints(in context: NSManagedObjectContext) -> Set<String> {
+        let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+        request.resultType = .dictionaryResultType
+        request.propertiesToFetch = ["date", "text"]
+        guard let rows = try? context.fetch(request) else { return [] }
+        return Set(rows.compactMap { row in
+            guard let date = row["date"] as? Date,
+                  let text = row["text"] as? String else { return nil }
+            return Self.fingerprint(date: date, text: text)
+        })
+    }
+
+    private static func fingerprint(date: Date, text: String) -> String {
+        "\(date.timeIntervalSinceReferenceDate)|\(text.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+}

@@ -1,5 +1,5 @@
 import SwiftUI
-import CoreData
+@preconcurrency import CoreData
 
 // MARK: - SearchView
 //
@@ -99,18 +99,21 @@ struct SearchView: View {
     }
 
     private func keywordHits(for text: String) async -> [DiaryEntry] {
+        // 两段式 fetch：先在后台拿一份轻量的 [NSManagedObjectID]（不 fault 任何属性，
+        // 不会把 text/embedding/imagesData 拉进内存），再在 main context 里按 ID 懒生成
+        // DiaryEntry——SwiftUI List 渲染哪行才 fault 哪行。比 propertiesToFetch hint 真实得多
+        //（hint 在默认 .managedObjectResultType 下只是预取，对象仍是完整对象）。
         let objectIDs: [NSManagedObjectID] = await PersistenceController.shared.container
             .performBackgroundTask { context in
-                let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+                let request = NSFetchRequest<NSManagedObjectID>(entityName: "DiaryEntry")
+                request.resultType = .managedObjectIDResultType
                 request.predicate = NSPredicate(
                     format: "text CONTAINS[cd] %@ OR summary CONTAINS[cd] %@ OR themes CONTAINS[cd] %@",
                     text, text, text
                 )
                 request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
                 request.fetchLimit = 50
-                request.propertiesToFetch = ["id"]
-                guard let entries = try? context.fetch(request) else { return [] }
-                return entries.map { $0.objectID }
+                return (try? context.fetch(request)) ?? []
             }
         return await MainActor.run {
             // existingObject：CloudKit 同步删除或用户侧滑删除后首访不会抛 Obj-C 异常。

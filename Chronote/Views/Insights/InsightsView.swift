@@ -205,6 +205,13 @@ struct InsightsView: View {
             isLoadingThemes = true
         }
 
+        // Fix #23: range 切换时 SwiftUI cancel 外层 Task,但 `engine.*` 内部的
+        // `performBackgroundTask` 不响应外层 Task cancellation —— 旧实现下快速来回切 range
+        // 会让 N 个 bg fetch 同时跑完,挤压 store coordinator。
+        // 现在每次 await 后立刻检查 cancellation,并在 fetchDailyCells 的 bg 闭包入口检查,
+        // 让后续 stages 直接 bail。loadToken 旧逻辑保留作"写 UI 前再 stale-check"防线。
+        if Task.isCancelled { return }
+
         async let pointsTask = engine.moodSeries(in: interval, bucket: range.chartBucket)
         async let themesTask = engine.themes(in: interval)
         async let statsTask = engine.writingStats()
@@ -212,11 +219,15 @@ struct InsightsView: View {
 
         let (points, loadedThemes, loadedStats, loadedCells) = await (pointsTask, themesTask, statsTask, cellsTask)
 
+        // 子任务都返回后,如果外层已被 cancel,token 已经被新 reload 推进了,直接 return
+        // 让新 reload 接管 UI 状态(它自己的 isLoading/UUID 都已置好)。
+        if Task.isCancelled { return }
+
         await MainActor.run {
-            // 只在 token 还是最新时才把结果写进 UI，避免"被挤下的老 reload 把过期数据盖上"。
-            // 被挤下的老 reload 走到这里 guard 失败后**直接 return**，不触碰 loading flag：
-            // 后继 reload 在它自己的开头 MainActor.run 已经把 loadToken 刷新 + isLoading 重置 true，
-            // 由它自己的结尾负责清 false。老 reload 若在这里抢先清 false，新 reload 还没返回，
+            // 只在 token 还是最新时才把结果写进 UI,避免"被挤下的老 reload 把过期数据盖上"。
+            // 被挤下的老 reload 走到这里 guard 失败后**直接 return**,不触碰 loading flag:
+            // 后继 reload 在它自己的开头 MainActor.run 已经把 loadToken 刷新 + isLoading 重置 true,
+            // 由它自己的结尾负责清 false。老 reload 若在这里抢先清 false,新 reload 还没返回,
             // UI 会出现"已加载 → 又加载中"的视觉抖动。
             guard token == loadToken else { return }
             self.moodPoints = points
@@ -229,36 +240,61 @@ struct InsightsView: View {
         }
     }
 
-    private func fetchDailyCells(in range: DateInterval) async -> [DailyCell] {
-        // 热力图展示最近 140 天，覆盖范围比 TimeRange 更广以保持视觉稳定
+    private func fetchDailyCells(in range: DateInterval, lookbackDays: Int = 140) async -> [DailyCell] {
+        // 同一份 cells 喂给两个组件:
+        // - WritingHeatmap 想要恒定 140 天滚窗(视觉稳定,无论 TimeRange 怎么切都能填满)
+        // - CalendarMonthModule 需要覆盖用户可能切换到的较早月份(例如 .all 或 .year)
+        // 取并集:min(today - lookbackDays, range.start) → max(today, range.end)
+        // 之前硬编码只取 140 天导致用户切到 .year 或往前翻 6 个月时月历空白。
         let today = Date()
-        let start = Calendar.current.date(byAdding: .day, value: -140, to: today) ?? range.start
-        let fetchRange = DateInterval(start: start, end: today)
+        let lookbackStart = Calendar.current.date(byAdding: .day, value: -lookbackDays, to: today) ?? today
+        let start = min(lookbackStart, range.start)
+        let end = max(today, range.end)
+        let fetchRange = DateInterval(start: start, end: end)
+
+        // Fix #23: 入口先 short-circuit。外层 SwiftUI .task(id: range) 已经被 cancel 过的话,
+        // 没必要再去 store coordinator 排队抢锁。
+        if Task.isCancelled { return [] }
+
+        // 把外层 cancellation 传到 bg 闭包内的关键 checkpoint。`performBackgroundTask` 自己
+        // 不感知 Task cancellation,只能在闭包里手动读 `Task.isCancelled` 在快速来回切 range
+        // 时让旧 fetch 早 bail —— 至少省掉聚合循环。Fetch 本身已经发出去了,不可中断。
         return await PersistenceController.shared.container.performBackgroundTask { context in
-            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            // checkpoint 1: fetch 之前
+            if Task.isCancelled { return [] }
+
+            // 真·投影:用 dictionaryResultType 只取三列,省掉对象 fault 与 text/embedding/imagesData
+            // 的潜在 lazy load。(之前 propertiesToFetch + returnsObjectsAsFaults=false 在默认
+            // managedObjectResultType 下只是 prefetch hint,实际仍构建完整 DiaryEntry。)
+            let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            request.resultType = .dictionaryResultType
             request.predicate = NSPredicate(
                 format: "date >= %@ AND date <= %@",
                 fetchRange.start as NSDate,
                 fetchRange.end as NSDate
             )
-            // 只读需要的字段，节省内存
             request.propertiesToFetch = ["date", "moodValue", "wordCount"]
-            request.returnsObjectsAsFaults = false
-            guard let entries = try? context.fetch(request) else { return [] }
+            guard let rows = try? context.fetch(request) else { return [] }
+
+            // checkpoint 2: fetch 完成后,聚合循环之前。大数据集时这里能省掉 N 次 dict lookup。
+            if Task.isCancelled { return [] }
+
             let calendar = Calendar.current
             var grouped: [Date: (moodSum: Double, count: Int, words: Int)] = [:]
-            grouped.reserveCapacity(entries.count)
-            for entry in entries {
-                guard let date = entry.date else { continue }
+            grouped.reserveCapacity(rows.count)
+            for row in rows {
+                guard let date = row["date"] as? Date else { continue }
+                let mood = (row["moodValue"] as? Double) ?? 0
+                let words = (row["wordCount"] as? Int) ?? 0
                 let day = calendar.startOfDay(for: date)
-                var row = grouped[day] ?? (0, 0, 0)
-                row.moodSum += entry.moodValue
-                row.count += 1
-                row.words += Int(entry.wordCount)
-                grouped[day] = row
+                var agg = grouped[day] ?? (0, 0, 0)
+                agg.moodSum += mood
+                agg.count += 1
+                agg.words += words
+                grouped[day] = agg
             }
-            return grouped.map { (day, row) in
-                DailyCell(date: day, mood: row.moodSum / Double(row.count), wordCount: row.words)
+            return grouped.map { (day, agg) in
+                DailyCell(date: day, mood: agg.moodSum / Double(agg.count), wordCount: agg.words)
             }
         }
     }

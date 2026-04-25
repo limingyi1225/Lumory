@@ -232,12 +232,12 @@ struct CalendarMonthModule: View {
     }
 
     private func hashCells() -> Int {
+        // 必须 hash 全部 cell —— 之前只 sample first/last，用户编辑中间某天 mood
+        // hash 不变，moodByDay cache 不重建，月历着色显示陈旧数据。
+        // DailyCell 已实现 Hashable，N ≤ 366 成本可忽略。
         var hasher = Hasher()
         hasher.combine(cells.count)
-        hasher.combine(cells.first?.date)
-        hasher.combine(cells.last?.date)
-        hasher.combine(cells.first?.mood)
-        hasher.combine(cells.last?.mood)
+        for cell in cells { hasher.combine(cell) }
         return hasher.finalize()
     }
 

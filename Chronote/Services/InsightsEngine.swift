@@ -409,25 +409,109 @@ final class InsightsEngine {
     }
 
     private func retrieve(query: String, queryVector: [Float]?, topK: Int) async -> [DiaryEntryData] {
-        let all = await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
-            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
-            request.returnsObjectsAsFaults = false
-            guard let entries = try? context.fetch(request) else { return [] }
-            return entries.map { entry in
-                DiaryEntryData(
-                    id: entry.id ?? UUID(),
-                    date: entry.date ?? Date(),
-                    text: entry.text ?? "",
-                    moodValue: entry.moodValue,
-                    summary: entry.summary ?? "",
-                    themes: entry.themeArray,
-                    embedding: entry.embeddingVector,
-                    wordCount: Int(entry.wordCount)
-                )
-            }
-        }
+        // **两阶段检索**(Fix #20):
+        //  Phase A —— 轻量扫:只 prefetch `embedding` + `date`,**不**触发 text/summary/themes/imagesData
+        //             的 fault。1000 条 × 6KB embedding ≈ 6MB,vs 旧实现 15-30MB 全量物化。
+        //             用 bounded top-K 数组(insertion sort)代替 O(N log N) 全排序,峰值内存 O(K) 而非 O(N)。
+        //  Phase B —— 物化:拿 top-K objectIDs 回填完整 DiaryEntryData。每个 objectID 通过 fault 取数,
+        //             成本和原方案的 mapping 一致,但只对 K 条。
+        //
+        // 无 query 向量 / 全无 embedding 走时间倒序兜底(语义见 rankRetrieval 注释),这条路径在 Phase A 内完成。
+        return await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
+            // Phase A: lightweight scan
+            let scanRequest: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            scanRequest.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+            // returnsObjectsAsFaults=true + propertiesToFetch=[embedding, date] →
+            // 仅这两列进 row cache,其它属性保持 fault,scan 阶段不会去读 text 列。
+            scanRequest.returnsObjectsAsFaults = true
+            scanRequest.includesPropertyValues = true
+            scanRequest.propertiesToFetch = ["embedding", "date"]
+            guard let scanned = try? context.fetch(scanRequest), !scanned.isEmpty else { return [] }
+            guard topK > 0 else { return [] }
 
-        return Self.rankRetrieval(all: all, queryVector: queryVector, topK: topK)
+            // 兜底路径:无 query 向量 → 直接取最近 topK,Phase B 时材料化
+            guard let qVec = queryVector else {
+                let ids = scanned.prefix(topK).map { $0.objectID }
+                return Self.materialize(objectIDs: Array(ids), in: context)
+            }
+
+            // 收集 (objectID, score),用 bounded min-heap 维护当前 top-K(K 通常 8-20):
+            // 用 sorted insertion 模拟 —— `topHeap` 始终按 score 降序;新候选 < heap 末尾(最小值)直接丢,
+            // 否则 insertion-sort 进去并把溢出末尾踢掉。K=20 时每次 insertion 最差 20 次比较。
+            var topHeap: [(id: NSManagedObjectID, score: Float)] = []
+            topHeap.reserveCapacity(topK)
+            // 同步收集"无 embedding"的 objectID + date,以便最后做"未索引语料保留槽"逻辑(对齐 rankRetrieval 行为)。
+            var withoutVecIDs: [(id: NSManagedObjectID, date: Date)] = []
+            withoutVecIDs.reserveCapacity(scanned.count)
+
+            for entry in scanned {
+                guard let vec = entry.embeddingVector else {
+                    withoutVecIDs.append((entry.objectID, entry.date ?? .distantPast))
+                    continue
+                }
+                let score = Self.cosineSimilarity(qVec, vec)
+                if topHeap.count < topK {
+                    // 插入并保持降序
+                    let insertAt = topHeap.firstIndex(where: { $0.score < score }) ?? topHeap.count
+                    topHeap.insert((entry.objectID, score), at: insertAt)
+                } else if let last = topHeap.last, score > last.score {
+                    // 比当前最小分还高 —— 替换尾部,insertion-sort 到正确位置
+                    topHeap.removeLast()
+                    let insertAt = topHeap.firstIndex(where: { $0.score < score }) ?? topHeap.count
+                    topHeap.insert((entry.objectID, score), at: insertAt)
+                }
+            }
+
+            // 全语料无 embedding → 走时间兜底(scanned 已按 date desc)
+            guard !topHeap.isEmpty else {
+                let ids = scanned.prefix(topK).map { $0.objectID }
+                return Self.materialize(objectIDs: Array(ids), in: context)
+            }
+
+            // 计算"未索引保留槽":覆盖率不到 95% 或有 5 分钟内新条目时,留 max(2, topK/3) 给最近未索引。
+            // 与 rankRetrieval 的策略一致,只是这里直接对 objectID 操作,不必回填 DiaryEntryData。
+            let totalCount = scanned.count
+            let withVecCount = totalCount - withoutVecIDs.count
+            let indexCoverage = Double(withVecCount) / Double(max(1, totalCount))
+            let now = Date()
+            let hasFreshUnindexed = withoutVecIDs.contains { now.timeIntervalSince($0.date) < 300 }
+            let minRecencyReserve: Int
+            if !withoutVecIDs.isEmpty, (indexCoverage < 0.95 || hasFreshUnindexed) {
+                minRecencyReserve = min(max(2, topK / 3), withoutVecIDs.count)
+            } else {
+                minRecencyReserve = 0
+            }
+
+            let maxSemanticSlots = max(0, topK - minRecencyReserve)
+            let semanticIDs = topHeap.prefix(maxSemanticSlots).map { $0.id }
+            let remainingSlots = max(0, topK - semanticIDs.count)
+            // withoutVecIDs 来自按 date desc 的 scanned,所以它本身已按 date desc
+            let recentUnindexed = withoutVecIDs.prefix(min(remainingSlots, withoutVecIDs.count)).map { $0.id }
+
+            let finalIDs = Array(semanticIDs) + Array(recentUnindexed)
+
+            // Phase B: 物化
+            return Self.materialize(objectIDs: finalIDs, in: context)
+        }
+    }
+
+    /// 把一批 objectID 物化成 `DiaryEntryData`。每个 `context.object(with:)` 是 cheap fault,
+    /// 第一次访问其属性才会 round-trip 到 row cache。这里遍历完成后所有属性都被读过一次,
+    /// 跨 context 边界返回值类型是安全的。
+    private static func materialize(objectIDs: [NSManagedObjectID], in context: NSManagedObjectContext) -> [DiaryEntryData] {
+        objectIDs.compactMap { id in
+            guard let entry = try? context.existingObject(with: id) as? DiaryEntry else { return nil }
+            return DiaryEntryData(
+                id: entry.id ?? UUID(),
+                date: entry.date ?? Date(),
+                text: entry.text ?? "",
+                moodValue: entry.moodValue,
+                summary: entry.summary ?? "",
+                themes: entry.themeArray,
+                embedding: entry.embeddingVector,
+                wordCount: Int(entry.wordCount)
+            )
+        }
     }
 
     /// 纯函数版检索排名（方便单测）：

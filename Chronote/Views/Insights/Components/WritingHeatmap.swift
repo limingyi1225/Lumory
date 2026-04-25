@@ -152,13 +152,12 @@ struct WritingHeatmap: View {
     // MARK: Cache / build
 
     private func rebuildIfNeeded() {
+        // 必须 hash 全部 cell —— 之前只 sample first/last，用户编辑中间某天的 mood/wordCount
+        // hash 不变，cache 不重建，热力图显示陈旧数据。N ≤ 366（最多一年）成本可忽略。
         var hasher = Hasher()
         hasher.combine(weeksToShow)
         hasher.combine(cells.count)
-        hasher.combine(cells.first?.date)
-        hasher.combine(cells.last?.date)
-        hasher.combine(cells.first?.wordCount)
-        hasher.combine(cells.last?.wordCount)
+        for cell in cells { hasher.combine(cell) }
         let identity = hasher.finalize()
         guard identity != lastCellsIdentity else { return }
         lastCellsIdentity = identity

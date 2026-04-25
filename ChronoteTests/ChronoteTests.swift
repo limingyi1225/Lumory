@@ -597,14 +597,21 @@ struct SuggestionContextFingerprintTests {
     }
 
     @Test func entryCountChangeFlipsFingerprint() {
-        let a = makeContext(totalEntries: 10, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 15))
-        let b = makeContext(totalEntries: 11, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 15))
+        // fingerprint 通过最新 entry id 感知"加了新条目",不直接依赖 totalEntries 计数,
+        // 所以这里用不同 entryId 模拟真实场景(加新日记 → 新 UUID → fingerprint 翻转)。
+        // 注意 fingerprint 只取 uuidString.prefix(8),两个 UUID 必须在前 8 字符不同。
+        let oldId = UUID(uuidString: "11111111-0000-0000-0000-000000000001")!
+        let newId = UUID(uuidString: "22222222-0000-0000-0000-000000000002")!
+        let a = makeContext(totalEntries: 10, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 15), entryId: oldId)
+        let b = makeContext(totalEntries: 11, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 15), entryId: newId)
         #expect(a.makeFingerprint() != b.makeFingerprint())
     }
 
     @Test func newEntryDateFlipsFingerprint() {
+        // fingerprint 把 latestDay 折成 ISO 周(YYYY-Www),所以这里要选跨周的两个日期才能
+        // 测出语义。06-15(W24,周六)→ 06-22(W25,周六)。
         let a = makeContext(totalEntries: 10, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 15))
-        let b = makeContext(totalEntries: 10, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 16))
+        let b = makeContext(totalEntries: 10, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 22))
         #expect(a.makeFingerprint() != b.makeFingerprint())
     }
 
@@ -622,7 +629,12 @@ struct SuggestionContextFingerprintTests {
         #expect(enough.hasEnoughSignal == true)
     }
 
-    private func makeContext(totalEntries: Int, themeNames: [String], latestDay: Date) -> SuggestionContext {
+    private func makeContext(
+        totalEntries: Int,
+        themeNames: [String],
+        latestDay: Date,
+        entryId: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    ) -> SuggestionContext {
         let themes = themeNames.enumerated().map { i, name in
             InsightsEngine.Theme(
                 name: name,
@@ -634,7 +646,7 @@ struct SuggestionContextFingerprintTests {
             )
         }
         let recent = [
-            DiaryEntryData(id: UUID(), date: latestDay, text: "", moodValue: 0.5, summary: "")
+            DiaryEntryData(id: entryId, date: latestDay, text: "", moodValue: 0.5, summary: "")
         ]
         return SuggestionContext(
             topThemes: themes,

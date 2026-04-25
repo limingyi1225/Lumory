@@ -34,6 +34,7 @@
 		6A77D1042DEAA16200CEDDE5 /* ChronoteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChronoteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6A77D1052DEAA16200CEDDE5 /* ChronoteUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChronoteUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6A77D1172DEB27AA00CEDDE5 /* Lumory-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Lumory-Info.plist"; sourceTree = "<group>"; };
+		0AAAAA000000000000000001 /* Lumory.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Lumory.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -82,6 +83,7 @@
 		6A2378222DE1CA9400544A70 = {
 			isa = PBXGroup;
 			children = (
+				0AAAAA000000000000000001 /* Lumory.xcconfig */,
 				6A77D1172DEB27AA00CEDDE5 /* Lumory-Info.plist */,
 				6A77D1022DEAA14B00CEDDE5 /* Lumory.entitlements */,
 				6A4D7E0C2F0E8BA400F8E6B1 /* Lumory.icon */,
@@ -254,6 +256,7 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "if command -v swiftlint >/dev/null; then swiftlint; fi\n";
+			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -297,6 +300,7 @@
 /* Begin XCBuildConfiguration section */
 		6A23784A2DE1CA9500544A70 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0AAAAA000000000000000001 /* Lumory.xcconfig */;
 			buildSettings = {
 				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -366,6 +370,7 @@
 		};
 		6A23784B2DE1CA9500544A70 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0AAAAA000000000000000001 /* Lumory.xcconfig */;
 			buildSettings = {
 				ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES;
 				ALWAYS_SEARCH_USER_PATHS = NO;

@@ -1,0 +1,11 @@
+// Lumory build configuration (committed, no secrets).
+//
+// 密钥注入机制：
+//   1. 真实值在 `Lumory.local.xcconfig`（gitignored），通过下面 `#include?` 拉入。
+//   2. `Lumory-Info.plist` 里 `<string>$(APP_SHARED_SECRET)</string>` 在 build 时被替换。
+//   3. AppSecrets.swift 在运行时 `Bundle.main.infoDictionary["APP_SHARED_SECRET"]` 读取。
+//
+// pbxproj 已把本文件挂到 Project-level Debug+Release 的 baseConfigurationReference，
+// 不需要在 Xcode UI 里再做 base config 设置——`pod install` / 重新 clone 后开 Xcode 即生效。
+
+#include? "Lumory.local.xcconfig"

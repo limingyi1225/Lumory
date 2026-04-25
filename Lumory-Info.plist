@@ -18,5 +18,11 @@
 	<string>Lumory uses the microphone to record your voice notes for diary entries. This is only enabled when you press the speak button.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Lumory uses speech recognition to automatically convert your voice recordings into text for your diary entries when you hold the speak button. </string>
+	<!-- 自定义 key — 客户端共享密钥。值由 Xcode build settings 的 APP_SHARED_SECRET 替换，
+	     该变量由 Lumory.local.xcconfig（gitignored）注入。AppSecrets.swift 在运行时读取本键。
+	     如果 build settings 没设这个变量，下面字符串会保留 "$(APP_SHARED_SECRET)" 字面量，
+	     AppSecrets.swift 检测到 "$(" 前缀会落到空字符串 fallback → 后端 401。 -->
+	<key>APP_SHARED_SECRET</key>
+	<string>$(APP_SHARED_SECRET)</string>
 </dict>
 </plist>

@@ -1,0 +1,8 @@
+// 模板。启用 xcconfig 密钥注入时：
+//   1. cp Lumory.local.xcconfig.sample Lumory.local.xcconfig
+//   2. 填入真实密钥（下面那行替换 VALUE）
+//   3. 在 Xcode project base config 里挂 Lumory.xcconfig
+//
+// Lumory.local.xcconfig 已在 .gitignore，不会被提交。
+
+APP_SHARED_SECRET = REPLACE_WITH_ROTATED_APP_SHARED_SECRET

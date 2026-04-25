@@ -29,6 +29,10 @@ Package.resolved
 *.mode2v3
 *.perspectivev3
 
+# Xcode - local secret-injection xcconfigs (never commit)
+*.xcconfig.local
+Lumory.local.xcconfig
+
 # Fastlane
 fastlane/report.xml
 fastlane/Preview.html
@@ -63,6 +67,15 @@ lumory-backend.tar.gz
 .vscode/
 *.swp
 *.swo
+
+# Claude Code local config (per-user permission allowlist)
+.claude/settings.local.json
+.claude/worktrees/
+
+# Build / tool caches that don't belong in source
+.swift-module-cache/
+.xcodebuildmcp/
+.derivedData-review/
 
 # OS / misc
 Thumbs.db

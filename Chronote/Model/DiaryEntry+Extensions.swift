@@ -206,7 +206,8 @@ extension DiaryEntry {
         payload.append(Data(bytes: &dim, count: MemoryLayout<UInt32>.size))
         vector.withUnsafeBufferPointer { buf in
             payload.append(UnsafeBufferPointer(start: buf.baseAddress, count: buf.count).withMemoryRebound(to: UInt8.self) { raw in
-                Data(bytes: raw.baseAddress!, count: raw.count)
+                guard let base = raw.baseAddress else { return Data() }
+                return Data(bytes: base, count: raw.count)
             })
         }
         embedding = payload

@@ -183,14 +183,14 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
     var onPlayError: ((Error) -> Void)?
 
     func play(url: URL, fileName: String) {
-        if audioPlayer != nil && audioPlayer!.isPlaying && currentPlayingFileName == fileName {
-            audioPlayer?.pause()
+        if let player = audioPlayer, player.isPlaying, currentPlayingFileName == fileName {
+            player.pause()
             isPlaying = false
             stopDisplayLink()
             return
         }
-        if audioPlayer != nil && !audioPlayer!.isPlaying && currentPlayingFileName == fileName {
-            audioPlayer?.play()
+        if let player = audioPlayer, !player.isPlaying, currentPlayingFileName == fileName {
+            player.play()
             isPlaying = true
             startDisplayLink()
             return
@@ -221,8 +221,8 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
     }
 
     func pause() {
-        guard audioPlayer != nil && audioPlayer!.isPlaying else { return }
-        audioPlayer?.pause()
+        guard let player = audioPlayer, player.isPlaying else { return }
+        player.pause()
         isPlaying = false
         stopDisplayLink()
     }
@@ -628,7 +628,7 @@ struct HomeView: View {
 
     /// Pull-to-refresh：触发 CloudKit 同步 + 换一条占位语（从当前池里挑一个不同项）。
     /// AI 池的 `refreshIfNeeded` 走**独立 detached Task**，不塞进 refreshable 窗口——
-    /// 否则如果指纹变了要调一次 gpt-5.4（~2-3s），用户会感觉"下拉卡好几秒"。
+    /// 否则如果指纹变了要调一次 gpt-5.5（~2-3s），用户会感觉"下拉卡好几秒"。
     /// AI 刷完之后下一次下拉/聚焦才用得上，体感上毫无损失。
     private func triggerManualSync() async {
         syncMonitor.forceSync()

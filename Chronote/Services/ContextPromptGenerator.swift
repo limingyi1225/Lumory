@@ -158,7 +158,10 @@ final class ContextPromptGenerator {
             NSLocalizedString("今天想到 %@ 了吗？", comment: "Top theme template 2"),
             NSLocalizedString("%@ 最近给你带来什么？", comment: "Top theme template 3")
         ]
-        let idx = abs(theme.hashValue) % templates.count
+        // `String.hashValue` Swift 5.7+ 每个进程随机化（防 hash flooding）——同一 theme
+        // 每次冷启动落到不同模板上，"稳定模板/主题"意图就破了。改用 FNV-1a 32-bit 拿
+        // 进程无关的确定性 hash。
+        let idx = Int(Self.stableHash(theme) % UInt32(templates.count))
         return ContextPrompt(
             text: String(format: templates[idx], theme),
             kind: .themeFollowUp(theme)
@@ -227,6 +230,16 @@ final class ContextPromptGenerator {
             cursor = prev
         }
         return streak
+    }
+
+    /// FNV-1a 32-bit hash. 进程无关、确定性——用来给同一 theme 永远选到同一条模板，
+    /// 替代 Swift 标准库被随机化的 `String.hashValue`。
+    static func stableHash(_ s: String) -> UInt32 {
+        var h: UInt32 = 2_166_136_261
+        for b in s.utf8 {
+            h = (h ^ UInt32(b)) &* 16_777_619
+        }
+        return h
     }
 
     // MARK: - Data

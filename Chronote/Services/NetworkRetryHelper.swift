@@ -112,7 +112,7 @@ extension URLSession {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 30.0
         // **timeoutIntervalForResource 是整个资源传输的总 deadline**，不是每次读超时。
-        // 原值 60s 会在长 SSE 流（gpt-5.4 写 800 字中文报告要 60-90s）中途被 URLSession 掐掉。
+        // 原值 60s 会在长 SSE 流（gpt-5.5 写 800 字中文报告要 60-90s）中途被 URLSession 掐掉。
         // 拉长到 300s，给长流式响应留余量。
         configuration.timeoutIntervalForResource = 300.0
         configuration.waitsForConnectivity = true
@@ -128,4 +128,3 @@ extension URLSession {
         return URLSession(configuration: configuration)
     }()
 }
-

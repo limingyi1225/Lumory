@@ -220,6 +220,8 @@ struct SettingsView: View {
     @ViewBuilder
     private var aboutSection: some View {
         Section(header: sectionHeader(NSLocalizedString("关于", comment: "About"))) {
+            // swiftlint:disable:next force_unwrapping
+            // 编译期常量 mailto: URL，格式合法，URL(string:) 不会失败。
             Link(destination: URL(string: "mailto:me@limingyi.com")!) {
                 settingsLabel(
                     NSLocalizedString("联系开发者", comment: "Contact developer"),

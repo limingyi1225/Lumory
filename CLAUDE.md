@@ -5,7 +5,7 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,target/sch
 ## 技术栈
 - **iOS 客户端**:SwiftUI + CoreData + `NSPersistentCloudKitContainer`(CloudKit 同步)。App 入口 `Chronote/ChronoteApp.swift`;`WindowGroup` 挂一个 `ZStack`,启动先走 `SplashView`(约 1s)再淡出到主内容视图 `HomeView`(见 [ChronoteApp.swift:173-186](Chronote/ChronoteApp.swift:173))。
 - **后端**:Node.js + Express 5,部署在 `https://lumory.isaabby.com`(Cloudflare → nginx:443 → node:3000),PM2 进程管理。
-- **AI**:走自建后端代理 OpenAI(`/api/openai/chat/completions`、`/api/openai/embeddings`)。Chat 走 SSE 流,模型目前是 `gpt-5.4` / `gpt-5.4-mini`(reasoning effort 分档)。
+- **AI**:走自建后端代理 OpenAI(`/api/openai/chat/completions`、`/api/openai/embeddings`)。Chat 走 SSE 流,模型目前是 `gpt-5.5` / `gpt-5.4-mini`(reasoning effort 分档)。
 - **语音**:Apple `SFSpeechRecognizer` + `AVAudio` 录音,转写本地做(见 [AppleSpeechRecognizer.swift](Chronote/Services/AppleSpeechRecognizer.swift) / [AudioRecorder.swift](Chronote/Services/AudioRecorder.swift));不走 OpenAI 转录。
 - **本地化**:中(`zh-Hans.lproj`)/ 英(`en.lproj`),由 `@AppStorage("appLanguage")` 切换。
 
@@ -90,7 +90,7 @@ iOS:
 ## 约定 / 踩过的坑
 
 - **⚠️ Secrets**:
-  - `Chronote/Services/AppSecrets.swift` 里硬编码 `appSharedSecret`,已知问题,TODO 迁到 xcconfig / CI secret injection。修改时注意不要再引入真正的 OpenAI key(曾泄露过一次)。
+  - `Chronote/Services/AppSecrets.swift` 里硬编码 `appSharedSecret`,已知问题,TODO 迁到 xcconfig / CI secret injection。
   - 后端 `OPENAI_API_KEY` 和 `APP_SHARED_SECRET` 都必须来自 `server/.env`,缺任一立刻 `process.exit(1)`。
 - **Info.plist 的 ATS 例外**已删(历史上为旧明文 origin `64.176.209.155` 留的,现在全 HTTPS 走 `lumory.isaabby.com`,不再需要)。
 - **CoreData 迁移**不要同步跑在 `init()`。回填用 `*BackfillService` 模式:`WordCountBackfillService` 走后台 context `fetch(predicate: wordCount == 0)` + 遍历 + save(无 UserDefaults flag,天然幂等 —— 没 pending 就是空数组,代价只是一次 SQL 扫);`Embedding/ThemeBackfillService` 的 `runningTask` 已改 `@MainActor` 隔离,所有 start/cancel 入口都会汇合到 MainActor 排队,多入口 race 被锁死。

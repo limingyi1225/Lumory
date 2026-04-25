@@ -1,0 +1,104 @@
+# Baseline Build Warnings - 2026-04-24
+# Build Result: ✅ BUILD SUCCEEDED (Lumory scheme, iOS Simulator, iPhone 17)
+
+## SwiftLint Warnings by Category
+
+### Force Unwrapping (force_unwrapping) - HIGH RISK
+- DiaryEntry+Extensions.swift:209:44
+- HomeView.swift:186:45, 192:46, 224:48
+- PersistenceController.swift:327:114, 362:84
+- SettingsView.swift:223:68
+- OpenAIService.swift:13:97, 174:80, 215:84
+- DatabaseRecoveryService.swift:107:101, 211:101
+
+### File Length (file_length) - MAINTAINABILITY
+- HomeView.swift:2117 (2117 lines!)
+- DiaryDetailView.swift:979 (979 lines)
+- SettingsView.swift:915 (915 lines)
+- OpenAIService.swift:1501 (1501 lines!)
+- AskPastView.swift:619 (619 lines)
+- DiaryEntry+Extensions.swift:758 (758 lines)
+
+### Type Body Length (type_body_length) - MAINTAINABILITY
+- HomeView.swift:368 - HomeView struct spans 964 lines
+- DiaryDetailView.swift:12 - spans 686 lines
+- AskPastView.swift:13 - spans 431 lines
+- OpenAIService.swift:6 - class spans 546 lines
+
+### Function Body Length (function_body_length)
+- PersistenceController.swift:20 - init spans 90 lines
+- OpenAIService.swift:245 - 109 lines
+- OpenAIService.swift:502 - 99 lines
+- OpenAIService.swift:1018 - 175 lines
+- OpenAIService.swift:1358 - 85 lines
+- DiaryImportService.swift:14 - 117 lines
+
+### Large Tuple (large_tuple) - CODE QUALITY
+- AIService.swift:85 - tuple has >2 members
+- DiaryDetailView.swift:693
+- InsightsView.swift:249
+
+### Identifier Name (too short) - READABILITY
+- Color+MoodSpectrum.swift:7 - 'v'
+- MoodStoryChart.swift:130 'v', 239 'f', 248 'c', 305 'v', 340 'f', 345 'f', 350 'f'
+- SettingsView.swift:593 'n', 644 'n'
+- InsightsView.swift:383 'f'
+- ThemeCardList.swift:154 'v'
+- CitationEntryCard.swift:49 'f'
+- DiaryEntryRow.swift:192 'f'
+- CalendarMonthModule.swift:188 'f', 247 'm', 293 'f'
+- WritingHeatmap.swift:186 'c', 191 'd', 204 'f', 219 'n'
+- AIService.swift:86 's', 87 'm'
+- OpenAIService.swift:100 's', 115 'n', 120 'n', 1038 'e', 1350 'f'
+- HomeView.swift:1294 'f'
+- DiaryDetailView.swift:91 'f'
+- InsightsEngine.swift:380 'h','l', 495 'a','b', 497 'n'
+- PromptSuggestionEngine.swift:47 'f'
+- DiaryImportService.swift:130 'd'
+- InstallIdentity.swift:54 'q'
+- UITestSampleData.swift:91 'e'
+- AskPastView.swift:615 'f'
+
+### Implicit Optional Initialization (nil = default) - MINOR
+- HomeView.swift:419, 424
+- DiaryExportView.swift:14
+- SettingsView.swift:525
+- HomePhotoViewModel.swift:21
+- HomeRecordingViewModel.swift:31, 34, 42
+- HomeInputViewModel.swift:40
+- AskPastView.swift:29
+
+### Trailing Newline / Whitespace - STYLE
+- Multiple files (trailing_newline, vertical_whitespace violations)
+
+### Unused Closure Parameter
+- PersistenceController.swift:110, 232
+- SyncDiagnosticView.swift:59, 95
+- PhotosCollectionView.swift:38
+- OpenAIService.swift:1038
+- DatabaseRecoveryService.swift:72
+- AppleSpeechRecognizer.swift:149
+
+### Line Length (>140 chars)
+- LocalizationHelper.swift:32 (149 chars)
+- HomeView.swift:965 (184 chars!)
+- PersistenceController.swift:64, 125, 355, 365
+- DiaryDetailView.swift:359, 639, 640
+- OpenAIService.swift:400, 602, 611, 1390, 1477, 1478
+- SyncDiagnosticView.swift:61
+- CloudKitSyncMonitor.swift:108
+- NetworkRetryHelper.swift:43
+- DatabaseRecoveryService.swift:52, 183, 190
+- DiaryImportService.swift:125 (175 chars!)
+- UITestSampleData.swift:238
+
+### Other Notable
+- DiaryImportService.swift:107 - optional_data_string_conversion (prefer failable String init)
+- DiaryImportService.swift:112 - Nesting violation (types nested >2 levels)
+- ThemeCardList.swift:157 - statement_position (else on wrong line)
+- UITestSampleData.swift - type_name 'E' too short (206), trailing comma (173, 371)
+- InstallIdentity.swift - trailing comma (29, 47, 57)
+- HomeView.swift:115 - redundant_discardable_let
+- InsightsEngine.swift:474 - control_statement (unnecessary parentheses)
+- ImageViewerView.swift:153 - multiple_closures_with_trailing_closure
+- DiaryDetailView.swift:336 - multiple_closures_with_trailing_closure

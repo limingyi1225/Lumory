@@ -11,7 +11,6 @@ import UIKit
 #endif
 import CoreData
 import AVFoundation
-import Speech
 
 @main
 struct ChronoteApp: App {
@@ -115,10 +114,10 @@ struct ChronoteApp: App {
         #endif
     }
     
-    // 请求录音权限和语音识别权限
+    // 请求录音权限。语音识别走 OpenAI 后端转写,不再需要 Speech.framework 权限。
     private func requestPermissions() {
         // Screenshot 自动化模式:跳过弹窗,否则会盖在 Home 上把首屏截烂。
-        // 真实运行用户必须看到这俩弹窗,所以只在显式 launchArg 时才跳。
+        // 真实运行用户必须看到弹窗,所以只在显式 launchArg 时才跳。
         #if DEBUG
         if UITestSampleData.isActive { return }
         #endif
@@ -138,15 +137,6 @@ struct ChronoteApp: App {
             }
         }
         #endif
-
-        SFSpeechRecognizer.requestAuthorization { status in
-            switch status {
-            case .authorized:
-                break
-            default:
-                Log.info("Speech recognition permission status: \(status)", category: .ui)
-            }
-        }
     }
     
     private func migrateExistingImagesToiCloud() {

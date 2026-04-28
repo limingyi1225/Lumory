@@ -1,4 +1,4 @@
-/* 
+/*
    InfoPlist.strings
    Lumory - Personal Journal & Voice Diary
 
@@ -6,4 +6,4 @@
 */
 
 /* Microphone Usage Description */
-"NSMicrophoneUsageDescription" = "Lumory uses your microphone to record voice diary entries that you can transcribe into text. For example, you can record your thoughts, daily experiences, or personal reflections, which will then be converted to written text and saved as part of your journal entries. Your voice recordings are processed locally on your device and are never shared with third parties."; 
+"NSMicrophoneUsageDescription" = "Lumory uses the microphone to record voice notes for your diary. Recordings are sent through Lumory's backend to OpenAI for transcription and are not retained by either service after processing.";

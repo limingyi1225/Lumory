@@ -297,6 +297,7 @@
 /* Backend / AI errors — surfaced to the user via NSError.localizedDescription or onChunk fallback */
 "error.backend.auth" = "Service authentication failed. Please contact the developer.";
 "error.backend.notFound" = "Service endpoint not found (%@). Please contact the developer.";
+"error.backend.payloadTooLarge" = "Upload too large (413). Please shorten your recording or text.";
 "error.backend.rateLimited" = "AI request rate limit reached. Please try again shortly.";
 "error.backend.badGateway" = "The AI service is temporarily unreachable (502). Please try again later.";
 "error.backend.unavailable" = "The AI service is temporarily unavailable (503). Please try again later.";
@@ -360,12 +361,17 @@
 "import.alert.empty.title" = "No Entries Detected";
 "import.alert.empty.message" = "No diary entries were detected in the pasted text. Please check the format and try again.";
 
-/* Store load failure / speech permission recovery */
+/* Store load failure */
 "store.load.failed.title" = "Diary Store Unavailable";
 "store.load.failed.message" = "Lumory could not load the local diary database. Some features may be unavailable until the app is restarted or the database is repaired.";
-"speech.permission.settings.title" = "Speech Recognition Disabled";
-"speech.permission.settings.message" = "Enable Speech Recognition for Lumory in Settings to transcribe recordings.";
-"speech.permission.settings.open" = "Open Settings";
+
+/* Speech transcription errors (gpt-4o-mini-transcribe via Lumory backend) */
+"transcription.error.network" = "Network error. Your recording is saved.";
+"transcription.error.audioTooLarge" = "Recording exceeds 25 MB limit. Try a shorter recording.";
+"transcription.error.audioRead" = "Could not read the recording file.";
+"transcription.error.server" = "Transcription unavailable (%d)";
+"transcription.error.config" = "App configuration error. Contact support.";
+"transcription.retry" = "Retry transcription";
 
 /* Sync Diagnostic */
 "sync.diagnostic.title" = "Sync Diagnostic";

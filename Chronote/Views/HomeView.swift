@@ -379,8 +379,8 @@ struct HomeView: View {
     // AI 服务从 SwiftUI Environment 注入，默认指向 `OpenAIService.shared`。
     // 生产零行为变化；测试 / Preview 里可以 `.environment(\.aiService, MockAIService())` 替换。
     @Environment(\.aiService) private var aiService
-    // 语音转录（独立的服务，不和 AI 混在一起）
-    private let transcriber: TranscriberProtocol = AppleSpeechRecognizer()
+    // 语音转录（独立的服务，不和 AI 混在一起）。走 Lumory 后端代理 OpenAI gpt-4o-mini-transcribe。
+    private let transcriber: TranscriberProtocol = OpenAITranscriber()
     
     // 导入服务（与 SettingsView 共享）
     @EnvironmentObject var importService: CoreDataImportService
@@ -425,7 +425,6 @@ struct HomeView: View {
     @State private var showDeleteConfirmation: Bool = false
     /// 冷启动首帧 @FetchRequest 尚未完成时为 false——避免 emptyState 闪一帧。
     @State private var hasLoadedOnce: Bool = false
-    @State private var showSpeechSettingsAlert: Bool = false
 
     // Search state — 由系统 .searchable 托管输入；下面三个仅是结果与节流任务。
     @State private var searchQuery: String = ""
@@ -483,17 +482,6 @@ struct HomeView: View {
                 }
             } message: {
                 Text(NSLocalizedString("确定要删除这篇日记吗？此操作无法撤销。", comment: "Delete confirmation"))
-            }
-            .alert(
-                NSLocalizedString("speech.permission.settings.title", comment: "Speech permission settings alert title"),
-                isPresented: $showSpeechSettingsAlert
-            ) {
-                Button(NSLocalizedString("speech.permission.settings.open", comment: "Open app settings button")) {
-                    openAppSettings()
-                }
-                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
-            } message: {
-                Text(NSLocalizedString("speech.permission.settings.message", comment: "Speech permission settings alert message"))
             }
     }
     
@@ -750,6 +738,9 @@ struct HomeView: View {
                         recordingVM.showingDeleteAlert = true
                     }
                 )
+                if let failure = recordingVM.transcriptionError {
+                    transcriptionErrorBanner(failure: failure)
+                }
             }
         }
         .frame(height: recordingVM.audioRecordings.isEmpty ? 0 : nil)
@@ -764,10 +755,64 @@ struct HomeView: View {
             }
         }
     }
+
+    @ViewBuilder
+    private func transcriptionErrorBanner(failure: TranscriptionFailure) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.footnote)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(transcriptionErrorMessage(for: failure))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if failure.isRetryable {
+                    Button {
+                        retryTranscription()
+                    } label: {
+                        Text(NSLocalizedString("transcription.retry", comment: "Retry transcription button"))
+                            .font(.footnote.weight(.medium))
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func transcriptionErrorMessage(for failure: TranscriptionFailure) -> String {
+        switch failure {
+        case .networkFailed:
+            return NSLocalizedString("transcription.error.network", comment: "Network failure during transcription")
+        case .audioTooLarge:
+            return NSLocalizedString("transcription.error.audioTooLarge", comment: "Audio file too large")
+        case .audioReadFailed:
+            return NSLocalizedString("transcription.error.audioRead", comment: "Could not read audio file")
+        case .serverError(let code):
+            return String(
+                format: NSLocalizedString("transcription.error.server", comment: "Transcription server error"),
+                code
+            )
+        case .sharedSecretMissing:
+            return NSLocalizedString("transcription.error.config", comment: "App config error")
+        }
+    }
     
     private func deleteRecording(_ target: String) {
         if audioPlaybackController.currentPlayingFileName == target {
             audioPlaybackController.stopPlayback(clearCurrentFile: true)
+        }
+        // **隐私关键**:删除录音必须同时取消正在跑的转写上传 —— 否则用户删了录音,
+        // 25 MB 的 multipart 还在飞往 OpenAI。Task.cancel 会让 URLSession 中止上传,
+        // OpenAITranscriber 里 catch URLError(.cancelled) 走通用网络错误分支(无害,
+        // 因为 audioRecordings 已清空,banner 不会渲染)。
+        if recordingVM.currentAudioFileName == target {
+            recordingVM.transcriptionTask?.cancel()
+            recordingVM.transcriptionTask = nil
+            recordingVM.isTranscribing = false
         }
         deleteAudioFileFromDocuments(target)
         // 删除录音时使用动画
@@ -778,6 +823,8 @@ struct HomeView: View {
         if recordingVM.currentAudioFileName == target {
             recordingVM.currentAudioFileName = nil
         }
+        // 录音被删了,挂着的转写错误 banner 也没意义了。
+        recordingVM.transcriptionError = nil
         recordingVM.deleteTarget = nil
     }
 
@@ -1420,46 +1467,57 @@ struct HomeView: View {
         let audioURL = documentsURL.appendingPathComponent(fileName)
         Log.info("[HomeView handleStopRecording: got audioURL: \(audioURL)] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
 
-        // 开始异步转录任务
-        recordingVM.transcriptionTask = Task {
-            Log.info("[HomeView handleStopRecording Task START] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
-            Log.info("[HomeView] Using language for transcription: \(appLanguage)", category: .ui)
-            let transcribedTextOpt = await transcriber.transcribeAudio(fileURL: audioURL, localeIdentifier: appLanguage)
-            // 转录完成，更新状态
-            await MainActor.run {
-                recordingVM.isTranscribing = false
-                Log.info("[HomeView transcriptionTask] isTranscribing set to false", category: .ui)
-            }
-            if let transcribedText = transcribedTextOpt {
-                // 确保当前文件未变更
-                guard recordingVM.currentAudioFileName == fileName else {
-                    Log.info("[HomeView transcriptionTask] 任务文件已改变，放弃更新", category: .ui)
-                    return
-                }
-                Log.info("[HomeView handleStopRecording Task - transcription successful, text: \(transcribedText)] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
-                // 更新文本并分析情绪
-                await MainActor.run {
-                    let punctuation = transcribedText.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil ? "。" : "."
-                    if inputVM.inputText.isEmpty {
-                        inputVM.inputText = transcribedText + punctuation
-                    } else {
-                        inputVM.inputText += transcribedText + punctuation
-                    }
-                }
-                // 转录后不再自动分析情绪，等待发送时统一分析
-                Log.info("[HomeView transcriptionTask] Transcription completed, mood analysis will happen on send.", category: .ui)
-            } else {
-                Log.error("[HomeView transcriptionTask] 转录失败或返回nil", category: .ui)
-                let failure = transcriber.lastFailure
-                if failure?.shouldOfferSettings == true {
-                    await MainActor.run {
-                        showSpeechSettingsAlert = true
-                    }
-                }
-            }
-            Log.info("[HomeView handleStopRecording Task END] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
-        }
+        // 进入转写任务前清掉上次的错误,新一轮开始。
+        recordingVM.transcriptionError = nil
+        startTranscription(audioURL: audioURL, fileName: fileName)
         Log.info("[HomeView handleStopRecording END FUNCTION] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+    }
+
+    /// 启动转写任务,失败时把错误塞进 `recordingVM.transcriptionError` 让 UI 显示 inline banner +
+    /// 重试按钮。提取成方法是为了 retry 入口能复用同一段逻辑。
+    private func startTranscription(audioURL: URL, fileName: String) {
+        recordingVM.transcriptionTask = Task {
+            Log.info("[HomeView startTranscription START] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+            Log.info("[HomeView] appLanguage=\(appLanguage) (OpenAITranscriber 自动检测语言,该参数当前忽略)", category: .ui)
+            let transcribedTextOpt = await transcriber.transcribeAudio(fileURL: audioURL, localeIdentifier: appLanguage)
+            // 文件被替换 / 删除时不更新 UI(保持原行为)。
+            guard recordingVM.currentAudioFileName == fileName else {
+                Log.info("[HomeView transcriptionTask] 任务文件已改变,放弃更新", category: .ui)
+                recordingVM.isTranscribing = false
+                return
+            }
+            recordingVM.isTranscribing = false
+            if let transcribedText = transcribedTextOpt {
+                Log.info("[HomeView transcriptionTask] 成功,长度=\(transcribedText.count)", category: .ui)
+                let punctuation = transcribedText.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil ? "。" : "."
+                if inputVM.inputText.isEmpty {
+                    inputVM.inputText = transcribedText + punctuation
+                } else {
+                    inputVM.inputText += transcribedText + punctuation
+                }
+                recordingVM.transcriptionError = nil
+                // 转录后不再自动分析情绪,等待发送时统一分析
+            } else {
+                let failure = transcriber.lastFailure ?? .networkFailed
+                Log.error("[HomeView transcriptionTask] 转写失败: \(failure)", category: .ui)
+                recordingVM.transcriptionError = failure
+            }
+        }
+    }
+
+    /// inline error banner 上的"重试转写"按钮回调。
+    /// 文件被删过(用户先点了删录音再点重试)就不重试,设为 .audioReadFailed。
+    private func retryTranscription() {
+        guard let fileName = recordingVM.currentAudioFileName else { return }
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let audioURL = documentsURL.appendingPathComponent(fileName)
+        guard FileManager.default.fileExists(atPath: audioURL.path) else {
+            recordingVM.transcriptionError = .audioReadFailed
+            return
+        }
+        recordingVM.transcriptionError = nil
+        recordingVM.isTranscribing = true
+        startTranscription(audioURL: audioURL, fileName: fileName)
     }
 
     private func playAudio(fileName: String) {
@@ -1542,13 +1600,6 @@ struct HomeView: View {
     private func hideKeyboard() {
         #if canImport(UIKit)
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        #endif
-    }
-
-    private func openAppSettings() {
-        #if canImport(UIKit)
-        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-        UIApplication.shared.open(url)
         #endif
     }
 

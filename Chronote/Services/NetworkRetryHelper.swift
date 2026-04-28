@@ -51,8 +51,11 @@ struct NetworkRetryHelper {
     private static func isRetryableError(_ error: Error) -> Bool {
         let nsError = error as NSError
         
-        // Check HTTP status codes for retryable server errors
-        if nsError.domain == "OpenAIService" {
+        // Check HTTP status codes for retryable server errors.
+        // domain 是 BackendErrorMapper 抛的 NSError —— 历史上叫 "OpenAIService",
+        // 抽 BackendErrorMapper 时统一改成 "BackendError"。所有 chat / embeddings /
+        // 流式 / 转写经此 helper 重试的错误都走这个 domain。
+        if nsError.domain == "BackendError" {
             switch nsError.code {
             case 429: // Rate limited —— 我们自己的后端 limiter 或 OpenAI 的都可能返这个。
                 // 以前没列为 retryable，backfill 撞到 429 就静默丢 entry，Ask Past / 搜索缺失。
@@ -111,7 +114,7 @@ struct NetworkRetryHelper {
         // 后端 / 上游 OpenAI 在 429 / 502 / 503 / 504 上都会附 Retry-After。`errorForStatus`
         // 已经把这些 status 上的 header 都塞进 userInfo,这里只读 429 会让 5xx 滑回指数回退,
         // 维护窗口期反复撞墙。
-        guard nsError.domain == "OpenAIService",
+        guard nsError.domain == "BackendError",
               [429, 502, 503, 504].contains(nsError.code),
               let raw = nsError.userInfo["Retry-After"] as? String else {
             return nil

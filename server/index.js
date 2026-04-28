@@ -7,6 +7,7 @@ const axios = require('axios');
 const rateLimit = require('express-rate-limit');
 const pino = require('pino');
 const pinoHttp = require('pino-http');
+const multer = require('multer');
 
 const log = pino({
   level: process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'warn' : 'info'),
@@ -69,6 +70,26 @@ const GLOBAL_IP_LIMIT_MAX = Number(process.env.GLOBAL_IP_LIMIT_MAX) || 600;
 const CHAT_MODEL_ALLOWLIST = new Set(['gpt-5.5', 'gpt-5.4-mini']);
 const CHAT_DEFAULT_MODEL = 'gpt-5.5';
 const EMBEDDING_MODEL = 'text-embedding-3-small';
+// 转写模型 hardcode,不读 client `model` 字段——客户端可篡改 header,信任边界在服务端。
+// 未来要 A/B 不同模型,在这里加 allowlist。
+const TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
+// OpenAI `/audio/transcriptions` 上限 25 MB。multer 用 fileSize 触发 LIMIT_FILE_SIZE,
+// 我们 catch 后回 413 给客户端,让客户端 banner 区分"分段录制"提示。
+const MAX_TRANSCRIPTION_FILE_BYTES =
+  Number(process.env.MAX_TRANSCRIPTION_FILE_BYTES) || 25 * 1024 * 1024;
+// 客户端录音是 audio/mp4(AAC m4a),其他常见格式留余量。Content-Type 白名单挡掉
+// 任意上传(被加 X-App-Secret 后,白名单是另一道防线)。
+const TRANSCRIPTION_MIME_ALLOWLIST = new Set([
+  'audio/mp4',
+  'audio/m4a',
+  'audio/x-m4a',
+  'audio/mpeg',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/webm',
+  'audio/ogg',
+  'audio/flac',
+]);
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 const app = express();
@@ -153,6 +174,26 @@ const embeddingsLimiter = rateLimit({
   message: { error: 'rate_limited' },
 });
 
+// 转写每个请求都是 25 MB 量级 + 上游单价比 chat 高,正常用户连续录音不会超过 10/min,
+// 给 install 紧一点。X-Install-Id 是客户端头不是强安全边界,所以再加一道 per-IP 兜底。
+const transcriptionsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  keyGenerator: installKey,
+  message: { error: 'rate_limited' },
+});
+
+// 转写专用 per-IP 兜底:全局 600/IP 对音频上传太宽,这条单独按 60/IP/min。
+const transcriptionsIPLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'rate_limited_global' },
+});
+
 // 全局 per-IP 兜底：per-install limiter 按 `X-Install-Id` 分桶，一个恶意客户端每次随机换
 // install-id 就能绕过（每个新 id 拿新配额）。这一层按 IP 限流，挡住"单 IP 海量刷
 // install-id"的放大攻击。阈值放得比 chat+embeddings 加起来还宽松——正常用户、甚至
@@ -175,6 +216,9 @@ app.get('/health', (_req, res) => {
 app.use('/api', requireAppSecret, globalIPLimiter);
 app.use('/api/openai/chat/completions', chatLimiter);
 app.use('/api/openai/embeddings', embeddingsLimiter);
+// 转写挂双层:per-install 紧 + per-IP 独立兜底。注意挂的顺序在 multer 之前,
+// 限流先于读取 multipart body —— 被限流时不浪费 25 MB 上传带宽。
+app.use('/api/openai/audio/transcriptions', transcriptionsLimiter, transcriptionsIPLimiter);
 
 function countContentChars(content) {
   if (typeof content === 'string') return content.length;
@@ -393,6 +437,102 @@ app.post('/api/openai/embeddings', async (req, res) => {
   }
 });
 
+// Transcriptions proxy. 客户端上传 m4a → 后端转发到 OpenAI /v1/audio/transcriptions。
+//
+// 设计要点:
+//   - multer 内存模式 + 严格 limits(单文件 25 MB、最多 1 个 file 字段、最多 4 个 text 字段)
+//   - Content-Type 白名单 (TRANSCRIPTION_MIME_ALLOWLIST) — 防任意文件冒充音频
+//   - model 在服务端 hardcode TRANSCRIPTION_MODEL — **不读** client 字段,避免被改成更贵模型
+//   - language 字段从 client 透传,但只接受 ISO-639-1 两字母 lowercase(否则丢弃,让模型自动检测)
+//   - 失败用 res.json({ error: { code } }) 一致风格,前端 banner 据此分类
+const transcriptionUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_TRANSCRIPTION_FILE_BYTES,
+    files: 1,
+    fields: 4,
+  },
+  fileFilter: (_req, file, cb) => {
+    if (TRANSCRIPTION_MIME_ALLOWLIST.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      // multer 推荐用 cb(null, false) + 业务侧返回错误,而不是 cb(error) —— error 路径
+      // 会让其他字段也丢。这里直接拒掉,handler 里检测 req.file 缺失回 415。
+      cb(null, false);
+    }
+  },
+});
+
+app.post('/api/openai/audio/transcriptions', (req, res) => {
+  transcriptionUpload.single('file')(req, res, async (uploadErr) => {
+    if (uploadErr) {
+      // multer 自己抛的错误最常见就是 LIMIT_FILE_SIZE / LIMIT_PART_COUNT 等。
+      const code = uploadErr.code;
+      if (code === 'LIMIT_FILE_SIZE') {
+        req.log.warn({ code }, 'transcription file too large');
+        res.status(413).json({ error: { code: 'file_too_large' } });
+        return;
+      }
+      req.log.warn(
+        { err: safeUpstreamError(uploadErr), code },
+        'multer rejected transcription upload'
+      );
+      res.status(400).json({ error: { code: 'bad_request' } });
+      return;
+    }
+    if (!req.file) {
+      req.log.warn('transcription upload missing or rejected by mime filter');
+      res.status(415).json({ error: { code: 'unsupported_media_type' } });
+      return;
+    }
+
+    // language: 只接受 ISO-639-1 两字母 lowercase。客户端目前不传,留这道挡位为了之后
+    // 想传时不踩规则不一致的坑(OpenAI 严格按 ISO-639-1 校验)。
+    const rawLang = typeof req.body?.language === 'string' ? req.body.language : '';
+    const language = /^[a-z]{2}$/.test(rawLang) ? rawLang : undefined;
+
+    // OpenAI 的 SDK 接受 multipart/form-data。我们手工拼,避免引第三方 form-data lib —— 一个
+    // boundary + 几行 Content-Disposition 没必要装包。Node 18+ 自带 FormData/Blob。
+    const form = new FormData();
+    form.append('model', TRANSCRIPTION_MODEL);
+    form.append('response_format', 'json');
+    if (language) form.append('language', language);
+    form.append(
+      'file',
+      new Blob([req.file.buffer], { type: req.file.mimetype }),
+      req.file.originalname || 'audio.m4a'
+    );
+
+    try {
+      const upstream = await axios.post(`${OPENAI_BASE_URL}/audio/transcriptions`, form, {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        timeout: REQUEST_TIMEOUT_MS,
+        // axios 默认会把 FormData 自动序列化并加 Content-Type: multipart/form-data; boundary=...
+        // 不要手动设 Content-Type,会丢 boundary。
+        maxBodyLength: MAX_TRANSCRIPTION_FILE_BYTES + 1024 * 1024, // 留 1 MB 余量给 multipart 头
+      });
+
+      // OpenAI 返回 { text: "..." }(其他元字段如 duration / language 不透出给客户端,只回 text)
+      const text = typeof upstream.data?.text === 'string' ? upstream.data.text : '';
+      res.json({ text });
+    } catch (err) {
+      const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
+      req.log.error({ err: safeUpstreamError(err), status }, 'OpenAI transcription request failed');
+      if (!res.headersSent) {
+        const retryAfter = err.response?.headers?.['retry-after'];
+        if (status === 429 && retryAfter) {
+          res.setHeader('Retry-After', retryAfter);
+        }
+        res.status(status).json({ error: sanitizeUpstreamError(err, status) });
+      } else {
+        res.end();
+      }
+    }
+  });
+});
+
 // 把 OpenAI 上游 error payload 按 status 归类成粗粒度错误返给客户端，
 // 不再原样转发 `err.response.data`——上游 body 里常含 `error.type`/`error.param`/
 // 模型内部标识等信息，不需要给客户端看到。
@@ -427,7 +567,10 @@ function sanitizeUpstreamError(err, status) {
 function startServer() {
   const port = process.env.PORT || 3000;
   return app.listen(port, () => {
-    log.info({ port, upstream: OPENAI_BASE_URL, timeoutMs: REQUEST_TIMEOUT_MS }, 'server listening');
+    log.info(
+      { port, upstream: OPENAI_BASE_URL, timeoutMs: REQUEST_TIMEOUT_MS },
+      'server listening'
+    );
   });
 }
 

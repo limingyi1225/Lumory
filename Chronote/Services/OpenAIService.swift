@@ -172,7 +172,7 @@ Diary Entries:
         )
 
         guard !AppSecrets.appSharedSecret.isEmpty else {
-            await MainActor.run { onEvent(.failed(Self.missingSharedSecretError())) }
+            await MainActor.run { onEvent(.failed(BackendErrorMapper.missingSharedSecretError())) }
             return
         }
 
@@ -217,7 +217,7 @@ Diary Entries:
                     let httpResponse = response as? HTTPURLResponse
                     let statusCode = httpResponse?.statusCode ?? -1
                     Log.error("[OpenAIService] 安全数据流式请求失败，状态码: \(statusCode)", category: .ai)
-                    throw Self.errorForStatus(statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
+                    throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
                 }
                 Log.info("[OpenAIService] 流式请求响应正常，开始处理字节流...", category: .ai)
 
@@ -263,45 +263,6 @@ Diary Entries:
                 await MainActor.run { onEvent(.failed(error)) }
             }
         }
-    }
-
-    /// 状态码 → 本地化 NSError(domain: OpenAIService)。统一替换散落各处的硬编码中文错误。
-    fileprivate static func errorForStatus(_ statusCode: Int, retryAfter: String? = nil) -> NSError {
-        let message: String
-        switch statusCode {
-        case 401:
-            message = NSLocalizedString("error.backend.auth", comment: "Backend auth failed")
-        case 404:
-            message = String(
-                format: NSLocalizedString("error.backend.notFound", comment: "Backend endpoint not found"),
-                AppSecrets.backendURL
-            )
-        case 429:
-            message = NSLocalizedString("error.backend.rateLimited", comment: "Rate limited")
-        case 502:
-            message = NSLocalizedString("error.backend.badGateway", comment: "502 bad gateway")
-        case 503:
-            message = NSLocalizedString("error.backend.unavailable", comment: "503 unavailable")
-        case 504:
-            message = NSLocalizedString("error.backend.timeout", comment: "504 timeout")
-        case 500...599:
-            message = String(format: NSLocalizedString("error.backend.server5xx", comment: "Generic 5xx"), statusCode)
-        default:
-            message = String(format: NSLocalizedString("error.backend.generic", comment: "Generic backend error"), statusCode)
-        }
-        var userInfo: [String: Any] = [NSLocalizedDescriptionKey: message]
-        if let retryAfter {
-            userInfo["Retry-After"] = retryAfter
-        }
-        return NSError(domain: "OpenAIService", code: statusCode, userInfo: userInfo)
-    }
-
-    fileprivate static func missingSharedSecretError() -> NSError {
-        NSError(
-            domain: "OpenAIService",
-            code: 401,
-            userInfo: [NSLocalizedDescriptionKey: "Backend shared secret not configured (xcconfig injection failed)."]
-        )
     }
 
     // MARK: - Core
@@ -367,7 +328,7 @@ Diary Entries:
                         let httpResponse = response as? HTTPURLResponse
                         let statusCode = httpResponse?.statusCode ?? -1
                         Log.info("[OpenAIService] Bad response. Status code: \(statusCode)", category: .ai)
-                        throw Self.errorForStatus(statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
+                        throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
                     }
                     var result = ""
                     // 统一 SSE 解析
@@ -404,7 +365,7 @@ Diary Entries:
                             let statusCode = httpResponse.statusCode
                             // 诊断用最小信息：只 URL path + status + body 长度，不把 body 打进日志（避免泄日记/PII）
                             Log.error("[OpenAIService] Backend request failed — path=\(request.url?.path ?? "?") status=\(statusCode) bodyLen=\(data.count)", category: .ai)
-                            throw Self.errorForStatus(statusCode, retryAfter: httpResponse.value(forHTTPHeaderField: "Retry-After"))
+                            throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse.value(forHTTPHeaderField: "Retry-After"))
                         } else {
                             Log.info("[OpenAIService] Bad response. Not an HTTPURLResponse. Response: \(response)", category: .ai)
                             throw NSError(
@@ -501,7 +462,7 @@ Diary Entries:
                 let httpResponse = response as? HTTPURLResponse
                 let statusCode = httpResponse?.statusCode ?? -1
                 Log.error("[OpenAIService] chatThrowing failed — status=\(statusCode) bodyLen=\(data.count)", category: .ai)
-                throw Self.errorForStatus(statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
+                throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
             }
             let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
             guard let content = decoded.choices.first?.message.content
@@ -1201,7 +1162,7 @@ extension OpenAIService {
                     // 只记 status + body 长度;body 内容可能夹带 embedding input(用户日记原文)或上游
                     // error payload,不进日志。需要原因的话在 backend 端按 req-id 反查。
                     Log.error("[OpenAIService] Embed request failed: status=\(http.statusCode) bodyLen=\(data.count)", category: .ai)
-                    throw Self.errorForStatus(http.statusCode, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
+                    throw BackendErrorMapper.error(forStatus: http.statusCode, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
                 }
                 let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
                 return decoded.data.first?.embedding
@@ -1336,7 +1297,7 @@ extension OpenAIService {
                     return
                 }
                 guard !AppSecrets.appSharedSecret.isEmpty else {
-                    continuation.yield(.failed(Self.missingSharedSecretError()))
+                    continuation.yield(.failed(BackendErrorMapper.missingSharedSecretError()))
                     continuation.finish()
                     return
                 }
@@ -1358,7 +1319,7 @@ extension OpenAIService {
                         let (bytes, response) = try await URLSession.sharedRetrySession.bytes(for: request)
                         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                             let http = response as? HTTPURLResponse
-                            throw Self.errorForStatus(http?.statusCode ?? -1, retryAfter: http?.value(forHTTPHeaderField: "Retry-After"))
+                            throw BackendErrorMapper.error(forStatus: http?.statusCode ?? -1, retryAfter: http?.value(forHTTPHeaderField: "Retry-After"))
                         }
                         do {
                             for try await streamResp in SSEParser.parse(

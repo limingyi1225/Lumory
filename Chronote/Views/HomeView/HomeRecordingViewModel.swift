@@ -40,4 +40,8 @@ final class HomeRecordingViewModel {
     // MARK: 删除录音确认弹窗
     var showingDeleteAlert: Bool = false
     var deleteTarget: String?
+
+    /// 上次转写失败原因。nil 表示无错误,UI 不显示 banner。
+    /// 重试成功 / 用户开始新录音时清零。
+    var transcriptionError: TranscriptionFailure?
 }

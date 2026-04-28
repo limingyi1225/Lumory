@@ -296,6 +296,7 @@
 /* 后端/AI 错误 —— 透过 NSError.localizedDescription 或 onChunk 兜底显示给用户 */
 "error.backend.auth" = "后端代理认证失败，请联系开发者。";
 "error.backend.notFound" = "后端代理端点未找到（%@），请联系开发者。";
+"error.backend.payloadTooLarge" = "上传内容过大（413），请缩短录音或文本后重试。";
 "error.backend.rateLimited" = "AI 调用频率已达上限，请稍后再试。";
 "error.backend.badGateway" = "后端网关错误 (502)，服务器可能临时不可用，请稍后再试。";
 "error.backend.unavailable" = "后端服务暂时不可用 (503)，请稍后再试。";
@@ -359,12 +360,17 @@
 "import.alert.empty.title" = "未识别到日记";
 "import.alert.empty.message" = "没有从粘贴的内容里识别到任何日记。请检查格式后重试。";
 
-/* 存储加载失败 / 语音权限恢复 */
+/* 存储加载失败 */
 "store.load.failed.title" = "日记数据库不可用";
 "store.load.failed.message" = "Lumory 无法加载本地日记数据库。重启 App 或修复数据库前，部分功能可能不可用。";
-"speech.permission.settings.title" = "语音识别未开启";
-"speech.permission.settings.message" = "请在系统设置中允许 Lumory 使用语音识别，才能转写录音。";
-"speech.permission.settings.open" = "打开设置";
+
+/* 语音转写错误（gpt-4o-mini-transcribe via Lumory 后端） */
+"transcription.error.network" = "网络错误，录音已保留";
+"transcription.error.audioTooLarge" = "录音超过 25 MB 上限，请分段录制";
+"transcription.error.audioRead" = "无法读取录音文件";
+"transcription.error.server" = "转写服务暂不可用 (%d)";
+"transcription.error.config" = "App 配置错误，请联系支持";
+"transcription.retry" = "重试转写";
 
 /* 同步诊断 */
 "sync.diagnostic.title" = "同步诊断";

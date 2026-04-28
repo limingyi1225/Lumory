@@ -16,6 +16,9 @@ module.exports = [
         Buffer: 'readonly',
         console: 'readonly',
         setTimeout: 'readonly',
+        // Node 18+ web APIs
+        FormData: 'readonly',
+        Blob: 'readonly',
       },
     },
     rules: {

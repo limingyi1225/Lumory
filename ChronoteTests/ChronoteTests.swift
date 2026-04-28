@@ -1006,6 +1006,46 @@ struct SSEParserTests {
         }
     }
 
+    /// 走 byte-level 入口(模拟 `URLSession.AsyncBytes`)。Apple 实际 ship 的 `.lines`
+    /// 在某些 iOS 版本会跳过空行,所有 SSE event 粘成一坨触发 invalidEvent —— 这条用例
+    /// 守住自家的 `byteLineSequence` 必须为空行 yield "",防止有人后来改回 `.lines` 又
+    /// 吃这坨 109KB / 189KB invalidEvent 的回旋镖。
+    @Test func byteStreamWithBlankLineDispatchesEachEvent() async throws {
+        let raw = #"""
+        data: {"value":"hello"}
+
+        data: {"value":"world"}
+
+        data: [DONE]
+
+        """#
+        let bytes = Array(raw.utf8)
+        let stream = AsyncStream<UInt8> { continuation in
+            for b in bytes { continuation.yield(b) }
+            continuation.finish()
+        }
+        var events: [Chunk] = []
+        for try await event in SSEParser.parse(bytes: stream, type: Chunk.self, decoder: JSONDecoder()) {
+            events.append(event)
+        }
+        #expect(events == [Chunk(value: "hello"), Chunk(value: "world")])
+    }
+
+    /// CRLF 兼容:`\r\n` 行尾、`\r` 单独"空行"都要被当成普通 LF 处理。
+    @Test func byteStreamWithCRLFDispatchesEachEvent() async throws {
+        let raw = "data: {\"value\":\"a\"}\r\n\r\ndata: {\"value\":\"b\"}\r\n\r\ndata: [DONE]\r\n\r\n"
+        let bytes = Array(raw.utf8)
+        let stream = AsyncStream<UInt8> { continuation in
+            for b in bytes { continuation.yield(b) }
+            continuation.finish()
+        }
+        var events: [Chunk] = []
+        for try await event in SSEParser.parse(bytes: stream, type: Chunk.self, decoder: JSONDecoder()) {
+            events.append(event)
+        }
+        #expect(events == [Chunk(value: "a"), Chunk(value: "b")])
+    }
+
     private func collectSSEEvents(_ lines: [String]) async throws -> [Chunk] {
         var events: [Chunk] = []
         for try await event in SSEParser.parse(lines: lines, type: Chunk.self, decoder: JSONDecoder()) {

@@ -640,12 +640,18 @@ enum SSEParser {
 
     /// 解析 SSE 字节流到 Decodable 对象流。遇到 `[DONE]` 或自然结束就 finish;
     /// 网络异常会 throw (caller 自己决定重试 / 吐 truncated 标记)。
-    static func parse<T: Decodable>(
-        bytes: URLSession.AsyncBytes,
+    ///
+    /// ⚠️ **不要换回 `URLSession.AsyncBytes.lines`。** Apple 实际 ship 的 `AsyncLineSequence`
+    /// 在 iOS 26 / 部分版本上**不为空行 yield 空字符串** —— SSEParser 依赖空行触发 dispatch,
+    /// 一旦 `.lines` 跳过空行,所有 `data:` event 会粘成一坨,EOF 时 decoder 看到的是
+    /// `{json1}\n{json2}\n…` 多个 JSON 拼起来的怪物,直接抛 `invalidEvent`,整段流一字
+    /// 未 yield。本地实现按 `\n` 切,顺手吃掉 CRLF 的 `\r`,空行如实 yield `""`。
+    static func parse<T: Decodable, Bytes: AsyncSequence>(
+        bytes: Bytes,
         type: T.Type,
         decoder: JSONDecoder
-    ) -> AsyncThrowingStream<T, Error> {
-        parse(lineStream: bytes.lines, type: type, decoder: decoder)
+    ) -> AsyncThrowingStream<T, Error> where Bytes.Element == UInt8 {
+        parse(lineStream: byteLineSequence(bytes: bytes), type: type, decoder: decoder)
     }
 
     static func parse<T: Decodable>(
@@ -660,6 +666,44 @@ enum SSEParser {
             continuation.finish()
         }
         return parse(lineStream: lineStream, type: type, decoder: decoder)
+    }
+
+    /// 自己实现的"按 `\n` 切行"。空行 yield 空字符串,CRLF 行尾的 `\r` 吞掉。
+    /// 见 `parse(bytes:type:decoder:)` 上方注释:不能用 Apple `AsyncBytes.lines`。
+    private static func byteLineSequence<Bytes: AsyncSequence>(
+        bytes: Bytes
+    ) -> AsyncThrowingStream<String, Error> where Bytes.Element == UInt8 {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var lineBytes: [UInt8] = []
+                    for try await byte in bytes {
+                        if Task.isCancelled {
+                            continuation.finish(throwing: CancellationError())
+                            return
+                        }
+                        if byte == 0x0A { // \n
+                            if lineBytes.last == 0x0D { lineBytes.removeLast() }
+                            continuation.yield(String(decoding: lineBytes, as: UTF8.self))
+                            lineBytes.removeAll(keepingCapacity: true)
+                        } else {
+                            lineBytes.append(byte)
+                        }
+                    }
+                    // EOF 时残留的"未终止行"(没有尾随 \n)也 yield 一次,让 SSEParser
+                    // 的 EOF 兜底 dispatch 能拿到最后一段 payload(比如服务端只发 `data: [DONE]`
+                    // 不带尾随空行的情况)。
+                    if !lineBytes.isEmpty {
+                        if lineBytes.last == 0x0D { lineBytes.removeLast() }
+                        continuation.yield(String(decoding: lineBytes, as: UTF8.self))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 
     private static func parse<T: Decodable, Lines: AsyncSequence>(

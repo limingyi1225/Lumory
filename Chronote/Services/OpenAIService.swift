@@ -955,13 +955,10 @@ extension OpenAIService {
         return out
     }
 
-    /// 标签比较 / 查 set 的统一 key:NFC 归一化 + lowercased + trim。
-    /// 中文 / 多语言 / 全角半角混杂场景下 raw `.lowercased()` 会漏命中(codex P2 #14)。
+    /// **保留兼容方便,新代码请直接用 `ThemeKey.make(_:)`**(`Extensions/ThemeKey.swift`)。
+    /// 这里的 wrapper 让历史 `Self.themeKey(...)` 调用点不动也对。
     static func themeKey(_ raw: String) -> String {
-        return raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .precomposedStringWithCanonicalMapping
-            .lowercased()
+        ThemeKey.make(raw)
     }
 
     func scanThemeAliasGroups(

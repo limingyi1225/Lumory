@@ -45,6 +45,27 @@ final class PersistenceController {
     let isInMemory: Bool
     private var observers: [NSObjectProtocol] = []
 
+    /// **进程级共享 NSManagedObjectModel**。
+    /// 之前 `init(inMemory:)` 每次走 `NSPersistentCloudKitContainer(name: "Model")`,
+    /// Core Data 默认行为是从 bundle 重新加载一次 `Model.xcdatamodeld` 生成全新的
+    /// `NSManagedObjectModel`。生产路径只 `.shared` 一次,不会撞;但**测试套件里
+    /// `PersistenceController(inMemory: true)` 出现 10+ 次** → 同进程里出现 10+ 个
+    /// `NSManagedObjectModel` 实例都声称自己定义 `DiaryEntry` →
+    /// `NSEntityDescription.entity(forEntityName:in:)` / SwiftUI `@FetchRequest` 在主 App
+    /// view 上 `executeFetchRequest:error:` 时 Core Data 抛 `NSInternalInconsistencyException`
+    /// → SIGABRT 整个 App 进程闪退(2026-04-29 10:56:44 .ips 实证)。
+    ///
+    /// 修法:加载一次,所有 instance 共享。
+    /// `.momd` 是编译产物(`Model.xcdatamodeld` 编译后的目录形式),来自 main bundle。
+    private static let cachedModel: NSManagedObjectModel = {
+        guard let url = Bundle.main.url(forResource: "Model", withExtension: "momd"),
+              let model = NSManagedObjectModel(contentsOf: url) else {
+            // 跟原 fatalError 同等级:bundle 没把 Model 编进去,build 期配置错。
+            fatalError("Model.momd 缺失 — Lumory.app/Contents/Resources 里没找到")
+        }
+        return model
+    }()
+
     /// 标识这次启动是否处在"加载失败、等用户决策"的降级态。
     /// 上层需要时自己去读；暂时不走 `@Published` / ObservableObject，因为真机启动时
     /// 把 PersistenceController 放进 `@StateObject` 会触发空白首屏（疑似 iOS 26 生命周期 quirk）。
@@ -56,8 +77,10 @@ final class PersistenceController {
     /// in-memory 模式下完全不挂 CloudKit container options、不持久化、不走 history tracking。
     init(inMemory: Bool = false) {
         self.isInMemory = inMemory
-        // 创建容器，名称必须与 .xcdatamodeld 文件名匹配
-        container = NSPersistentCloudKitContainer(name: "Model")
+        // 创建容器，名称必须与 .xcdatamodeld 文件名匹配。
+        // 显式传 `managedObjectModel: Self.cachedModel` 让所有实例共享同一份 model
+        // (修 P0 测试期多实例 ambiguity → SIGABRT,见 cachedModel doc)。
+        container = NSPersistentCloudKitContainer(name: "Model", managedObjectModel: Self.cachedModel)
 
         // 配置 iCloud container identifier
         guard let description = container.persistentStoreDescriptions.first else {

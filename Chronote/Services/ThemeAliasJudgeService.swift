@@ -131,16 +131,19 @@ final class ThemeAliasJudgeService: ObservableObject {
         }
 
         // 落 pending(过滤 negativePairs / 已合并 / 重复)。
+        // **批量** sampleEntryIDs:一次 bg fetch 拿到所有 canonical tag 的引文 IDs,
+        // 不再 N+1 sequential await(modelreturn 30 组 = 30 次 bg roundtrip → 1 次)。
+        let nonNegativeMatches = matches.filter { !resolver.isNegative($0.newTag, $0.canonical) }
+        let canonicalsToSample = Array(Set(nonNegativeMatches.map { $0.canonical }))
+        let sampleMap = await sampleEntryIDs(forTags: canonicalsToSample, limit: 3)
+
         var added = 0
-        for m in matches {
-            // resolver.enqueue 内部已经过滤,但提前过滤一遍少做一次 lookup
-            if resolver.isNegative(m.newTag, m.canonical) { continue }
-            let sampleIDs = await sampleEntryIDs(forTag: m.canonical, limit: 3)
+        for m in nonNegativeMatches {
             let suggestion = PendingSuggestion(
                 newTag: m.newTag,
                 canonicalGuess: m.canonical,
                 confidence: PendingSuggestion.Confidence(judgeConfidence: m.confidence),
-                sampleEntryIds: sampleIDs,
+                sampleEntryIds: sampleMap[m.canonical] ?? [],
                 source: .onWrite(entryID: entryID)
             )
             if resolver.enqueue(suggestion) { added += 1 }
@@ -224,23 +227,27 @@ final class ThemeAliasJudgeService: ObservableObject {
         // 把 group 拆成 alias-级别的 PendingSuggestion(每个 alias 一条),用户可以单独确认/否决。
         // **codex P2 fix**:之前 inner loop 看到 cancel 只 break 内层,外层 for g in groups 继续,
         // 后续 group 的 suggestions 仍会入队。改成所有 cancel 检查点都 return。
+        // **批量 sampleEntryIDs**:scan 出 30 组时之前是 30 次串行 bg fetch,现在 1 次。
+        if Task.isCancelled {
+            scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: added)
+            return
+        }
+        let canonicalsToSample = Array(Set(groups.map { $0.canonical }))
+        let sampleMap = await sampleEntryIDs(forTags: canonicalsToSample, limit: 3)
+        if Task.isCancelled {
+            scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: added)
+            return
+        }
+
         for g in groups {
             if Task.isCancelled {
                 scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: added)
                 return
             }
             let canonical = g.canonical
+            let sampleIDs = sampleMap[canonical] ?? []
             for alias in g.aliases {
-                if Task.isCancelled {
-                    scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: added)
-                    return
-                }
                 if resolver.isNegative(alias, canonical) { continue }
-                let sampleIDs = await sampleEntryIDs(forTag: canonical, limit: 3)
-                if Task.isCancelled {
-                    scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: added)
-                    return
-                }
                 let suggestion = PendingSuggestion(
                     newTag: alias,
                     canonicalGuess: canonical,
@@ -305,6 +312,60 @@ final class ThemeAliasJudgeService: ObservableObject {
                 entry.themeArray.contains { $0.lowercased() == tag.lowercased() }
             }
             return Array(exact.prefix(limit)).compactMap { $0.id }
+        }
+    }
+
+    /// **批量版**:给一组 tag 一次性凑 sample IDs。给 `judgeAfterWrite` / `runScan` 替代 N+1 调用。
+    /// 比 N 次独立 sampleEntryIDs 快一个数量级(N=30 group 时尤为明显:30 次 → 1 次 bg fetch)。
+    ///
+    /// **per-tag bucket starvation 防御**(reviewer 抓):全局 `fetchLimit` + 按日期降序的话,
+    /// 一个高频 tag(如"工作")的最近 K 条会占满 fetchLimit,冷门 tag(如"妈妈")只在更老
+    /// 的 entry 里出现 → 拿不到样本 → 引文卡空白。
+    /// 修法:
+    ///   - 用 dictionaryResultType + propertiesToFetch=["id","themes"],单条 row 极轻量
+    ///   - **不设 fetchLimit**(对 dictionary 投影 + ~10K 行内存量微小)
+    ///   - 边迭代边维护 "open buckets" 集合,**所有桶满即提前退出**循环
+    /// 失败回 [:](所有 tag 拿到空 array),caller 跟原版语义一致。
+    private func sampleEntryIDs(forTags tags: [String], limit: Int) async -> [String: [UUID]] {
+        guard !tags.isEmpty else { return [:] }
+        let lowercasedTags = tags.map { $0.lowercased() }
+        return await persistence.container.performBackgroundTask { context in
+            let subPredicates = tags.map { tag in
+                NSPredicate(format: "themes CONTAINS[c] %@", tag)
+            }
+            // dictionaryResultType + 投影 → 不实体化 NSManagedObject,内存代价小一个数量级。
+            let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            request.resultType = .dictionaryResultType
+            request.propertiesToFetch = ["id", "themes"]
+            request.predicate = NSCompoundPredicate(orPredicateWithSubpredicates: subPredicates)
+            request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
+            request.fetchBatchSize = 500
+            guard let rows = try? context.fetch(request) else {
+                return Dictionary(uniqueKeysWithValues: tags.map { ($0, []) })
+            }
+            var buckets: [String: [UUID]] = Dictionary(uniqueKeysWithValues: tags.map { ($0, []) })
+            // 跟踪还没满的桶(count < limit),所有桶满即 break 提前退出。
+            var openBuckets = Set(tags)
+            for row in rows {
+                if openBuckets.isEmpty { break }
+                guard let id = row["id"] as? UUID,
+                      let csv = row["themes"] as? String, !csv.isEmpty else { continue }
+                // 内联 themes CSV 解析(等价 DiaryEntry.themeArray,避免实体化)
+                let entryTags = csv.split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                    .filter { !$0.isEmpty }
+                for (idx, lowerTag) in lowercasedTags.enumerated() where entryTags.contains(lowerTag) {
+                    let originalTag = tags[idx]
+                    let currentCount = buckets[originalTag, default: []].count
+                    if currentCount < limit {
+                        buckets[originalTag, default: []].append(id)
+                        if currentCount + 1 >= limit {
+                            openBuckets.remove(originalTag)
+                        }
+                    }
+                }
+            }
+            return buckets
         }
     }
 }

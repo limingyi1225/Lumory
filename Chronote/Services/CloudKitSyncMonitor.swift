@@ -2,7 +2,17 @@ import Foundation
 import CoreData
 import CloudKit
 
+/// **`@MainActor` 全类标注**:此类的 `@Published` `syncStatus` / `errorMessage` 通过 SwiftUI
+/// `@EnvironmentObject` 在多个 view 上观察。CK API 的 closure 在后台 queue 触发,需要写入这些
+/// 属性 → 必须 hop 到主线程。之前靠每个 closure 内 `DispatchQueue.main.async` wrap 兜底(项目里
+/// 命中 6 处),容易漏一处就出 SwiftUI "Publishing changes from background threads" 警告。
+/// 整类标 `@MainActor` 后:
+///   - 所有 method body 默认 main isolated,内部 @Published 写入直接合法
+///   - CK closure(background queue)调本类 method 必须显式 `Task { @MainActor in ... }` —
+///     编译器逼着写,漏不了
+///   - `DispatchQueue.main.async` wraps 仍兼容(等价于 main hop),保留即可,不强制重写
 @available(iOS 13.0, macOS 10.15, *)
+@MainActor
 class CloudKitSyncMonitor: ObservableObject {
     @Published var syncStatus: SyncStatus = .unknown
     @Published var errorMessage: String?
@@ -42,15 +52,20 @@ class CloudKitSyncMonitor: ObservableObject {
     }
     
     private func setupNotifications() {
-        // 监听远程变化
+        // 监听远程变化。
+        // **`queue: .main`** 保证 closure 在主线程跑,**但 Swift 6 不知道**(closure 类型是 nonisolated)。
+        // 用 `MainActor.assumeIsolated` 断言运行时确实在 main(在 main 上一定真) → 编译器允许直接
+        // 写 @Published / 调 main-isolated method,无需 Task hop。zero overhead,iOS 17+ 可用。
         observerTokens.append(NotificationCenter.default.addObserver(
             forName: .NSPersistentStoreRemoteChange,
             object: container.persistentStoreCoordinator,
             queue: .main
         ) { [weak self] _ in
             Log.info("[CloudKitSyncMonitor] Remote changes detected", category: .sync)
-            self?.syncStatus = .synced
-            self?.errorMessage = nil
+            MainActor.assumeIsolated {
+                self?.syncStatus = .synced
+                self?.errorMessage = nil
+            }
         })
 
         // 监听Core Data保存通知
@@ -77,8 +92,10 @@ class CloudKitSyncMonitor: ObservableObject {
             }
 
             Log.info("[CloudKitSyncMonitor] Local changes saved, initiating CloudKit sync", category: .sync)
-            self?.syncStatus = .syncing
-            self?.errorMessage = nil
+            MainActor.assumeIsolated {
+                self?.syncStatus = .syncing
+                self?.errorMessage = nil
+            }
         })
 
         // 监听CloudKit容器事件 (iOS 14+ / macOS 11+)
@@ -90,7 +107,9 @@ class CloudKitSyncMonitor: ObservableObject {
             ) { [weak self] notification in
                 let eventKey = NSPersistentCloudKitContainer.eventNotificationUserInfoKey
                 if let event = notification.userInfo?[eventKey] as? NSPersistentCloudKitContainer.Event {
-                    self?.handleCloudKitEvent(event)
+                    MainActor.assumeIsolated {
+                        self?.handleCloudKitEvent(event)
+                    }
                 }
             })
         }
@@ -260,20 +279,26 @@ class CloudKitSyncMonitor: ObservableObject {
         )
         query.sortDescriptors = [NSSortDescriptor(key: "CD_date", ascending: false)]
 
+        // CloudKit `database.fetch/perform` callback 在 CK 后台队列触发,**不在主线程**,
+        // 所以这里不能用 `MainActor.assumeIsolated`(会断言失败崩溃)。
+        // `handleDatabaseQueryResult` 本身是 main isolated → 用 `Task { @MainActor in ... }` hop。
         if #available(macOS 12.0, iOS 15.0, *) {
             database.fetch(withQuery: query, inZoneWith: nil, desiredKeys: nil, resultsLimit: 1) { [weak self] result in
-                switch result {
-                case .success(let (matchResults, _)):
-                    // Convert to the expected format
-                    let records = matchResults.compactMap { try? $0.1.get() }
-                    self?.handleDatabaseQueryResult(records: records, error: nil)
-                case .failure(let error):
-                    self?.handleDatabaseQueryResult(records: nil, error: error)
+                Task { @MainActor in
+                    switch result {
+                    case .success(let (matchResults, _)):
+                        let records = matchResults.compactMap { try? $0.1.get() }
+                        self?.handleDatabaseQueryResult(records: records, error: nil)
+                    case .failure(let error):
+                        self?.handleDatabaseQueryResult(records: nil, error: error)
+                    }
                 }
             }
         } else {
             database.perform(query, inZoneWith: nil) { [weak self] records, error in
-                self?.handleDatabaseQueryResult(records: records, error: error)
+                Task { @MainActor in
+                    self?.handleDatabaseQueryResult(records: records, error: error)
+                }
             }
         }
     }
@@ -424,20 +449,24 @@ class CloudKitSyncMonitor: ObservableObject {
         )
         query.sortDescriptors = [NSSortDescriptor(key: "CD_date", ascending: false)]
 
+        // 同 `checkDatabaseAccessibility`:CK callback 后台队列触发,Task @MainActor hop。
         if #available(macOS 12.0, iOS 15.0, *) {
             database.fetch(withQuery: query, inZoneWith: nil, desiredKeys: nil, resultsLimit: 1) { [weak self] result in
-                switch result {
-                case .success(let (matchResults, _)):
-                    // Convert to the expected format
-                    let records = matchResults.compactMap { try? $0.1.get() }
-                    self?.handleSyncVerificationResult(records: records, error: nil)
-                case .failure(let error):
-                    self?.handleSyncVerificationResult(records: nil, error: error)
+                Task { @MainActor in
+                    switch result {
+                    case .success(let (matchResults, _)):
+                        let records = matchResults.compactMap { try? $0.1.get() }
+                        self?.handleSyncVerificationResult(records: records, error: nil)
+                    case .failure(let error):
+                        self?.handleSyncVerificationResult(records: nil, error: error)
+                    }
                 }
             }
         } else {
             database.perform(query, inZoneWith: nil) { [weak self] records, error in
-                self?.handleSyncVerificationResult(records: records, error: error)
+                Task { @MainActor in
+                    self?.handleSyncVerificationResult(records: records, error: error)
+                }
             }
         }
     }

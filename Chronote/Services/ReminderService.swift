@@ -311,11 +311,34 @@ final class ReminderService: ObservableObject {
             authorizationStatus = .notDetermined
         }
 
-        // 系统层面权限被撤销 → 自动把 enabled 落回 false
+        // 系统层面权限被撤销 → 自动把 enabled 落回 false + **直接 cancel 已挂的 pending**。
+        // **不调 `requestReschedule()`** —— 那条路径会绕去 doReschedule(自身 await 这个函数,
+        // 制造递归),靠世代号兜住但模式脆弱。
+        // **但 cancel side-effect 必须保留**:之前 reviewer 抓到的 regression — Settings.task 路径调用
+        // 这个函数时如果不 cancel,旧的 lumory.reminder.* 一次性请求留在 UN center,用户后来
+        // 在 iOS 设置里再开通知权限、还没打开 Lumory → 旧 reminder 仍然响,App toggle 是 off
+        // 但通知照发,严重不一致。
         if isEnabled, authorizationStatus == .denied {
             isEnabled = false
             defaults.set(false, forKey: enabledKey)
-            requestReschedule()
+            // 不绕 reschedule,直接 cancel(等价于 disable() 的 cancel-only 逻辑)。
+            await cancelAllPendingReminderNotifications()
+        }
+        #endif
+    }
+
+    /// Prefix-cancel 所有 `lumory.reminder.*` pending 通知。
+    /// 给 `disable()`(理论上)和 `refreshAuthorizationStatus`(权限被撤后)用 —— 不需要重排,
+    /// 只是要清掉 UN center 里残留的一次性请求,避免用户后续状态变化时旧通知仍然响。
+    private func cancelAllPendingReminderNotifications() async {
+        #if canImport(UserNotifications)
+        let center = UNUserNotificationCenter.current()
+        let pending = await center.pendingNotificationRequests()
+        let toCancel = pending.compactMap { req -> String? in
+            req.identifier.hasPrefix(identifierPrefix) ? req.identifier : nil
+        }
+        if !toCancel.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: toCancel)
         }
         #endif
     }

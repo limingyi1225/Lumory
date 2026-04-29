@@ -167,7 +167,18 @@ class CoreDataImportService: ObservableObject {
         })
     }
 
+    /// 用 day 粒度 + NFC normalize + lowercased 做 fingerprint。
+    /// 之前用 `timeIntervalSinceReferenceDate`(秒级 Double)+ raw text:
+    ///   - 同一天内多次 import 同文本秒级时戳不同 → 误判不重复 → 重复入库
+    ///   - 用户从两个源粘贴同一日记,一处 NFC 一处 NFD,fingerprint 不同 → 误判不重复
+    /// 改成 `startOfDay` 秒级整数 + NFC normalized + lowercased trim,贴近"用户认知里的同一篇"。
     private static func fingerprint(date: Date, text: String) -> String {
-        "\(date.timeIntervalSinceReferenceDate)|\(text.trimmingCharacters(in: .whitespacesAndNewlines))"
+        let dayStart = Calendar.current.startOfDay(for: date)
+        let daySeconds = Int(dayStart.timeIntervalSince1970)
+        let normalizedText = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+            .lowercased()
+        return "\(daySeconds)|\(normalizedText)"
     }
 }

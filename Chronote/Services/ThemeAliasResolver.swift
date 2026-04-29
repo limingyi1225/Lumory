@@ -38,7 +38,18 @@ final class ThemeAliasResolver: ObservableObject {
 
     /// 节流状态:连续点 "稍后/不是" ≥ snoozeThreshold 进入冷却期 coolDuration。
     /// 冷却期内 banner 不弹,Settings 红点也不显示。
-    @Published private(set) var coolUntil: Date? = nil
+    @Published private(set) var coolUntil: Date? = nil {
+        didSet {
+            // **C4 fix**:`redDotVisible` 计算读 `Date()` 跟 coolUntil 比,SwiftUI 默认只在
+            // `coolUntil` 这个 @Published 值**变化**时 re-render,不会因为时间自然流逝重算。
+            // 即:coolUntil = T+7d 设上后,T+7d 那一刻到了 redDotVisible 应当 true,但没有任何
+            // mutation 触发 view 重算 → 红点该亮但不亮,直到下次 enqueue/confirm 等才补上。
+            // 修法:每次 coolUntil 改变,起一个 one-shot Timer 在到期时间点 fire,fire 时 post
+            // 通知触发 InsightsView/banner reload 兼 ObservableObject objectWillChange。
+            scheduleCoolUntilExpiry()
+        }
+    }
+    private var coolUntilExpiryTimer: Timer?
 
     /// 一次性自动 scan 标记:首次进入管理页 + alias map 空 + pending 空 时,自动后台 scan 一次。
     /// 持久化到 UserDefaults,view-local @State 重新创建 view 时不重置(codex P2 fix)。
@@ -62,6 +73,8 @@ final class ThemeAliasResolver: ObservableObject {
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         load()
+        // didSet 在 init 阶段不触发,需要手动 schedule 一次盘里 coolUntil 的过期通知
+        scheduleCoolUntilExpiry()
     }
 
     // 测试用 init,不读 UserDefaults
@@ -78,6 +91,7 @@ final class ThemeAliasResolver: ObservableObject {
     init(testingWithStoredState defaults: UserDefaults) {
         self.defaults = defaults
         load()
+        scheduleCoolUntilExpiry()
     }
 
     // MARK: - Public: canonicalize
@@ -632,6 +646,31 @@ final class ThemeAliasResolver: ObservableObject {
     /// 在新 conversation / 新 session 一开始重置(可选;现在没人调,留接口)。
     func resetSessionThrottle() {
         sessionDismissCount = 0
+    }
+
+    /// coolUntil 变化时调:取消旧 timer,若 coolUntil 在未来则起 one-shot timer 在到期点
+    /// 触发 SwiftUI re-render(通过 `objectWillChange.send()` + `themeAliasMapDidChange`)。
+    /// 自然过期不需要修改 `coolUntil` 值(redDotVisible 逻辑已经判 `Date() < coolUntil`),
+    /// 只要让观察者重读一次。
+    private func scheduleCoolUntilExpiry() {
+        coolUntilExpiryTimer?.invalidate()
+        coolUntilExpiryTimer = nil
+        guard let coolUntil else { return }
+        let interval = coolUntil.timeIntervalSinceNow
+        guard interval > 0 else { return }  // 已过期,不必 schedule
+        // tolerance 给 OS 节能优化空间;到期点偏 30s 完全可接受。
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                // SwiftUI ObservableObject 重 re-render
+                self.objectWillChange.send()
+                // InsightsView 等通过 NotificationCenter 监听,一并通知
+                NotificationCenter.default.post(name: .themeAliasMapDidChange, object: nil)
+                self.coolUntilExpiryTimer = nil
+            }
+        }
+        timer.tolerance = 30  // 30s tolerance,允许 OS coalesce
+        coolUntilExpiryTimer = timer
     }
 
     /// **仅测试用**:外部直接设置 coolUntil,绕过累积 dismiss 触发逻辑。

@@ -403,6 +403,8 @@
 "主题别名" = "Theme Aliases";
 "合并主题" = "Merge Themes";
 "AI 与索引" = "AI & Indexing";
+"数据库需要修复" = "Database Recovery Required";
+"数据库可能已损坏。修复会删除本地数据库文件,然后从 iCloud 重新拉取。⚠️ 还没同步到 iCloud 的本地日记可能会丢失(自动备份保留在 App 内,联系开发者可恢复)。修复过程也会重置已合并的主题别名分组。" = "Your database appears corrupted. Recovery will delete the local database files and re-pull from iCloud. ⚠️ Diary entries that haven't synced to iCloud yet may be lost (an automatic backup is kept inside the app — contact the developer to recover). Merged theme alias groups will also be reset.";
 "通知正文会引用近期日记里的人和事(可能在锁屏显示)" = "Notification preview may reference people and topics from recent entries (visible on lock screen).";
 "此操作无法撤销。已合并的主题分组也会一并清除。" = "This action cannot be undone. Your merged theme groups will also be reset.";
 "合并主题「%@」到「%@」?" = "Merge \"%@\" into \"%@\"?";

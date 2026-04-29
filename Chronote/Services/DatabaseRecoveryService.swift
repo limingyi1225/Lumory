@@ -213,17 +213,25 @@ final class DatabaseRecoveryService {
         }
 
         let alert = UIAlertController(
-            title: "Database Recovery Required",
-            message: "Your diary database appears to be corrupted. Would you like to attempt recovery? "
-                + "Your data will be restored from iCloud if available.",
+            title: NSLocalizedString("数据库需要修复", comment: "DB recovery alert title"),
+            message: NSLocalizedString(
+                "数据库可能已损坏。修复会删除本地数据库文件,然后从 iCloud 重新拉取。⚠️ 还没同步到 iCloud 的本地日记可能会丢失(自动备份保留在 App 内,联系开发者可恢复)。修复过程也会重置已合并的主题别名分组。",
+                comment: "DB recovery alert body"
+            ),
             preferredStyle: .alert
         )
 
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+        alert.addAction(UIAlertAction(
+            title: NSLocalizedString("取消", comment: "Cancel"),
+            style: .cancel
+        ) { _ in
             completion(false)
         })
 
-        alert.addAction(UIAlertAction(title: "Recover", style: .default) { _ in
+        alert.addAction(UIAlertAction(
+            title: NSLocalizedString("修复", comment: "DB recovery confirm"),
+            style: .default
+        ) { _ in
             completion(true)
         })
 

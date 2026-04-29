@@ -107,6 +107,25 @@ final class PromptSuggestionEngine: ObservableObject {
 
     // MARK: Public API
 
+    /// 清空缓存(给"全部清空"等批量删除路径用)。
+    /// 用户删了所有 / 大量日记后,`current` 里缓存的 placeholder/askPast 文案仍引用已删主题,
+    /// 不清掉的话:首页占位语 + ReminderService 通知 body 都会显示已死内容。
+    /// 注意只清内存 + UserDefaults cache key,不发网络;调用方可以接 `Task { await refreshIfNeeded() }`
+    /// 拉新一份,但不强制(下次自然访问 refreshIfNeeded 也会重建)。
+    ///
+    /// **race fix**:同时取消 inflight `runRefresh` task。否则 clearCache 把 `current = nil` 后,
+    /// 一个还在飞的 refresh 在下一个 await 点继续跑完,把 `current = bundle` 又写进去 —— 用户
+    /// 删完日记后 1-2 秒内首页占位语依然显示旧主题。inFlight task 内部已有 `Task.isCancelled`
+    /// 守卫(若加),这里 cancel 后到下一个 await 点会自然短路。
+    func clearCache() {
+        current = nil
+        inFlight?.cancel()
+        inFlight = nil
+        UserDefaults.standard.removeObject(forKey: cacheKey)
+        lastPlaceholderIndex = nil
+        Log.info("[PromptSuggestionEngine] clearCache: 缓存已清(含 inflight 取消)", category: .ai)
+    }
+
     /// AskPastView / HomeView 进入时调。会用指纹判断是否需要重新生成；
     /// 如果缓存还新鲜就直接 return，不发网络请求。
     func refreshIfNeeded() async {

@@ -16,7 +16,6 @@ struct CorrelationFact: Identifiable, Equatable {
 
     let kind: Kind
     let title: String
-    let value: String
     let systemIcon: String
     let isPositive: Bool
 
@@ -69,16 +68,11 @@ struct CorrelationChip: View {
                 .symbolRenderingMode(.hierarchical)
                 .frame(width: 30, height: 30)
                 .background(Circle().fill(accent.opacity(0.14)))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(fact.title)
-                    .font(.footnote)
-                    .foregroundColor(.primary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(fact.value)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
+            Text(fact.title)
+                .font(.footnote)
+                .foregroundColor(.primary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
         .padding(10)
@@ -117,7 +111,6 @@ enum CorrelationFactGenerator {
                 title: delta >= 0
                     ? NSLocalizedString("这段时间整体偏积极", comment: "Overall positive")
                     : NSLocalizedString("这段时间整体偏低落", comment: "Overall low"),
-                value: String(format: "%@%.0f", delta >= 0 ? "+" : "", delta * 100),
                 systemIcon: delta >= 0 ? "arrow.up.right.circle" : "arrow.down.right.circle",
                 isPositive: delta >= 0
             ))
@@ -128,7 +121,6 @@ enum CorrelationFactGenerator {
             facts.append(CorrelationFact(
                 kind: .topTheme,
                 title: String(format: NSLocalizedString("最常出现的是 %@", comment: "Top theme"), top.name),
-                value: String(format: NSLocalizedString("%d 次", comment: "N occurrences"), top.count),
                 systemIcon: "tag.fill",
                 isPositive: top.avgMood >= 0.5
             ))
@@ -141,14 +133,12 @@ enum CorrelationFactGenerator {
                 facts.append(CorrelationFact(
                     kind: .bestMoodTheme,
                     title: String(format: NSLocalizedString("写到 %@ 时情绪最好", comment: "Best mood theme"), best.name),
-                    value: String(format: "%.0f/100", best.avgMood * 100),
                     systemIcon: "sun.max.fill",
                     isPositive: true
                 ))
                 facts.append(CorrelationFact(
                     kind: .worstMoodTheme,
                     title: String(format: NSLocalizedString("写到 %@ 时情绪最低", comment: "Worst mood theme"), worst.name),
-                    value: String(format: "%.0f/100", worst.avgMood * 100),
                     systemIcon: "cloud.fill",
                     isPositive: false
                 ))
@@ -160,7 +150,6 @@ enum CorrelationFactGenerator {
             facts.append(CorrelationFact(
                 kind: .streak,
                 title: NSLocalizedString("保持书写的势头", comment: "Streak encouragement"),
-                value: String(format: NSLocalizedString("连续 %d 天", comment: "N-day streak"), stats.currentStreak),
                 systemIcon: "flame.fill",
                 isPositive: true
             ))

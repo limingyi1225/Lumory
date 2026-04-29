@@ -79,6 +79,9 @@ lumory-backend.tar.gz
 .xcodebuildmcp/
 .derivedData-review/
 
+# Code review reports (local-only, may contain quoted source / sensitive context)
+CodeReview/
+
 # OS / misc
 Thumbs.db
 .cache/

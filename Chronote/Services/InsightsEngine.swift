@@ -49,6 +49,14 @@ final class InsightsEngine {
         let count: Int           // 出现过的日记条目数
         let uniqueDays: Int      // 出现在多少个不同的日子——衡量"反复出现"而不是"突发频繁"
         let avgMood: Double
+        /// 情绪两极:用 0.45 / 0.55 阈值切分而非中位数——中位数永远 50/50,
+        /// 反映不出"8 篇开心 + 2 篇难过"这种比例,UI 也就没法按比例渲染色斑面积。
+        /// 极端为空时用 avgMood 兜底。
+        let moodLow: Double
+        let moodHigh: Double
+        /// 用于 UI 决定两个色斑的相对面积。`lowCount + highCount + 中性数 == count`。
+        let lowCount: Int
+        let highCount: Int
         let entryIds: [UUID]
         let trend: [Double]  // 最近 N 个 bucket 的 avg mood，供 sparkline
         var id: String { name }
@@ -95,11 +103,14 @@ final class InsightsEngine {
     /// Prompt suggestions need 90d themes plus 30d mood stats. Fetch the 90d superset once,
     /// then slice in memory for the 30d aggregates.
     func suggestionSnapshot(themeRange: DateInterval, moodRange: DateInterval, themeLimit: Int = 5) async -> SuggestionSnapshot {
+        // bg fetch + main-actor alias snapshot 互不依赖,async let 并行省一次 MainActor hop。
+        async let aliasMapAsync = MainActor.run { ThemeAliasResolver.shared.snapshotIndex() }
         let entries = await fetchEntryData(in: themeRange)
         let moodEntries = entries.filter { moodRange.contains($0.date) }
         let moodExtremes = Self.computeMoodExtremes(entries: moodEntries)
+        let aliasMap = await aliasMapAsync
         return SuggestionSnapshot(
-            topThemes: Self.aggregateThemes(entries: entries, range: themeRange, limit: themeLimit),
+            topThemes: Self.aggregateThemes(entries: entries, range: themeRange, limit: themeLimit, aliasMap: aliasMap),
             moodHighEntry: moodExtremes.high,
             moodLowEntry: moodExtremes.low,
             moodPoints: Self.aggregateMoodSeries(entries: moodEntries, bucket: .day)
@@ -201,28 +212,47 @@ final class InsightsEngine {
     // MARK: - 3. Themes
 
     func themes(in range: DateInterval, limit: Int = 5, trendBuckets: Int = 6) async -> [Theme] {
+        async let aliasMapAsync = MainActor.run { ThemeAliasResolver.shared.snapshotIndex() }
         let entries = await fetchEntryData(in: range)
-        return Self.aggregateThemes(entries: entries, range: range, limit: limit, trendBuckets: trendBuckets)
+        let aliasMap = await aliasMapAsync
+        return Self.aggregateThemes(entries: entries, range: range, limit: limit, trendBuckets: trendBuckets, aliasMap: aliasMap)
     }
 
     /// 纯函数版本，便于单元测试。
-    static func aggregateThemes(entries: [DiaryEntryData], range: DateInterval, limit: Int = 5, trendBuckets: Int = 6) -> [Theme] {
+    /// `aliasMap`: lowercased(alias) → canonical(原文大小写)。空 dict 等价于无别名。
+    /// 把别名折成 canonical 后再 bucket —— "Abby" / "宝贝" 会落到同一个 Theme(显示名是 canonical)。
+    static func aggregateThemes(
+        entries: [DiaryEntryData],
+        range: DateInterval,
+        limit: Int = 5,
+        trendBuckets: Int = 6,
+        aliasMap: [String: String] = [:]
+    ) -> [Theme] {
         guard !entries.isEmpty else { return [] }
         guard trendBuckets > 0 else { return [] }
 
         // 统计每个主题的出现条目；过滤掉元描述词（历史数据里可能还存着"情绪"等）。
-        // 跨日记做 case-insensitive 合并：Abby / abby / ABBY → 同一个 bucket，
-        // 展示名保留**首次出现**的原文大小写（按 entry date ASC 排序，First-seen 稳定）。
+        // 跨日记做 case-insensitive 合并：Abby / abby / ABBY → 同一个 bucket。
+        // 命中 aliasMap 时把别名映射成 canonical(显示名也用 canonical);
+        // 不在 map 里的 tag 走原 first-seen 逻辑(按 entry date ASC,稳定)。
         var bucketMap: [String: (displayName: String, items: [DiaryEntryData])] = [:]
         let sortedEntries = entries.sorted { $0.date < $1.date }
         for entry in sortedEntries {
+            // 同一篇 entry 内,如果 themes 包含多个映射到同一 canonical 的 tag(比如 ["Abby","宝贝"]),
+            // 不能往同一 bucket 重复 append 同一 entry —— 否则 count/uniqueDays 翻倍。
+            var contributedKeys = Set<String>()
             for theme in entry.themes where !theme.isEmpty && !isBannedTheme(theme) {
-                let key = theme.lowercased()
+                let lower = theme.lowercased()
+                let canonical = aliasMap[lower] ?? theme
+                let key = canonical.lowercased()
+                guard contributedKeys.insert(key).inserted else { continue }
                 if var existing = bucketMap[key] {
                     existing.items.append(entry)
                     bucketMap[key] = existing
                 } else {
-                    bucketMap[key] = (theme, [entry])
+                    // displayName 优先用 canonical(map 命中) / 否则当前 tag 原文
+                    let displayName = aliasMap[lower] ?? theme
+                    bucketMap[key] = (displayName, [entry])
                 }
             }
         }
@@ -246,11 +276,23 @@ final class InsightsEngine {
             .map { bucket -> Theme in
                 let items = bucket.items
                 let uniqueDays = Set(items.map { calendar.startOfDay(for: $0.date) }).count
+                let moods = items.map { $0.moodValue }
+                let avg = moods.reduce(0, +) / Double(moods.count)
+                // 阈值 0.45 / 0.55 跟 Color.moodSpectrum 的"中性带"边界对齐——
+                // 不在两极的条目算中性,既不参与 high 池也不参与 low 池。
+                let lowMoods = moods.filter { $0 < 0.45 }
+                let highMoods = moods.filter { $0 > 0.55 }
+                let moodLow = lowMoods.isEmpty ? avg : lowMoods.reduce(0, +) / Double(lowMoods.count)
+                let moodHigh = highMoods.isEmpty ? avg : highMoods.reduce(0, +) / Double(highMoods.count)
                 return Theme(
                     name: bucket.displayName,
                     count: items.count,
                     uniqueDays: uniqueDays,
-                    avgMood: items.reduce(0.0) { $0 + $1.moodValue } / Double(items.count),
+                    avgMood: avg,
+                    moodLow: moodLow,
+                    moodHigh: moodHigh,
+                    lowCount: lowMoods.count,
+                    highCount: highMoods.count,
                     entryIds: items.map { $0.id },
                     trend: trendFor(items)
                 )

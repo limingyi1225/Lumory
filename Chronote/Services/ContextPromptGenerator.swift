@@ -222,7 +222,11 @@ final class ContextPromptGenerator {
     }
 
     private func fetchEntries(recentStart: Date, lapseStart: Date) async -> (recent: [Snapshot], older: [Snapshot]) {
-        await persistence.container.performBackgroundTask { context in
+        // 把 themes 在喂进策略层前用 alias map 折成 canonical —— "宝贝"→"Abby" 之后,
+        // yesterdayPrompt / lapsePrompt / topThemePrompt 共用同一个 token,跨别名"消失" / "高频"
+        // 才能正确判定。同一篇 entry 内多 alias 重复也在这里去重。
+        let aliasMap = await MainActor.run { ThemeAliasResolver.shared.snapshotIndex() }
+        return await persistence.container.performBackgroundTask { context in
             let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
             request.predicate = NSPredicate(format: "date >= %@", lapseStart as NSDate)
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
@@ -231,7 +235,8 @@ final class ContextPromptGenerator {
             var older: [Snapshot] = []
             for entry in entries {
                 let date = entry.date ?? Date.distantPast
-                let snap = Snapshot(date: date, themes: entry.themeArray, moodValue: entry.moodValue)
+                let canonicalThemes = Self.canonicalize(entry.themeArray, with: aliasMap)
+                let snap = Snapshot(date: date, themes: canonicalThemes, moodValue: entry.moodValue)
                 if date >= recentStart {
                     recent.append(snap)
                 } else {
@@ -240,5 +245,20 @@ final class ContextPromptGenerator {
             }
             return (recent, older)
         }
+    }
+
+    /// 同一 entry 内 ["Abby", "宝贝"] 都映射到 "Abby" 的话,这里 dedupe 成 ["Abby"]。
+    /// nonisolated static 是为了能在 performBackgroundTask 闭包里被调到。
+    /// `internal` 仅为 unit test 可见(@testable import) —— 别在产品代码里直接调,走 `fetchEntries`。
+    static func canonicalize(_ raw: [String], with aliasMap: [String: String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for tag in raw {
+            let lower = tag.lowercased()
+            let canon = aliasMap[lower] ?? tag
+            let key = canon.lowercased()
+            if seen.insert(key).inserted { out.append(canon) }
+        }
+        return out
     }
 }

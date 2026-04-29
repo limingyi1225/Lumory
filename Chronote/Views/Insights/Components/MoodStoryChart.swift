@@ -73,15 +73,8 @@ struct MoodStoryChart: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(NSLocalizedString("情绪故事", comment: "Mood story title"))
-                    .font(.headline)
-                if let avg = stats?.avg {
-                    Text(String(format: NSLocalizedString("平均情绪 %d", comment: "Avg mood out of 100"), Int(avg * 100)))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
+            Text(NSLocalizedString("情绪故事", comment: "Mood story title"))
+                .font(.headline)
             Spacer()
             if let delta = stats?.delta {
                 deltaBadge(delta)
@@ -111,10 +104,6 @@ struct MoodStoryChart: View {
                 .foregroundStyle(Color.moodSpectrum(value: point.mood))
             }
 
-            RuleMark(y: .value("neutral", 0.5))
-                .foregroundStyle(.secondary.opacity(0.25))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
-
             if let selectedPoint {
                 // 只画虚线 RuleMark + 把 annotation 挂在它顶上 —— 不再加大 PointMark,
                 // 那个 140-size 的点视觉像"光晕",用户嫌重。
@@ -133,14 +122,7 @@ struct MoodStoryChart: View {
         }
         .chartYScale(domain: 0...1)
         .chartYAxis {
-            AxisMarks(position: .leading, values: [0, 0.5, 1]) { value in
-                AxisValueLabel {
-                    if let mood = value.as(Double.self) {
-                        Text(moodLabel(for: mood))
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                }
+            AxisMarks(position: .leading, values: [0, 0.5, 1]) { _ in
                 AxisGridLine().foregroundStyle(.secondary.opacity(0.15))
             }
         }
@@ -308,15 +290,6 @@ struct MoodStoryChart: View {
             ? String(format: NSLocalizedString("情绪上升 %d 点", comment: "A11y mood up"), Int(abs(delta) * 100))
             : String(format: NSLocalizedString("情绪下降 %d 点", comment: "A11y mood down"), Int(abs(delta) * 100))
         )
-    }
-
-    private func moodLabel(for mood: Double) -> String {
-        switch mood {
-        case 0: return NSLocalizedString("低落", comment: "Mood low")
-        case 0.5: return NSLocalizedString("平静", comment: "Mood neutral")
-        case 1: return NSLocalizedString("开心", comment: "Mood high")
-        default: return ""
-        }
     }
 
     /// bucket-aware closest-point lookup：把目标日期和每个点都归一到同一个时间标尺上比大小。

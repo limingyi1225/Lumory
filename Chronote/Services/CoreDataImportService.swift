@@ -59,7 +59,11 @@ class CoreDataImportService: ObservableObject {
         var succeeded = 0
         var failed = 0
         var skipped = 0
-        var insertedCount = 0
+        var insertedSinceLastSave = 0
+        // **chunk save** — 每 chunkSize 条 save 一次,而不是全部 N 条结束后单次 save。
+        // 单次 save 失败 = 整批 N×4 = 4N 个 AI call(~$1)钱白付。chunk=10 是经验值:
+        // 失败时丢的最大 batch 是 10 条 = 40 AI call 的 cost,比一次性 200 强 5×。
+        let chunkSize = 10
         var seenFingerprints = existingEntryFingerprints(in: context)
         for (index, entry) in parsed.enumerated() {
             let date = entry.date
@@ -99,21 +103,38 @@ class CoreDataImportService: ObservableObject {
                 newEntry.setEmbedding(vector)
             }
             newEntry.recomputeWordCount()
-            insertedCount += 1
+            insertedSinceLastSave += 1
 
             // 更新进度
             importProgress = Double(index + 1) / Double(total)
             Log.info("[CoreDataImportService] importEntries: imported entry \(index + 1)/\(total)", category: .migration)
+
+            // 凑够 chunkSize 条 save 一次。失败仅丢这 chunk(已经 AI 跑完的钱白付,但比全 N 强)。
+            if insertedSinceLastSave >= chunkSize {
+                do {
+                    try context.save()
+                    succeeded += insertedSinceLastSave
+                    insertedSinceLastSave = 0
+                } catch {
+                    Log.error("[CoreDataImportService] chunk 保存失败，回滚 \(insertedSinceLastSave) 条: \(error)", category: .migration)
+                    context.rollback()
+                    failed += insertedSinceLastSave
+                    insertedSinceLastSave = 0
+                    // 重新 fetch fingerprint(rollback 把 in-memory 的也清了,后续 dedup 仍要正确)。
+                    seenFingerprints = existingEntryFingerprints(in: context)
+                }
+            }
         }
 
-        if insertedCount > 0 {
+        // 收尾:还剩 < chunkSize 条没 save 的
+        if insertedSinceLastSave > 0 {
             do {
                 try context.save()
-                succeeded += insertedCount
+                succeeded += insertedSinceLastSave
             } catch {
-                Log.error("[CoreDataImportService] 批量保存导入条目失败，回滚 \(insertedCount) 条: \(error)", category: .migration)
+                Log.error("[CoreDataImportService] 收尾 save 失败，回滚 \(insertedSinceLastSave) 条: \(error)", category: .migration)
                 context.rollback()
-                failed += insertedCount
+                failed += insertedSinceLastSave
             }
         }
 
@@ -121,6 +142,16 @@ class CoreDataImportService: ObservableObject {
         isImporting = false
         importProgress = 1.0
         Log.info("[CoreDataImportService] importEntries: import completed succeeded=\(succeeded) failed=\(failed) skipped=\(skipped)", category: .migration)
+
+        // J: 大批 import 完成后,首页占位 / askPast suggestion 池里的指纹已变。
+        // 下次 refreshIfNeeded 会用新指纹重建,但要主动 trigger 一次让用户立刻看到新主题。
+        // 不调 judgeAfterWrite —— 一次 import 50 条 = 50× judge call($$),过度;用户想要 alias
+        // 识别要走 Settings 的"扫描已有主题"(scanAllHistory)显式触发。
+        if succeeded > 0 {
+            Task { @MainActor in
+                await PromptSuggestionEngine.shared.refreshIfNeeded()
+            }
+        }
         return ImportResult(succeeded: succeeded, failed: failed, skipped: skipped)
     }
 

@@ -8,12 +8,16 @@ extension Notification.Name {
 
 final class PersistenceController {
     /// `.shared` 在普通启动下指向真实 CloudKit-backed store；
-    /// 检测到 `-LumoryUITestSampleData YES` launchArg 时自动切换到 **in-memory store**，
-    /// 完全旁路 CloudKit、本地 SQLite、用户数据 —— 这是 reviewer 第二轮提出的硬性要求：
+    /// 检测到 `-LumoryUITestSampleData YES` launchArg 或 hosted unit tests 时自动切换到
+    /// **in-memory store**，完全旁路 CloudKit、本地 SQLite、用户数据 —— 这是 reviewer 第二轮提出的硬性要求：
     /// "screenshot/CI 模式必须真在内存里跑，不能复用真实 store + 启发式判断安全"。
     /// 注意：launchArg 的解析在第一次访问 `.shared` 时同步执行（早于 `App.init` 中所有
     /// 其他属性初始化），所以 `seedIfNeeded` 进来时 store 类型已确定。
     static let shared: PersistenceController = {
+        return PersistenceController(inMemory: shouldUseInMemoryStoreForShared)
+    }()
+
+    private static var shouldUseInMemoryStoreForShared: Bool {
         let args = ProcessInfo.processInfo.arguments
         var screenshotMode = false
         if let idx = args.firstIndex(of: "-LumoryUITestSampleData"),
@@ -21,8 +25,21 @@ final class PersistenceController {
            args[idx + 1].uppercased() == "YES" {
             screenshotMode = true
         }
-        return PersistenceController(inMemory: screenshotMode)
-    }()
+        return screenshotMode || isRunningHostedUnitTests
+    }
+
+    private static var isRunningHostedUnitTests: Bool {
+        #if DEBUG
+        let environment = ProcessInfo.processInfo.environment
+        let arguments = ProcessInfo.processInfo.arguments
+        return environment["XCTestConfigurationFilePath"] != nil
+            || arguments.contains { $0.localizedCaseInsensitiveContains(".xctest") }
+            || arguments.contains { $0.localizedCaseInsensitiveContains("xctestconfiguration") }
+            || NSClassFromString("XCTestCase") != nil
+        #else
+        return false
+        #endif
+    }
 
     let container: NSPersistentCloudKitContainer
     let isInMemory: Bool

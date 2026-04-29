@@ -43,6 +43,51 @@ struct AnalysisResult {
     let themes: [String]
 }
 
+// MARK: - Theme alias judge types
+//
+// `judgeThemeAliases` (on-write) 与 `scanThemeAliasGroups` (一次性 scan) 共用的 IO。
+// 都 Sendable 因为会跨 await boundary。
+
+/// 喂给模型的"已有标签库存"条目。`sampleSnippet` 可空——能给一两句例子最准,
+/// 没有也能跑(只看 tag 文本本身,准确率会下降但不致命)。
+struct ThemeAliasJudgeCandidate: Sendable, Codable, Equatable {
+    let tag: String
+    let count: Int
+    let sampleSnippet: String?
+}
+
+/// on-write judge 的一条匹配。`reason` 仅作 Log/UI 透出,不强依赖。
+struct ThemeAliasJudgeMatch: Sendable, Codable, Equatable {
+    let newTag: String
+    let canonical: String
+    let confidence: Confidence
+    let reason: String?
+    enum Confidence: String, Sendable, Codable { case high, medium }
+}
+
+/// scan 的一组聚合。canonical 由模型选(通常是出现次数最高的);UI 仍允许用户反选 / 自定义。
+struct ThemeAliasJudgeGroup: Sendable, Codable, Equatable {
+    let canonical: String
+    let aliases: [String]
+    let confidence: Confidence
+    let reason: String?
+    enum Confidence: String, Sendable, Codable { case high, medium }
+}
+
+/// 网络 / 后端 / AI 解析失败时,scan 路径用此 error 走 UI 区分"真的扫到 0 条"和"网络挂了 0 条"。
+enum ThemeAliasError: LocalizedError, Sendable {
+    case requestFailed
+    case parsingFailed
+    var errorDescription: String? {
+        switch self {
+        case .requestFailed:
+            return NSLocalizedString("无法连接到服务器,请稍后再试。", comment: "Theme alias scan network error")
+        case .parsingFailed:
+            return NSLocalizedString("AI 返回内容无法解析,请稍后再试。", comment: "Theme alias scan parsing error")
+        }
+    }
+}
+
 /// 导入解析层错误。**与"成功但 0 条"(`[]`)严格区分**——后者是合法的"粘贴里没找到日记",
 /// 前者是网络 / 后端 / 模型解析失败,UI 必须给两种不同提示。
 enum DiaryImportError: LocalizedError, Sendable {
@@ -85,6 +130,24 @@ protocol AIServiceProtocol {
     /// 从日记文本抽取 2-4 个主题标签（如：工作 / 家人 / 健康 / 睡眠）。
     /// 返回值顺序不重要，语言应匹配输入文本。
     func extractThemes(text: String) async -> [String]
+
+    /// 跨日记主题别名判断:给定一组**新抽出来的 tag** 和用户**已有的 tag 库存**,
+    /// 让 LLM 找出"新 tag 可能与已有某 tag 指向同一实体"的对子。
+    /// 用在 on-write 路径:写完日记 → extractThemes → 这一调用 → 入 PendingSuggestion 队列。
+    /// `inventory` 每条带出现次数和 1-2 句样例上下文,让模型判断更稳。
+    /// 实现侧约束:严苛宁缺勿滥,只返回 high/medium,low 全部丢。
+    func judgeThemeAliases(
+        newTags: [String],
+        inventory: [ThemeAliasJudgeCandidate]
+    ) async -> [ThemeAliasJudgeMatch]
+
+    /// 一次性扫描已有 tag 列表的相互别名关系。Settings 的"扫描已有主题"按钮调。
+    /// 不区分新/旧,模型自己在列表里找成组的(canonical + aliases)。
+    /// **throws** 区分"网络/解析失败"(throw)和"AI 真的没找到匹配"(返回 [])——
+    /// 让 Settings 扫描页能区分两种情况:`.failed("network error")` vs `.done` 但 0 条。
+    func scanThemeAliasGroups(
+        candidates: [ThemeAliasJudgeCandidate]
+    ) async throws -> [ThemeAliasJudgeGroup]
 
     /// 生成语义向量（float32），用于语义搜索与 RAG 检索。
     /// 失败返回 nil；调用方应妥善处理（例如延后 backfill）。
@@ -160,6 +223,54 @@ struct MockAIService: AIServiceProtocol {
             tags.append(tag)
         }
         return Array(tags.prefix(4))
+    }
+
+    func judgeThemeAliases(
+        newTags: [String],
+        inventory: [ThemeAliasJudgeCandidate]
+    ) async -> [ThemeAliasJudgeMatch] {
+        // 离线 mock:简单的"互含子串 + 长度差不大"启发式,只用于跑 happy-path 测试。
+        // 真实判断走 OpenAIService。
+        var out: [ThemeAliasJudgeMatch] = []
+        let inventoryTags = inventory.map { $0.tag }
+        for newTag in newTags {
+            for invTag in inventoryTags where invTag != newTag {
+                let a = newTag.lowercased()
+                let b = invTag.lowercased()
+                if a == b { continue }
+                if a.contains(b) || b.contains(a) {
+                    out.append(ThemeAliasJudgeMatch(
+                        newTag: newTag,
+                        canonical: invTag,
+                        confidence: .medium,
+                        reason: "mock: substring"
+                    ))
+                }
+            }
+        }
+        return out
+    }
+
+    func scanThemeAliasGroups(
+        candidates: [ThemeAliasJudgeCandidate]
+    ) async throws -> [ThemeAliasJudgeGroup] {
+        // 离线 mock:基于 lowercased prefix 的 trivial 聚类。仅供单测。
+        var byPrefix: [String: [ThemeAliasJudgeCandidate]] = [:]
+        for c in candidates {
+            let key = String(c.tag.lowercased().prefix(2))
+            byPrefix[key, default: []].append(c)
+        }
+        return byPrefix.values.compactMap { group -> ThemeAliasJudgeGroup? in
+            guard group.count >= 2 else { return nil }
+            let canon = group.max(by: { $0.count < $1.count })?.tag ?? group[0].tag
+            let aliases = group.map { $0.tag }.filter { $0 != canon }
+            return ThemeAliasJudgeGroup(
+                canonical: canon,
+                aliases: aliases,
+                confidence: .medium,
+                reason: "mock: prefix"
+            )
+        }
     }
 
     func embed(text: String) async -> [Float]? {

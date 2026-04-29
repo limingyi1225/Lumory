@@ -197,10 +197,14 @@ struct DiaryDetailView: View {
                         #if canImport(UIKit)
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         #endif
+                        // 删除 entry 可能让当前固定周期从"已完成"变"未完成",提醒逻辑要重新评估。
+                        ReminderService.shared.requestReschedule()
+                        // 同时清理 pending 队列里指向此 entry 独有 tag 的孤儿建议。
+                        Task { await ThemeAliasResolver.shared.cleanupOrphanedPending() }
                     } catch {
                         Log.error("[DiaryDetailView] 删除日记失败: \(error)", category: .ui)
                     }
-                    
+
                     // Dismiss immediately after deletion
                     dismiss()
                 }
@@ -595,6 +599,7 @@ struct DiaryDetailView: View {
         // text 变化了就需要在后台重跑 themes + embedding（否则 Insight 主题聚合和
         // Ask Past 的语义检索会继续用旧内容的索引）。先捕获对比值，再写 Core Data。
         let textChanged = entry.wrappedText != editedText
+        let dateChanged = entry.date != editedDate
         let entryObjectID = entry.objectID
 
         entry.summary = editedSummary.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -609,6 +614,12 @@ struct DiaryDetailView: View {
             // **先 save，再切 UI 状态**。原顺序反了——catch 里只 log，UI 已经切到 "saved"，
             // 用户以为已保存其实没存。save 成功才做"切换到浏览态 / 关键盘 / 触发后台任务"。
             try viewContext.save()
+
+            // 改 date 可能让 entry 移入/移出当前固定周期(cycle-based,锚点对齐),
+            // 进而改变 wroteCurrentCycle → reminder 要重排。
+            if dateChanged {
+                ReminderService.shared.requestReschedule()
+            }
 
             // 顺序优化(修保存掉帧):
             //   1. 先关键盘 —— 让系统先开始它的 dismiss 动画
@@ -669,11 +680,14 @@ struct DiaryDetailView: View {
             (themes, embedding) = await (themesTask, embeddingTask)
         }
 
-        await MainActor.run {
+        // 把"是否真的提交了 themes" + entryID 一起跨出 MainActor.run。
+        // 如果 stale guard 丢了写入,我们仍要 short-circuit 后面的 alias judge,
+        // 否则会基于 ghost 数据生成建议。codex review 标记为 high-priority 修。
+        let postWrite: (committed: Bool, entryID: UUID?) = await MainActor.run {
             let context = PersistenceController.shared.container.viewContext
             guard let entry = try? context.existingObject(with: objectID) as? DiaryEntry else {
                 Log.error("[DiaryDetailView] refreshAIIndex: 原条目已不存在", category: .ai)
-                return
+                return (false, nil)
             }
             // Stale-write guard：如果 entry.text 已经被更后的保存改掉了，这次 Task 结果已过期，
             // 直接丢弃不写，让新 Task 的新 themes/embedding 生效。
@@ -681,7 +695,7 @@ struct DiaryDetailView: View {
             let currentTrimmed = entry.wrappedText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard currentTrimmed == trimmed else {
                 Log.info("[DiaryDetailView] refreshAIIndex: 文本已被更新的保存覆盖，丢弃 stale 结果", category: .ai)
-                return
+                return (false, entry.id)
             }
 
             if trimmed.isEmpty {
@@ -697,7 +711,7 @@ struct DiaryDetailView: View {
                 // 两者"都成功"才整组 commit。
                 guard !themes.isEmpty, let vector = embedding else {
                     Log.info("[DiaryDetailView] refreshAIIndex: AI 部分失败（themes=\(themes.count), embedding=\(embedding != nil ? "ok" : "nil")），保留原值", category: .ai)
-                    return
+                    return (false, entry.id)
                 }
                 entry.setThemes(themes)
                 entry.setEmbedding(vector)
@@ -706,12 +720,22 @@ struct DiaryDetailView: View {
             do {
                 try context.save()
                 Log.info("[DiaryDetailView] refreshAIIndex 完成：themes=\(themes.count), embedding=\(embedding != nil ? "ok" : "nil")", category: .ai)
+                return (true, entry.id)
             } catch {
                 Log.error("[DiaryDetailView] refreshAIIndex save 失败: \(error)", category: .ai)
+                return (false, entry.id)
             }
         }
+
+        // Theme alias judge —— **仅当 themes 真写入时才跑**(stale-write 或 partial-failure 时跳过)。
+        if postWrite.committed, !themes.isEmpty, let entryID = postWrite.entryID {
+            await ThemeAliasJudgeService.shared.judgeAfterWrite(
+                entryID: entryID,
+                newTags: themes
+            )
+        }
     }
-    
+
     // MARK: - 音频相关方法
     
     private func formattedDuration(currentTime: TimeInterval, totalDuration: TimeInterval) -> String {

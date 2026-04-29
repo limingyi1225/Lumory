@@ -393,10 +393,14 @@ struct HomeView: View {
     // 搬进 VM —— 原因见 `HomeRecordingViewModel.swift` 文件头说明。
     @State private var inputVM = HomeInputViewModel()
     @State private var recordingVM = HomeRecordingViewModel()
+    /// Theme alias 软提示。observed 让 pending 列表变化时 banner 自动显隐。
+    @ObservedObject private var aliasResolver = ThemeAliasResolver.shared
+    @ObservedObject private var reminderRouter = ReminderNotificationRouter.shared
     @State private var photoVM = HomePhotoViewModel()
 
     @StateObject private var recorder = AudioRecorder()
     @StateObject private var audioPlaybackController = AudioPlaybackController() // 新的控制器
+    @FocusState private var isInputFocused: Bool
 
     private let cal = Calendar.current
     @Environment(\.colorScheme) private var colorScheme
@@ -435,6 +439,7 @@ struct HomeView: View {
     @State private var showScrollToTop: Bool = false
     /// List 顶部锚点 id,FAB 用 ScrollViewProxy.scrollTo 跳回这里。
     private let topAnchorID = "__lumory_top__"
+    @State private var composerFocusRequestID: UUID?
 
     // Database recreation observer
     @State private var databaseRecreationObserver: NSObjectProtocol?
@@ -467,9 +472,25 @@ struct HomeView: View {
                 setupDatabaseRecreationObserver()
                 // AI 池可能已就绪（另一视图暖过）——进入首页立即尝试拿一条稳定值
                 rollPlaceholderIfNeeded()
+                handleReminderComposeFocusIfNeeded()
+            }
+            .task {
+                // 防御:cold-launch 路径上 ReminderNotificationRouter 在 background queue
+                // 收到 didReceive,然后 hop `Task { @MainActor }` 才 publish requestID。
+                // 当前 .onAppear 通常先跑(此时 requestID 还 nil)→ 路由器 hop 完成 →
+                // .onChange fire,正常工作。但如果 future 把 router publish 改成同步主线程,
+                // requestID 已是非 nil 在 @ObservedObject 订阅前 set,.onChange 不会 fire,
+                // 通知冷启动 focus 整个失效。.task 在 view 完整 wired 后跑 read-and-clear,
+                // 让两条路径都至少能各跑一次,UUID 单次消费保证不重复 focus。
+                handleReminderComposeFocusIfNeeded()
             }
             .onDisappear {
                 removeDatabaseRecreationObserver()
+            }
+            .onChange(of: reminderRouter.composeFocusRequestID) { _, requestID in
+                if requestID != nil {
+                    handleReminderComposeFocusIfNeeded()
+                }
             }
             .alert(NSLocalizedString("删除日记", comment: "Delete entry"), isPresented: $showDeleteConfirmation) {
                 Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
@@ -514,7 +535,18 @@ struct HomeView: View {
                         } label: {
                             // 系统 SF Symbol "line.3.horizontal" —— iOS 26 toolbar 自动适配
                             // 玻璃 / 描边 / 触控反馈,无需自绘 RoundedRectangle 双线。
+                            // 当 ThemeAliasResolver 有 high+medium pending 建议(且不在冷却期)时,
+                            // 在按钮右上角叠一个红点,引导用户进 Settings 处理。
                             Image(systemName: "line.3.horizontal")
+                                .overlay(alignment: .topTrailing) {
+                                    if aliasResolver.redDotVisible {
+                                        Circle()
+                                            .fill(Color.red)
+                                            .frame(width: 7, height: 7)
+                                            .offset(x: 4, y: -3)
+                                            .accessibilityLabel(NSLocalizedString("有待审建议", comment: "A11y red dot"))
+                                    }
+                                }
                         }
                         .accessibilityLabel(NSLocalizedString("设置", comment: "Settings"))
                     }
@@ -529,6 +561,17 @@ struct HomeView: View {
                         }
                         .accessibilityLabel(NSLocalizedString("洞察", comment: "Insights"))
                     }
+                }
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    // Theme alias 软提示。busy(录音 / 转写 / 发送 / 输入 spectrum 非 idle)时绝对不弹,
+                    // 避免打断写作流。banner 内部还会自我节流(冷却期 / sessionDismissCount)。
+                    ThemeAliasBanner(
+                        resolver: aliasResolver,
+                        isBusy: recorder.isRecording
+                            || recordingVM.isTranscribing
+                            || inputVM.isSending
+                            || inputVM.spectrumDisplayState != .idle
+                    )
                 }
                 .searchable(
                     text: $searchQuery,
@@ -589,6 +632,16 @@ struct HomeView: View {
             .refreshable {
                 await triggerManualSync()
             }
+            .onChange(of: composerFocusRequestID) { _, requestID in
+                guard requestID != nil else { return }
+                withAnimation(.smooth(duration: 0.35)) {
+                    proxy.scrollTo(topAnchorID, anchor: .top)
+                }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(260))
+                    isInputFocused = true
+                }
+            }
             // 跟踪滚动 offset:超过 480pt 才弹 FAB,小幅滚动不打扰。
             .onScrollGeometryChange(for: CGFloat.self) { geo in
                 geo.contentOffset.y
@@ -621,6 +674,17 @@ struct HomeView: View {
                 }
             }
         }
+    }
+
+    private func handleReminderComposeFocusIfNeeded() {
+        guard let requestID = reminderRouter.consumeComposeFocusRequest() else { return }
+        isSettingsOpen = false
+        isInsightsPresented = false
+        selectedEntry = nil
+        showDeleteConfirmation = false
+        entryToDelete = nil
+        searchQuery = ""
+        composerFocusRequestID = requestID
     }
 
     /// Pull-to-refresh：触发 CloudKit 同步 + 换一条占位语（从当前池里挑一个不同项）。
@@ -708,6 +772,7 @@ struct HomeView: View {
         .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
         .background(Color.clear)
         .font(.system(size: 17))
+        .focused($isInputFocused)
         .onChange(of: inputVM.inputText) { _, newValue in
             let hasContent = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if hasContent && inputVM.spectrumDisplayState == .idle {
@@ -1130,6 +1195,11 @@ struct HomeView: View {
 
         guard didSave else { return false }
 
+        // 智能 reminder reschedule:任何成功 save(含纯录音 / 纯图片 entry)都可能 fulfill
+        // 当前固定周期(cycle-based),在 !text.isEmpty 之外触发。requestReschedule 是
+        // task cancel + replace,多入口并发安全。
+        ReminderService.shared.requestReschedule()
+
         // 异步生成摘要、主题、embedding（Phase 3 × Phase 2 融合）
         // **Stale-write guard**：用户可能在 AI 请求返回前就打开这条日记编辑了，
         // 那时 `entry.text` 已经是 v2，但我们手上的结果是基于 v1 算出来的——
@@ -1144,15 +1214,19 @@ struct HomeView: View {
                 async let embeddingTask = aiService.embed(text: textSnapshot)
                 let (summary, themes, embedding) = await (summaryTask, themesTask, embeddingTask)
 
-                await MainActor.run {
+                // 把"writeback 是否真的提交了"flag 跨出 MainActor.run —— 关键!
+                // 否则即使 stale guard 丢弃了写入,我们仍会把 themes 喂给 alias judge,
+                // 给一个**根本没保存这些 themes 的 entry** 入队 alias 建议(用户后续看到的
+                // "「X」是不是 Y?" 是基于 ghost 数据生成的,极易 confusing)。
+                let didCommitThemes: Bool = await MainActor.run {
                     let fetchRequest: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
                     fetchRequest.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
-                    guard let entry = try? viewContext.fetch(fetchRequest).first else { return }
+                    guard let entry = try? viewContext.fetch(fetchRequest).first else { return false }
                     // 跟 DiaryDetailView.refreshAIIndex 同一套 stale-write guard：
                     // 当前 entry.text 已经被更新就跳过这次写入。
                     guard entry.wrappedText == textSnapshot else {
                         Log.info("[HomeView] 文本已被更新，丢弃 stale AI 结果（v1 不覆盖 v2）", category: .ai)
-                        return
+                        return false
                     }
                     entry.summary = summary
                     entry.setThemes(themes)
@@ -1162,9 +1236,20 @@ struct HomeView: View {
                     do {
                         try viewContext.save()
                         Log.info("[HomeView] 摘要+主题+索引已更新: themes=\(themes.count), hasEmbedding=\(embedding != nil)", category: .ai)
+                        return true
                     } catch {
                         Log.error("[HomeView] AI 写回保存失败: \(error)", category: .ai)
+                        return false
                     }
+                }
+
+                // Theme alias judge —— 仅在 themes 真的写到 entry 上时才跑。否则 alias 建议是
+                // 基于 ghost 数据(参考 codex review)。
+                if didCommitThemes, !themes.isEmpty {
+                    await ThemeAliasJudgeService.shared.judgeAfterWrite(
+                        entryID: entryID,
+                        newTags: themes
+                    )
                 }
             }
         }
@@ -1628,13 +1713,18 @@ struct HomeView: View {
                 #if canImport(UIKit)
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 #endif
+                // 删除可能让当前固定周期从"已完成"变"未完成",通知逻辑要重新评估。
+                ReminderService.shared.requestReschedule()
+                // 删除 entry 后,pending 队列里引用此 entry 独有 tag 的 suggestion 变成孤儿,
+                // 后台扫一次清理掉。fire-and-forget。
+                Task { await ThemeAliasResolver.shared.cleanupOrphanedPending() }
             } catch {
                 // Log the error appropriately
                 Log.error("[HomeView] 删除日记失败: \(error.localizedDescription)", category: .ui)
                 // Potentially show an error to the user
             }
         }
-        
+
         // Ensure entryToDelete is cleared AFTER the operation.
         // If this closure is part of an alert, ensure it's cleared
         // whether the operation succeeded or failed, to reset state.

@@ -28,7 +28,15 @@ struct InsightsView: View {
     @State private var showNarrative = false
     @State private var showAskPast = false
     @State private var themeFilter: InsightsEngine.Theme?
+    @State private var themeToDelete: InsightsEngine.Theme?
+    @State private var isDeletingTheme = false
+    @State private var deleteFailureMessage: String?
+    @State private var themeToMerge: InsightsEngine.Theme?
     @State private var selectedPoint: InsightsEngine.MoodPoint?
+
+    /// 合并/删除 完成后的 transient toast(底部 capsule,3s 后自动消失)。
+    @State private var toastMessage: String?
+    @State private var toastTask: Task<Void, Never>?
 
     // Load token — 避免老请求完成后覆盖新 range 的数据
     @State private var loadToken: UUID = UUID()
@@ -68,7 +76,9 @@ struct InsightsView: View {
                         ThemeCardList(
                             themes: themes,
                             isLoading: isLoadingThemes,
-                            onSelect: { theme in themeFilter = theme }
+                            onSelect: { theme in themeFilter = theme },
+                            onDelete: { theme in themeToDelete = theme },
+                            onMergeRequest: { theme in themeToMerge = theme }
                         )
 
                         CorrelationChipList(
@@ -105,6 +115,10 @@ struct InsightsView: View {
                 }
             }
             .task(id: range) { await reload() }
+            .onReceive(NotificationCenter.default.publisher(for: .themeAliasMapDidChange)) { _ in
+                // 用户合并/拆分别名后,主题卡片要立刻按新 canonical 重聚合。
+                Task { await reload() }
+            }
             .fullScreenCover(isPresented: $showNarrative) {
                 NarrativeReader(
                     range: range.dateInterval,
@@ -121,14 +135,144 @@ struct InsightsView: View {
                     .interactiveDismissDisabled(true)
             }
             .sheet(item: $themeFilter) { theme in
-                ThemeFilteredEntriesView(theme: theme)
-                    .environment(\.managedObjectContext, viewContext)
+                ThemeFilteredEntriesView(
+                    theme: theme,
+                    allThemes: themes,
+                    onMerged: { message in
+                        showToast(message: message)
+                    },
+                    onDeleted: { name in
+                        showToast(message: String(format: NSLocalizedString("已删除主题「%@」", comment: "Delete toast"), name))
+                    }
+                )
+                .environment(\.managedObjectContext, viewContext)
             }
             .sheet(item: $selectedPoint) { point in
                 PointDetailSheet(point: point)
                     .environment(\.managedObjectContext, viewContext)
                     .presentationDetents([.medium, .large])
             }
+            .alert(
+                themeToDelete.map {
+                    String(format: NSLocalizedString("删除主题「%@」?", comment: "Delete theme alert title"), $0.name)
+                } ?? "",
+                isPresented: Binding(
+                    get: { themeToDelete != nil },
+                    set: { if !$0 { themeToDelete = nil } }
+                )
+            ) {
+                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {
+                    themeToDelete = nil
+                }
+                Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
+                    guard let theme = themeToDelete else { return }
+                    themeToDelete = nil
+                    Task { await deleteTheme(theme) }
+                }
+            } message: {
+                Text(NSLocalizedString("将从所有日记里抹掉这个主题(包括它的所有别名)。原日记内容不变。此操作不可撤销。", comment: "Delete theme message"))
+            }
+            .alert(
+                NSLocalizedString("删除失败", comment: "Delete failed alert"),
+                isPresented: Binding(
+                    get: { deleteFailureMessage != nil },
+                    set: { if !$0 { deleteFailureMessage = nil } }
+                )
+            ) {
+                Button(NSLocalizedString("好", comment: "OK"), role: .cancel) {
+                    deleteFailureMessage = nil
+                }
+            } message: {
+                Text(deleteFailureMessage ?? "")
+            }
+            .sheet(item: $themeToMerge) { source in
+                ThemeMergeIntoSheet(
+                    source: source,
+                    candidates: themes.filter { $0.id != source.id }
+                ) { target in
+                    let outcome = ThemeAliasResolver.shared.mergeThemes(source: source.name, into: target.name)
+                    switch outcome {
+                    case .merged:
+                        // resolve target 到 canonical(目标可能是别人的 alias),toast 显示真 canonical 不撒谎。
+                        let resolvedTarget = ThemeAliasResolver.shared.canonicalize(target.name)
+                        let message = String(
+                            format: NSLocalizedString("已把「%@」合并到「%@」", comment: "Merge toast"),
+                            source.name,
+                            resolvedTarget
+                        )
+                        return .success(
+                            title: String(
+                                format: NSLocalizedString("已合并到「%@」", comment: "Merged success"),
+                                resolvedTarget
+                            ),
+                            toastMessage: message
+                        )
+                    case .noop:
+                        return .noop(message: NSLocalizedString("它们已经是同一组了", comment: "Merge no-op toast"))
+                    }
+                } onComplete: { outcome in
+                    guard let message = outcome.toastMessage else { return }
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(120))
+                        showToast(message: message)
+                    }
+                }
+            }
+            .overlay(alignment: .bottom) {
+                // 底部 transient toast —— 合并 / 删除 等操作的非阻塞反馈。3s 自动消失。
+                if let message = toastMessage {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.callout)
+                            .foregroundStyle(Color.moodSpectrum(value: 0.85))
+                        Text(message)
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(Color.primary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .liquidGlassCard(cornerRadius: 22, interactive: false)
+                    .shadow(color: Color.primary.opacity(0.10), radius: 14, y: 4)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 36)
+                    .frame(maxWidth: .infinity)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.34, dampingFraction: 0.86), value: toastMessage)
+            // View struct 是 value type 不会泄漏,但 toastTask 在 view tear-down 后还会向已弃 state
+            // 写 nil,iOS 26 beta 会喷 "modifying state during view update"。显式 cancel 干净点。
+            .onDisappear { toastTask?.cancel() }
+        }
+    }
+
+    /// 弹一条 transient toast(底部 capsule,3s 自动消失)。重复调用会取消上一次 task,刷新计时。
+    private func showToast(message: String) {
+        toastTask?.cancel()
+        toastMessage = message
+        toastTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            toastMessage = nil
+        }
+    }
+
+    private func deleteTheme(_ theme: InsightsEngine.Theme) async {
+        guard !isDeletingTheme else { return }
+        isDeletingTheme = true
+        defer { isDeletingTheme = false }
+        let outcome = await ThemeManagementService.shared.deleteTheme(canonical: theme.name)
+        if outcome.succeeded {
+            Log.info("[InsightsView] deleted theme \(theme.name), affected entries=\(outcome.affected)", category: .ui)
+            // ThemeManagementService 已 post .themeAliasMapDidChange,InsightsView 自己监听会 reload。
+        } else {
+            // CoreData save 失败 —— 用户看到主题没消失会困惑,显式提示。
+            deleteFailureMessage = String(
+                format: NSLocalizedString("删除「%@」失败,可能是磁盘空间不足或同步冲突。请稍后重试。", comment: "Delete theme failed"),
+                theme.name
+            )
         }
     }
 
@@ -200,11 +344,11 @@ struct InsightsView: View {
     private func reload() async {
         let interval = range.dateInterval
         let token = UUID()
-        await MainActor.run {
-            loadToken = token
-            isLoadingCharts = true
-            isLoadingThemes = true
-        }
+        // View struct 的 method 隐式 @MainActor,这些写入直接同步即可,
+        // 不必再 `await MainActor.run`(SwiftUI 已经把 reload 调用调度到 main)。
+        loadToken = token
+        isLoadingCharts = true
+        isLoadingThemes = true
 
         // Fix #23: range 切换时 SwiftUI cancel 外层 Task,但 `engine.*` 内部的
         // `performBackgroundTask` 不响应外层 Task cancellation —— 旧实现下快速来回切 range
@@ -214,7 +358,9 @@ struct InsightsView: View {
         if Task.isCancelled { return }
 
         async let pointsTask = engine.moodSeries(in: interval, bucket: range.chartBucket)
-        async let themesTask = engine.themes(in: interval)
+        // 主题卡限制 5 太少 —— 用户重度使用后 distinct 主题 >50,只看 top 5 体感"内容量薄"。
+        // 30 是横向滚多过 1-2 屏的合理上限,继续拉大对感知没增益但内存压力上升。
+        async let themesTask = engine.themes(in: interval, limit: 30)
         async let statsTask = engine.writingStats()
         async let cellsTask = fetchDailyCells(in: interval)
 
@@ -224,21 +370,19 @@ struct InsightsView: View {
         // 让新 reload 接管 UI 状态(它自己的 isLoading/UUID 都已置好)。
         if Task.isCancelled { return }
 
-        await MainActor.run {
-            // 只在 token 还是最新时才把结果写进 UI,避免"被挤下的老 reload 把过期数据盖上"。
-            // 被挤下的老 reload 走到这里 guard 失败后**直接 return**,不触碰 loading flag:
-            // 后继 reload 在它自己的开头 MainActor.run 已经把 loadToken 刷新 + isLoading 重置 true,
-            // 由它自己的结尾负责清 false。老 reload 若在这里抢先清 false,新 reload 还没返回,
-            // UI 会出现"已加载 → 又加载中"的视觉抖动。
-            guard token == loadToken else { return }
-            self.moodPoints = points
-            self.themes = loadedThemes
-            self.stats = loadedStats
-            self.dailyCells = loadedCells
-            self.facts = CorrelationFactGenerator.generate(points: points, themes: loadedThemes, stats: loadedStats)
-            self.isLoadingCharts = false
-            self.isLoadingThemes = false
-        }
+        // 只在 token 还是最新时才把结果写进 UI,避免"被挤下的老 reload 把过期数据盖上"。
+        // 被挤下的老 reload 走到这里 guard 失败后**直接 return**,不触碰 loading flag:
+        // 后继 reload 在它自己的开头已经把 loadToken 刷新 + isLoading 重置 true,
+        // 由它自己的结尾负责清 false。老 reload 若在这里抢先清 false,新 reload 还没返回,
+        // UI 会出现"已加载 → 又加载中"的视觉抖动。
+        guard token == loadToken else { return }
+        self.moodPoints = points
+        self.themes = loadedThemes
+        self.stats = loadedStats
+        self.dailyCells = loadedCells
+        self.facts = CorrelationFactGenerator.generate(points: points, themes: loadedThemes, stats: loadedStats)
+        self.isLoadingCharts = false
+        self.isLoadingThemes = false
     }
 
     private func fetchDailyCells(in range: DateInterval, lookbackDays: Int = 140) async -> [DailyCell] {
@@ -258,10 +402,8 @@ struct InsightsView: View {
         let fetchRange = DateInterval(start: start, end: end)
         let cacheKey = "\(Int(start.timeIntervalSinceReferenceDate))-\(Int(end.timeIntervalSinceReferenceDate))"
 
-        let cached = await MainActor.run {
-            dailyCellsCache[cacheKey]
-        }
-        if let cached {
+        // 函数 @MainActor 隐式继承,直接读 cache。
+        if let cached = dailyCellsCache[cacheKey] {
             return cached
         }
 
@@ -310,11 +452,9 @@ struct InsightsView: View {
             }
         }
         if !Task.isCancelled {
-            await MainActor.run {
-                dailyCellsCache[cacheKey] = cells
-                if dailyCellsCache.count > 6 {
-                    dailyCellsCache.removeValue(forKey: dailyCellsCache.keys.min() ?? cacheKey)
-                }
+            dailyCellsCache[cacheKey] = cells
+            if dailyCellsCache.count > 6 {
+                dailyCellsCache.removeValue(forKey: dailyCellsCache.keys.min() ?? cacheKey)
             }
         }
         return cells
@@ -347,7 +487,20 @@ private struct ThemeFilteredEntriesView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
     let theme: InsightsEngine.Theme
+    /// 父视图传入的全部 themes(用来给 merge sheet 列候选,排除自己)
+    let allThemes: [InsightsEngine.Theme]
+    /// 父视图回调,处理合并成功后的 toast / reload。
+    let onMerged: ((_ message: String) -> Void)?
+    /// 父视图回调,处理删除主题后的 toast / 关 sheet。
+    let onDeleted: ((_ name: String) -> Void)?
+
     @State private var entries: [DiaryEntry] = []
+    /// merge sheet 的 trigger。`.sheet(item:)` 比 `.sheet(isPresented:)` 抗父级 reload —
+    /// alias map 变更通知能让父级 InsightsView 重 evaluate `themeFilter`,sheet item identity
+    /// 驱动比 Bool 稳。CLAUDE.md `.sheet` 反复踩坑章节。
+    @State private var mergeSubject: InsightsEngine.Theme?
+    @State private var showDeleteAlert = false
+    @State private var deleteFailureMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -385,8 +538,105 @@ private struct ThemeFilteredEntriesView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(NSLocalizedString("关闭", comment: "Close")) { dismiss() }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            mergeSubject = theme
+                        } label: {
+                            Label(
+                                NSLocalizedString("合并到其他主题…", comment: "Merge into another theme"),
+                                systemImage: "arrow.triangle.merge"
+                            )
+                        }
+                        Button(role: .destructive) {
+                            showDeleteAlert = true
+                        } label: {
+                            Label(
+                                NSLocalizedString("删除主题", comment: "Delete theme"),
+                                systemImage: "trash"
+                            )
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel(NSLocalizedString("更多操作", comment: "More actions"))
+                }
             }
             .onAppear(perform: fetch)
+            .sheet(item: $mergeSubject) { subject in
+                ThemeMergeIntoSheet(
+                    source: subject,
+                    candidates: allThemes.filter { $0.id != subject.id }
+                ) { target in
+                    let outcome = ThemeAliasResolver.shared.mergeThemes(source: subject.name, into: target.name)
+                    switch outcome {
+                    case .merged:
+                        let resolvedTarget = ThemeAliasResolver.shared.canonicalize(target.name)
+                        let message = String(
+                            format: NSLocalizedString("已把「%@」合并到「%@」", comment: "Merge toast"),
+                            subject.name,
+                            resolvedTarget
+                        )
+                        return .success(
+                            title: String(
+                                format: NSLocalizedString("已合并到「%@」", comment: "Merged success"),
+                                resolvedTarget
+                            ),
+                            toastMessage: message
+                        )
+                    case .noop:
+                        return .noop(message: NSLocalizedString("它们已经是同一组了", comment: "Merge no-op toast"))
+                    }
+                } onComplete: { outcome in
+                    guard let message = outcome.toastMessage else { return }
+                    // 合并后此 filtered view 显示的 theme 已经是别名,关掉让用户看 Insights 重聚合后的 canonical。
+                    dismiss()
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(160))
+                        onMerged?(message)
+                    }
+                }
+            }
+            .alert(
+                String(format: NSLocalizedString("删除主题「%@」?", comment: "Delete theme alert title"), theme.name),
+                isPresented: $showDeleteAlert
+            ) {
+                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }
+                Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
+                    Task { await performDelete() }
+                }
+            } message: {
+                Text(NSLocalizedString("将从所有日记里抹掉这个主题(包括它的所有别名)。原日记内容不变。此操作不可撤销。", comment: "Delete theme message"))
+            }
+            .alert(
+                NSLocalizedString("删除失败", comment: "Delete failed"),
+                isPresented: Binding(
+                    get: { deleteFailureMessage != nil },
+                    set: { if !$0 { deleteFailureMessage = nil } }
+                )
+            ) {
+                Button(NSLocalizedString("好", comment: "OK"), role: .cancel) {
+                    deleteFailureMessage = nil
+                }
+            } message: {
+                Text(deleteFailureMessage ?? "")
+            }
+        }
+    }
+
+    private func performDelete() async {
+        let outcome = await ThemeManagementService.shared.deleteTheme(canonical: theme.name)
+        if outcome.succeeded {
+            dismiss()
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(160))
+                onDeleted?(theme.name)
+            }
+        } else {
+            deleteFailureMessage = String(
+                format: NSLocalizedString("删除「%@」失败,可能是磁盘空间不足或同步冲突。请稍后重试。", comment: "Delete theme failed"),
+                theme.name
+            )
         }
     }
 
@@ -458,5 +708,263 @@ private struct PointDetailSheet: View {
         )
         request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
         entries = (try? viewContext.fetch(request)) ?? []
+    }
+}
+
+// MARK: - ThemeMergeIntoSheet
+//
+// Insights ThemeCard 长按 → "合并到其他主题" → 这个 sheet。列出所有其他主题让用户选 target。
+// 选完后回调 onConfirm(target),InsightsView 走 ThemeAliasResolver.mergeThemes。
+
+private struct ThemeMergeSheetOutcome: Equatable {
+    let title: String
+    let toastMessage: String?
+    let isSuccess: Bool
+
+    static func success(title: String, toastMessage: String) -> ThemeMergeSheetOutcome {
+        ThemeMergeSheetOutcome(title: title, toastMessage: toastMessage, isSuccess: true)
+    }
+
+    static func noop(message: String) -> ThemeMergeSheetOutcome {
+        ThemeMergeSheetOutcome(title: message, toastMessage: nil, isSuccess: false)
+    }
+}
+
+private struct ThemeMergeIntoSheet: View {
+    let source: InsightsEngine.Theme
+    let candidates: [InsightsEngine.Theme]
+    let onConfirm: (InsightsEngine.Theme) -> ThemeMergeSheetOutcome
+    let onComplete: (ThemeMergeSheetOutcome) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText: String = ""
+    /// 选中后的过渡状态。真实 merge 已完成后,展示结果 animation,~0.6s 后 dismiss。
+    @State private var confirmingTarget: InsightsEngine.Theme?
+    @State private var confirmationTitle: String = ""
+    @State private var confirmationSucceeded = true
+    /// 用户点了 target,但 source 是某个组的成员 → 合并会把组内其他 alias 也搬过去。
+    /// 弹 alert 显式列出附带搬移的标签,让用户确认。空 = 无需弹。
+    @State private var pendingMergeTarget: InsightsEngine.Theme?
+    @State private var pendingMergeCollateral: [String] = []
+
+    private var filteredCandidates: [InsightsEngine.Theme] {
+        let trimmed = searchText.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return candidates }
+        return candidates.filter {
+            $0.name.localizedCaseInsensitiveContains(trimmed)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                backgroundGradient.ignoresSafeArea()
+
+                ScrollView {
+                    VStack(spacing: 14) {
+                        sourceHeader
+                            .padding(.horizontal, 16)
+                            .padding(.top, 8)
+
+                        if filteredCandidates.isEmpty {
+                            emptyState
+                                .padding(.top, 40)
+                        } else {
+                            VStack(spacing: 10) {
+                                ForEach(filteredCandidates) { target in
+                                    candidateCard(for: target)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 24)
+                        }
+                    }
+                }
+
+                // 合并 in-flight 时全屏 dim + 中央 success animation,~0.6s 后 dismiss
+                if let target = confirmingTarget {
+                    confirmingOverlay(target: target)
+                        .transition(.opacity)
+                }
+            }
+            .searchable(text: $searchText, prompt: NSLocalizedString("搜索主题", comment: "Search theme prompt"))
+            .navigationTitle(NSLocalizedString("合并主题", comment: "Merge themes title"))
+            #if !os(macOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(NSLocalizedString("取消", comment: "Cancel")) { dismiss() }
+                        .disabled(confirmingTarget != nil)
+                }
+            }
+            .interactiveDismissDisabled(confirmingTarget != nil)
+            .animation(.spring(response: 0.32, dampingFraction: 0.85), value: confirmingTarget)
+            .alert(
+                String(
+                    format: NSLocalizedString("合并主题「%@」到「%@」?", comment: "Merge collateral alert title"),
+                    source.name,
+                    pendingMergeTarget?.name ?? ""
+                ),
+                isPresented: Binding(
+                    get: { pendingMergeTarget != nil },
+                    set: { if !$0 { pendingMergeTarget = nil; pendingMergeCollateral = [] } }
+                )
+            ) {
+                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {
+                    pendingMergeTarget = nil
+                    pendingMergeCollateral = []
+                }
+                Button(NSLocalizedString("继续合并", comment: "Confirm merge with collateral")) {
+                    if let target = pendingMergeTarget {
+                        pendingMergeTarget = nil
+                        pendingMergeCollateral = []
+                        performConfirm(target: target)
+                    }
+                }
+            } message: {
+                Text(String(
+                    format: NSLocalizedString("以下别名也会一起搬到目标组:%@", comment: "Merge collateral alert body"),
+                    pendingMergeCollateral.map { "「\($0)」" }.joined(separator: "、")
+                ))
+            }
+        }
+    }
+
+    // MARK: Subviews
+
+    private var sourceHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(NSLocalizedString("把这个主题合并到", comment: "Merge into header"))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(Color.moodSpectrum(value: source.avgMood))
+                    .frame(width: 10, height: 10)
+                Text(source.name)
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Text(String(format: NSLocalizedString("%d 次", comment: "Theme count"), source.count))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .liquidGlassCard(cornerRadius: 14, tint: Color.moodSpectrum(value: source.avgMood), tintStrength: 0.16, interactive: false)
+        }
+    }
+
+    @ViewBuilder
+    private func candidateCard(for target: InsightsEngine.Theme) -> some View {
+        Button {
+            select(target)
+        } label: {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(Color.moodSpectrum(value: target.avgMood))
+                    .frame(width: 10, height: 10)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(target.name)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                    Text(String(format: NSLocalizedString("%d 次 · 平均情绪 %d",
+                                                          comment: "Theme stats line"),
+                                target.count, Int(target.avgMood * 100)))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Spacer()
+                Image(systemName: "arrow.triangle.merge")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .liquidGlassCard(cornerRadius: 14, tint: Color.moodSpectrum(value: target.avgMood), tintStrength: 0.10, interactive: true)
+        }
+        .buttonStyle(PressableScaleButtonStyle())
+        .disabled(confirmingTarget != nil)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.title2)
+                .foregroundStyle(.tertiary)
+            Text(NSLocalizedString("没有匹配的主题", comment: "No matching themes"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func confirmingOverlay(target: InsightsEngine.Theme) -> some View {
+        ZStack {
+            Color.black.opacity(0.18)
+                .ignoresSafeArea()
+
+            VStack(spacing: 14) {
+                Image(systemName: confirmationSucceeded ? "checkmark.circle.fill" : "info.circle.fill")
+                    .font(.system(size: 56))
+                    .foregroundStyle(confirmationSucceeded ? Color.moodSpectrum(value: target.avgMood) : Color.secondary)
+                    .symbolEffect(.bounce, value: confirmingTarget != nil)
+                Text(confirmationTitle)
+                    .font(.headline)
+                    .foregroundStyle(Color.primary)
+            }
+            .padding(28)
+            .liquidGlassCard(cornerRadius: 22)
+            .shadow(color: Color.primary.opacity(0.12), radius: 18, y: 6)
+        }
+    }
+
+    private var backgroundGradient: some View {
+        LinearGradient(
+            colors: [
+                Color.moodSpectrum(value: source.avgMood).opacity(0.10),
+                Color.clear
+            ],
+            startPoint: .top,
+            endPoint: .center
+        )
+    }
+
+    // MARK: Actions
+
+    private func select(_ target: InsightsEngine.Theme) {
+        guard confirmingTarget == nil, pendingMergeTarget == nil else { return }
+        // mergeThemes 语义:source 若是某 group 的 alias / canonical,**整组**搬到 target。
+        // 没被告知的话 long-press 合并感觉只搬一个名字。这里先 preview,有附带搬移就弹 alert。
+        let collateral = ThemeAliasResolver.shared.collateralLabels(forMerging: source.name, into: target.name)
+        if collateral.isEmpty {
+            performConfirm(target: target)
+        } else {
+            pendingMergeTarget = target
+            pendingMergeCollateral = collateral
+        }
+    }
+
+    private func performConfirm(target: InsightsEngine.Theme) {
+        let outcome = onConfirm(target)
+        confirmationTitle = outcome.title
+        confirmationSucceeded = outcome.isSuccess
+        confirmingTarget = target
+        #if canImport(UIKit)
+        if outcome.isSuccess {
+            HapticManager.shared.notification(.success)
+        } else {
+            HapticManager.shared.click()
+        }
+        #endif
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(650))
+            dismiss()
+            onComplete(outcome)
+        }
     }
 }

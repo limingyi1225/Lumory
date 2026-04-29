@@ -19,6 +19,13 @@ class CloudKitSyncMonitor: ObservableObject {
     /// 直接绕过冷却。
     private var lastCheckDate: Date?
 
+    #if DEBUG
+    private static var isRunningHostedUnitTests: Bool {
+        NSClassFromString("XCTestCase") != nil
+            || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+    #endif
+
     enum SyncStatus: String {
         case unknown = "Unknown"
         case syncing = "Syncing"
@@ -163,6 +170,14 @@ class CloudKitSyncMonitor: ObservableObject {
     }
     
     func checkCloudKitStatus() {
+        #if DEBUG
+        guard !Self.isRunningHostedUnitTests else {
+            syncStatus = .unknown
+            errorMessage = nil
+            return
+        }
+        #endif
+
         // 30s 冷却：scenePhase=.active 每次都触发，频繁切换前后台不应反复打 CloudKit。
         // `forceSync()` 用户主动刷新走 `checkCloudKitStatusAndWaitForSync()` 直接绕过本节流。
         if let last = lastCheckDate, Date().timeIntervalSince(last) < 30 {
@@ -321,6 +336,14 @@ class CloudKitSyncMonitor: ObservableObject {
         Log.info("[CloudKitSyncMonitor] Force sync initiated", category: .sync)
         syncStatus = .syncing
         errorMessage = nil
+
+        #if DEBUG
+        guard !Self.isRunningHostedUnitTests else {
+            syncStatus = .synced
+            errorMessage = nil
+            return
+        }
+        #endif
 
         // Trigger Core Data save to push changes to CloudKit
         let context = container.viewContext

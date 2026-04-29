@@ -164,6 +164,9 @@ struct DiaryImportView: View {
                 } else {
                     outcome = .finished(succeeded: result.succeeded, failed: result.failed, skipped: result.skipped)
                 }
+                if result.succeeded > 0 {
+                    ReminderService.shared.requestReschedule()
+                }
             } catch {
                 // `DiaryImportError` / 任意上抛错误。`localizedDescription` 已在
                 // `DiaryImportError.errorDescription` 里翻译过。

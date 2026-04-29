@@ -30,19 +30,24 @@ struct SettingsView: View {
     @State private var showDeleteAllAlert = false
     @State private var showDeleteCompleteAlert = false
     @State private var isDeletingAllEntries = false
-    @State private var isSyncing = false
-    @State private var syncMessage: String?
 
     @EnvironmentObject var importService: CoreDataImportService
     @EnvironmentObject var syncMonitor: CloudKitSyncMonitor
+
+    @ObservedObject private var aliasResolver = ThemeAliasResolver.shared
+    @ObservedObject private var reminderService = ReminderService.shared
+    @State private var showReminderDeniedAlert = false
+    /// 防止用户在权限弹窗(首次 enable 的 await requestAuthorization 期间)双击 toggle 进入
+    /// race:enable() 暂停时若 disable() 跑完再 resume,isEnabled 会被反复来回写。
+    @State private var reminderToggleInFlight = false
 
     var body: some View {
         NavigationStack {
             Form {
                 appHeaderSection
                 aiIndexSection
+                reminderSection
                 dataSection
-                syncSection
                 languageSection
                 advancedSection
                 aboutSection
@@ -80,6 +85,10 @@ struct SettingsView: View {
             } message: {
                 Text(NSLocalizedString("已删除所有日记", comment: "All entries deleted"))
             }
+            .task {
+                // Settings 进来同步一次系统通知权限(用户可能在 Settings.app 改了)。
+                await reminderService.refreshAuthorizationStatus()
+            }
         }
     }
 
@@ -114,20 +123,209 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - AI Index (prominent)
+    // MARK: - AI(合并主题 + 重建索引一起放这里)
 
     @ViewBuilder
     private var aiIndexSection: some View {
-        Section(header: sectionHeader("AI")) {
+        Section(header: Text(NSLocalizedString("AI 与索引", comment: "AI section header"))) {
+            // 第一项:合并主题(原 themeAliasSection,搬过来)
+            NavigationLink {
+                ThemeAliasManagementView()
+                    .environment(\.managedObjectContext, viewContext)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "tag.circle")
+                        .foregroundStyle(Color.accentColor)
+                        .symbolRenderingMode(.hierarchical)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(NSLocalizedString("合并主题", comment: "Merge themes row"))
+                                .foregroundStyle(Color.primary)
+                            if aliasResolver.redDotVisible {
+                                Circle()
+                                    .fill(Color.red)
+                                    .frame(width: 8, height: 8)
+                                    .accessibilityLabel(NSLocalizedString("有待审建议", comment: "A11y red dot"))
+                            }
+                        }
+                        Text(themeAliasSubtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+            }
+            // 第二项:重建全部 AI 分析(原 OneClickRebuildRow)
             OneClickRebuildRow()
         }
+    }
+
+    private var themeAliasSubtitle: String {
+        let pending = aliasResolver.pendingCount
+        let groups = aliasResolver.groups.count
+        if pending == 0 && groups == 0 {
+            return NSLocalizedString("把意指同一实体的标签合到一起", comment: "Theme alias subtitle empty")
+        }
+        var parts: [String] = []
+        if pending > 0 { parts.append(String(format: NSLocalizedString("待审 %d 条", comment: "Pending"), pending)) }
+        if groups > 0 { parts.append(String(format: NSLocalizedString("已合并 %d 组", comment: "Merged"), groups)) }
+        return parts.joined(separator: " · ")
+    }
+
+    // MARK: - Reminder
+
+    @ViewBuilder
+    private var reminderSection: some View {
+        Section(header: Text(NSLocalizedString("提醒", comment: "Reminder section"))) {
+            Toggle(isOn: reminderToggleBinding) {
+                Label {
+                    Text(NSLocalizedString("写日记提醒", comment: "Reminder toggle"))
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "bell")
+                        .foregroundStyle(Color.accentColor)
+                        .symbolRenderingMode(.hierarchical)
+                        .frame(width: 24)
+                }
+            }
+
+            if reminderService.isEnabled {
+                // 频率 —— 段控件,iOS 26 自动液态玻璃
+                Picker(selection: frequencyBinding) {
+                    ForEach(ReminderFrequency.allCases, id: \.self) { freq in
+                        Text(freq.localizedLabel).tag(freq)
+                    }
+                } label: {
+                    Label {
+                        Text(NSLocalizedString("频率", comment: "Reminder frequency row"))
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "calendar")
+                            .foregroundStyle(Color.accentColor)
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(width: 24)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                DatePicker(
+                    selection: reminderTimeBinding,
+                    displayedComponents: [.hourAndMinute]
+                ) {
+                    Label {
+                        Text(NSLocalizedString("时间", comment: "Reminder time"))
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "clock")
+                            .foregroundStyle(Color.accentColor)
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(width: 24)
+                    }
+                }
+
+                Toggle(isOn: contextualBodyBinding) {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(NSLocalizedString("用近期主题作文案", comment: "Reminder contextual body toggle"))
+                                .foregroundStyle(Color.primary)
+                            Text(NSLocalizedString("通知正文会引用近期日记里的人和事(可能在锁屏显示)",
+                                                   comment: "Reminder contextual body subtitle"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "text.bubble")
+                            .foregroundStyle(Color.accentColor)
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(width: 24)
+                    }
+                }
+            }
+        }
+        .alert(
+            NSLocalizedString("通知权限被拒", comment: "Notification denied alert title"),
+            isPresented: $showReminderDeniedAlert
+        ) {
+            Button(NSLocalizedString("打开 设置", comment: "Open Settings")) {
+                #if canImport(UIKit)
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+                #endif
+            }
+            Button(NSLocalizedString("好", comment: "OK"), role: .cancel) { }
+        } message: {
+            Text(NSLocalizedString("请在系统 设置 → Lumory → 通知 中开启,Lumory 才能在你设定的时间提醒你写日记。", comment: "Notification denied message"))
+        }
+    }
+
+    private var reminderToggleBinding: Binding<Bool> {
+        Binding(
+            get: { reminderService.isEnabled },
+            set: { newValue in
+                guard !reminderToggleInFlight else { return }
+                reminderToggleInFlight = true
+                Task { @MainActor in
+                    defer { reminderToggleInFlight = false }
+                    if newValue {
+                        let ok = await reminderService.enable()
+                        if !ok {
+                            showReminderDeniedAlert = true
+                        }
+                    } else {
+                        reminderService.disable()
+                    }
+                }
+            }
+        )
+    }
+
+    // 以下 3 个 Binding 不再包 Task —— update* 已是 sync,Binding setter 由 SwiftUI 在主线程
+    // 调,直接 sync 调即可。包 Task 反而让快速连点的 setter 排进异步队列,前一次还没生效用户
+    // 又点了,空挂任务。同时 toggleBinding 那里的 inflight gate 模式不需要扩展到这 3 个 ——
+    // 这些都是纯 @Published 写 + requestReschedule(内部 gen 自带去抖)。
+    private var frequencyBinding: Binding<ReminderFrequency> {
+        Binding(
+            get: { reminderService.frequency },
+            set: { newValue in
+                reminderService.updateFrequency(newValue)
+            }
+        )
+    }
+
+    private var contextualBodyBinding: Binding<Bool> {
+        Binding(
+            get: { reminderService.useContextualBody },
+            set: { newValue in
+                reminderService.updateUseContextualBody(newValue)
+            }
+        )
+    }
+
+    private var reminderTimeBinding: Binding<Date> {
+        Binding(
+            get: {
+                var comps = DateComponents()
+                comps.hour = reminderService.hour
+                comps.minute = reminderService.minute
+                return Calendar.current.date(from: comps) ?? Date()
+            },
+            set: { newValue in
+                let comps = Calendar.current.dateComponents([.hour, .minute], from: newValue)
+                reminderService.updateTime(
+                    hour: comps.hour ?? 21,
+                    minute: comps.minute ?? 0
+                )
+            }
+        )
     }
 
     // MARK: - Data
 
     @ViewBuilder
     private var dataSection: some View {
-        Section(header: sectionHeader(NSLocalizedString("数据", comment: "Data"))) {
+        Section(header: Text(NSLocalizedString("数据", comment: "Data"))) {
             Button {
                 showImportSheet = true
             } label: {
@@ -163,35 +361,8 @@ struct SettingsView: View {
                 }
                 Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
             } message: {
-                Text(NSLocalizedString("此操作无法撤销。", comment: "Cannot undo"))
+                Text(NSLocalizedString("此操作无法撤销。已合并的主题分组也会一并清除。", comment: "Delete all undo + alias warning"))
             }
-        }
-    }
-
-    // MARK: - iCloud
-
-    @ViewBuilder
-    private var syncSection: some View {
-        Section(header: sectionHeader("iCloud")) {
-            Button {
-                performManualSync()
-            } label: {
-                HStack {
-                    settingsLabel(
-                        NSLocalizedString("立即同步", comment: "Sync now"),
-                        icon: "arrow.triangle.2.circlepath",
-                        tint: .accentColor
-                    )
-                    Spacer()
-                    if isSyncing {
-                        ProgressView()
-                    } else if syncMessage != nil {
-                        Image(systemName: syncStatusIcon)
-                            .foregroundStyle(syncStatusTint)
-                    }
-                }
-            }
-            .disabled(isSyncing)
         }
     }
 
@@ -199,7 +370,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var languageSection: some View {
-        Section(header: sectionHeader(NSLocalizedString("语言", comment: "Language"))) {
+        Section(header: Text(NSLocalizedString("语言", comment: "Language"))) {
             Picker("", selection: $appLanguage) {
                 Text("简体中文").tag("zh-Hans")
                 Text("English (US)").tag("en")
@@ -213,7 +384,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var advancedSection: some View {
-        Section(header: sectionHeader(NSLocalizedString("进阶", comment: "Advanced"))) {
+        Section(header: Text(NSLocalizedString("进阶", comment: "Advanced"))) {
             NavigationLink {
                 AdvancedSettingsView(isSettingsOpen: $isSettingsOpen)
                     .environment(\.managedObjectContext, viewContext)
@@ -231,7 +402,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var aboutSection: some View {
-        Section(header: sectionHeader(NSLocalizedString("关于", comment: "About"))) {
+        Section(header: Text(NSLocalizedString("关于", comment: "About"))) {
             if let contactURL = URL(string: "mailto:me@limingyi.com") {
                 Link(destination: contactURL) {
                     settingsLabel(
@@ -245,14 +416,6 @@ struct SettingsView: View {
     }
 
     // MARK: - Small helpers
-
-    private func sectionHeader(_ text: String) -> some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .textCase(.uppercase)
-            .tracking(0.8)
-            .foregroundStyle(.secondary)
-    }
 
     private func settingsLabel(_ title: String, icon: String, tint: Color) -> some View {
         Label {
@@ -270,14 +433,6 @@ struct SettingsView: View {
         let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
         return "\(short) (\(build))"
-    }
-
-    private var syncStatusIcon: String {
-        syncMonitor.syncStatus == .synced ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-    }
-
-    private var syncStatusTint: Color {
-        syncMonitor.syncStatus == .synced ? Color.moodSpectrum(value: 0.85) : .orange
     }
 
     /// 很淡的顶部 mood-tinted 渐变，让 Settings 和首页保持同一种空气感。
@@ -306,6 +461,13 @@ struct SettingsView: View {
         }
         do {
             try viewContext.save()
+            // 批量删除会改变当前周期是否已完成,需要立刻重排本地提醒。
+            ReminderService.shared.requestReschedule()
+            // 清掉 alias resolver state(pending / groups / coolUntil)+ prompt cache,
+            // 否则 banner 还会弹引用已删 entry 的建议、ReminderService 通知 body 还会引用
+            // 已死主题词。negativePairs 保留(用户主观判断与 entry 存在与否无关)。
+            ThemeAliasResolver.shared.resetForBulkEntryWipe()
+            PromptSuggestionEngine.shared.clearCache()
         } catch {
             Log.error("[SettingsView] 删除所有日记失败: \(error)", category: .ui)
             viewContext.rollback()
@@ -329,44 +491,6 @@ struct SettingsView: View {
         return true
     }
 
-    private func performManualSync() {
-        // **真的调 CloudKit**，不再是 `save` + 1.5s sleep + 恒假"已同步"。
-        // 老实现让同步异常的用户看到绿色"已同步"，反而掩盖问题。
-        // 现在走 CloudKitSyncMonitor.forceSync()，它会真的和 CloudKit 交互并按事件回调翻状态。
-        isSyncing = true
-        syncMessage = nil
-        syncMonitor.forceSync()
-
-        // 监听 syncMonitor 的状态变化；带 6s 超时兜底，避免长久 spin。
-        Task { @MainActor in
-            let deadline = Date().addingTimeInterval(6.0)
-            while Date() < deadline {
-                if syncMonitor.syncStatus == .synced {
-                    isSyncing = false
-                    syncMessage = NSLocalizedString("已同步", comment: "Synced")
-                    #if canImport(UIKit)
-                    HapticManager.shared.click()
-                    #endif
-                    break
-                }
-                if syncMonitor.syncStatus == .error || syncMonitor.syncStatus == .networkUnavailable ||
-                    syncMonitor.syncStatus == .notSignedIn {
-                    isSyncing = false
-                    syncMessage = syncMonitor.errorMessage ?? NSLocalizedString("同步失败", comment: "Sync failed")
-                    Log.error("[SettingsView] 手动同步失败: \(syncMonitor.syncStatus)", category: .ui)
-                    break
-                }
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
-            // 超时：不强报错，用户可以再试一次
-            if isSyncing {
-                isSyncing = false
-            }
-            // 3 秒后清掉提示
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            syncMessage = nil
-        }
-    }
 }
 
 private struct EntryAttachmentSnapshot: Sendable {
@@ -390,6 +514,7 @@ struct SettingsView_Previews: PreviewProvider {
 private struct AdvancedSettingsView: View {
     @Binding var isSettingsOpen: Bool
     @Environment(\.managedObjectContext) private var viewContext
+    @EnvironmentObject private var syncMonitor: CloudKitSyncMonitor
 
     @State private var isRunningDiagnostic = false
     @State private var showDiagnosticSheet = false
@@ -397,6 +522,11 @@ private struct AdvancedSettingsView: View {
 
     @State private var showDatabaseRecoveryAlert = false
     @State private var isRecoveringDatabase = false
+
+    // 立即同步:从主 Settings 搬来,跟"同步诊断"语义连贯,放在"诊断与修复"段顶部 ——
+    // 用户察觉同步异常时通常先点这个("再同步一次试试"),再升级到诊断 / 修复。
+    @State private var isSyncing = false
+    @State private var syncMessage: String?
 
     var body: some View {
         Form {
@@ -427,10 +557,34 @@ private struct AdvancedSettingsView: View {
     @ViewBuilder
     private var troubleshootingSection: some View {
         Section(
-            header: header(NSLocalizedString("诊断与修复", comment: "Diagnose & repair")),
+            header: Text(NSLocalizedString("诊断与修复", comment: "Diagnose & repair")),
             footer: Text(NSLocalizedString("只有同步出问题 / 数据显示异常时才需要用到这一层。",
                                            comment: "Troubleshooting footer"))
         ) {
+            Button {
+                performManualSync()
+            } label: {
+                HStack {
+                    Label {
+                        Text(NSLocalizedString("立即同步", comment: "Sync now"))
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(Color.accentColor)
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(width: 24)
+                    }
+                    Spacer()
+                    if isSyncing {
+                        ProgressView()
+                    } else if syncMessage != nil {
+                        Image(systemName: syncStatusIcon)
+                            .foregroundStyle(syncStatusTint)
+                    }
+                }
+            }
+            .disabled(isSyncing)
+
             Button {
                 runSyncDiagnostic()
             } label: {
@@ -474,21 +628,13 @@ private struct AdvancedSettingsView: View {
     @ViewBuilder
     private var perServiceIndexSection: some View {
         Section(
-            header: header(NSLocalizedString("分项索引", comment: "Per-service index")),
-            footer: Text(NSLocalizedString("想只跑其中一个时用。常规升级请用主页的『一键重建索引』。",
+            header: Text(NSLocalizedString("分项索引", comment: "Per-service index")),
+            footer: Text(NSLocalizedString("想只跑其中一个时用。常规升级请用主页的『重建全部 AI 分析』。",
                                            comment: "Per-service footer"))
         ) {
             EmbeddingBackfillRow()
             ThemeBackfillRow()
         }
-    }
-
-    private func header(_ text: String) -> some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .textCase(.uppercase)
-            .tracking(0.8)
-            .foregroundStyle(.secondary)
     }
 
     // MARK: Actions
@@ -521,6 +667,53 @@ private struct AdvancedSettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var syncStatusIcon: String {
+        syncMonitor.syncStatus == .synced ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+    }
+
+    private var syncStatusTint: Color {
+        syncMonitor.syncStatus == .synced ? Color.moodSpectrum(value: 0.85) : .orange
+    }
+
+    private func performManualSync() {
+        // **真的调 CloudKit**，不是 `save` + 1.5s sleep + 恒假"已同步"。
+        // 老实现让同步异常的用户看到绿色"已同步"，反而掩盖问题。
+        // 走 CloudKitSyncMonitor.forceSync() 真的和 CloudKit 交互并按事件回调翻状态。
+        isSyncing = true
+        syncMessage = nil
+        syncMonitor.forceSync()
+
+        // 监听 syncMonitor 的状态变化；带 6s 超时兜底，避免长久 spin。
+        Task { @MainActor in
+            let deadline = Date().addingTimeInterval(6.0)
+            while Date() < deadline {
+                if syncMonitor.syncStatus == .synced {
+                    isSyncing = false
+                    syncMessage = NSLocalizedString("已同步", comment: "Synced")
+                    #if canImport(UIKit)
+                    HapticManager.shared.click()
+                    #endif
+                    break
+                }
+                if syncMonitor.syncStatus == .error || syncMonitor.syncStatus == .networkUnavailable ||
+                    syncMonitor.syncStatus == .notSignedIn {
+                    isSyncing = false
+                    syncMessage = syncMonitor.errorMessage ?? NSLocalizedString("同步失败", comment: "Sync failed")
+                    Log.error("[AdvancedSettings] 手动同步失败: \(syncMonitor.syncStatus)", category: .ui)
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            // 超时:不强报错,用户可以再试一次
+            if isSyncing {
+                isSyncing = false
+            }
+            // 3 秒后清掉提示
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            syncMessage = nil
         }
     }
 }
@@ -585,15 +778,14 @@ private struct OneClickRebuildRow: View {
         HStack {
             Label {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(NSLocalizedString("一键重建索引", comment: "One-click rebuild"))
-                        .font(.body.weight(.medium))
+                    Text(NSLocalizedString("重建全部 AI 分析", comment: "Rebuild all AI analysis"))
+                        .foregroundStyle(Color.primary)
                     Text(statusText)
                         .font(.caption)
                         .foregroundColor(statusColor)
                 }
             } icon: {
                 Image(systemName: stageIcon)
-                    .imageScale(.large)
                     .symbolRenderingMode(.hierarchical)
                     .foregroundColor(stageIconColor)
                     .frame(width: 24)
@@ -656,7 +848,7 @@ private struct OneClickRebuildRow: View {
                 #endif
                 Task { await runAll() }
             } label: {
-                Text(NSLocalizedString("一键开始", comment: "Start one-click"))
+                Text(NSLocalizedString("开始", comment: "Start"))
                     .font(.caption.weight(.semibold))
             }
             .buttonStyle(.glassProminent)
@@ -692,10 +884,10 @@ private struct OneClickRebuildRow: View {
                 if isCountingPending {
                     return NSLocalizedString("正在检查待索引条目…", comment: "Checking pending")
                 }
-                return NSLocalizedString("对存量日记跑一遍最新的 AI 管线", comment: "One-click idle subtitle")
+                return NSLocalizedString("用最新的 AI 重新分析所有日记", comment: "One-click idle subtitle")
             }
             if pendingCount == 0 {
-                return NSLocalizedString("索引已是最新,无需重建 ✓", comment: "Up to date")
+                return NSLocalizedString("索引已是最新,无需重建", comment: "Up to date")
             }
             // 用"项"而不是"条" —— pendingCount 是主题待修 + 向量待补的**和**,
             // 一篇日记可能两边都需要,会被算两次。"项"更诚实(任务数,不是日记数)。
@@ -710,9 +902,15 @@ private struct OneClickRebuildRow: View {
         case .suggestions:
             return NSLocalizedString("第 3 / 3 步：生成个性化提示词…", comment: "One-click stage 3")
         case .done:
-            return NSLocalizedString("索引已是最新 ✓", comment: "One-click done")
+            return NSLocalizedString("索引已是最新", comment: "One-click done")
         case .failed(let message):
-            return String(format: NSLocalizedString("部分步骤失败：%@", comment: "One-click failed"), message)
+            // 失败原因可能是:网络挂、后端 5xx、AI rate-limit、JSON 解析错。
+            // 用户视角无法区分,统一提示"先检查网络再重试"——网络稳定下重试基本能恢复,
+            // 真 AI 错(rate-limit / 5xx)隔一会儿后端也会自愈。
+            return String(
+                format: NSLocalizedString("部分步骤失败:%@。请检查网络后重试。", comment: "One-click failed with retry hint"),
+                message
+            )
         }
     }
 
@@ -814,13 +1012,13 @@ private struct EmbeddingBackfillRow: View {
             Label {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(NSLocalizedString("生成语义索引", comment: "Build embedding index"))
+                        .foregroundStyle(Color.primary)
                     Text(statusText)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             } icon: {
                 Image(systemName: "sparkle.magnifyingglass")
-                    .imageScale(.large)
                     .symbolRenderingMode(.hierarchical)
                     .foregroundColor(.accentColor)
                     .frame(width: 24)
@@ -863,6 +1061,9 @@ private struct EmbeddingBackfillRow: View {
     }
 
     private func start() {
+        // UI .disabled(isOtherBackfillActive) 已守 button,但 accessibility action /
+        // UITest 可绕过 disabled state 调到 action body。defense-in-depth。
+        guard !isOtherBackfillActive else { return }
         Task { await service.backfillAll() }
     }
 }
@@ -889,13 +1090,13 @@ private struct ThemeBackfillRow: View {
             Label {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(NSLocalizedString("刷新主题", comment: "Refresh themes"))
+                        .foregroundStyle(Color.primary)
                     Text(statusText)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             } icon: {
                 Image(systemName: "tag.square.fill")
-                    .imageScale(.large)
                     .symbolRenderingMode(.hierarchical)
                     .foregroundColor(.accentColor)
                     .frame(width: 24)
@@ -911,11 +1112,13 @@ private struct ThemeBackfillRow: View {
             } else {
                 Menu {
                     Button {
+                        guard !isOtherBackfillActive else { return }
                         Task { await service.backfillProblems() }
                     } label: {
                         Label(NSLocalizedString("只修有问题的", comment: "Backfill problems only"), systemImage: "wand.and.stars")
                     }
                     Button {
+                        guard !isOtherBackfillActive else { return }
                         showAllConfirm = true
                     } label: {
                         Label(NSLocalizedString("全部重抽", comment: "Backfill all"), systemImage: "arrow.clockwise")
@@ -931,6 +1134,7 @@ private struct ThemeBackfillRow: View {
         .alert(NSLocalizedString("重抽所有日记的主题？", comment: "Backfill all confirm title"),
                isPresented: $showAllConfirm) {
             Button(NSLocalizedString("确定", comment: "Confirm"), role: .destructive) {
+                guard !isOtherBackfillActive else { return }
                 Task { await service.backfillAll() }
             }
             Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}

@@ -49,7 +49,6 @@
 "导入日记" = "Import Diaries";
 "导入" = "Import";
 "将你的日记粘贴到下面的文本框，支持多篇日记连贴。" = "Paste your diary entries below. Multiple entries supported.";
-"日历视图" = "Calendar View";
 
 "iCloud 同步" = "iCloud Sync";
 "同步数据" = "Sync Data";
@@ -78,7 +77,6 @@
 "返回" = "Back";
 "在此粘贴日记内容…" = "Paste diaries here...";
 "粘贴" = "Paste";
-"完成" = "Done";
 "将你的日记粘贴到下面，支持多篇日记连贴。" = "Paste your diary entries below. Multiple entries supported.";
 "删除日记" = "Delete Entry";
 "确定要删除这篇日记吗？此操作无法撤销。" = "Are you sure you want to delete this entry? This action cannot be undone.";
@@ -122,8 +120,6 @@
 "测试中..." = "Testing...";
 
 /* Import/Export */
-"导入日记" = "Import Diaries";
-"导入" = "Import";
 "导出日记" = "Export Diary";
 "导出" = "Export";
 "导出后将生成一个文本文件，包含所有日记的日期、心情和内容。" = "A text file will be generated containing the date, mood, and content of all entries.";
@@ -146,7 +142,6 @@
 "主页" = "Home";
 "日历" = "Calendar";
 "心情分析" = "Mood Analysis";
-"设置" = "Settings";
 "搜索日记..." = "Search entries...";
 "导航" = "Navigation";
 "今天" = "Today";
@@ -402,3 +397,125 @@
 "sync.diagnostic.report.generated" = "Generated: %@";
 "sync.diagnostic.report.status" = "Overall Status: %@";
 "sync.diagnostic.report.noIssues" = "No issues detected. Sync should be working properly.";
+
+// MARK: - Theme alias system (banner / picker / management page / Insights merge)
+
+"主题别名" = "Theme Aliases";
+"合并主题" = "Merge Themes";
+"AI 与索引" = "AI & Indexing";
+"通知正文会引用近期日记里的人和事(可能在锁屏显示)" = "Notification preview may reference people and topics from recent entries (visible on lock screen).";
+"此操作无法撤销。已合并的主题分组也会一并清除。" = "This action cannot be undone. Your merged theme groups will also be reset.";
+"合并主题「%@」到「%@」?" = "Merge \"%@\" into \"%@\"?";
+"以下别名也会一起搬到目标组:%@" = "These aliases will move along too: %@";
+"继续合并" = "Continue";
+"AI 扫描" = "AI Scan";
+"扫描已有主题" = "Scan Existing Themes";
+"重新扫描" = "Rescan";
+"扫描中…" = "Scanning…";
+"AI 正在分析…" = "AI analyzing…";
+"正在统计标签…" = "Counting tags…";
+"正在整理建议…" = "Organizing suggestions…";
+"扫到 %d 条建议" = "Found %d suggestions";
+"待审 (%d)" = "Pending (%d)";
+"已合并 (%d)" = "Merged (%d)";
+"否决记录" = "Rejected";
+"高置信" = "High";
+"中置信" = "Medium";
+"「%@」=%@?" = "Is \"%@\" the same as %@?";
+"「%@」是不是 %@?" = "Is \"%@\" the same as %@?";
+"保存为 %@" = "Save as %@";
+"合并到 %@" = "Merge into %@";
+"把「%@」保存为其他主题" = "Save \"%@\" as another theme";
+"把「%@」合并到其他主题" = "Merge \"%@\" into another theme";
+"忽略" = "Ignore";
+"折叠" = "Collapse";
+"拆开" = "Unmerge";
+"从这组拆出" = "Unmerge from this group";
+"%d 条主题建议" = "%d theme suggestions";
+"%d 个别名" = "%d aliases";
+"共 %d 条" = "%d total";
+"%d 次" = "%d times";
+"M月d日" = "MMM d";
+"保存为" = "Save as";
+"合并到" = "Merge into";
+"把这个标签保存为" = "Save this tag as";
+"把这个标签合并到" = "Merge this tag into";
+"搜索 / 输入新主题名" = "Search or type a new theme name";
+"用「%@」作为新主题名" = "Use \"%@\" as a new theme name";
+"合并到新主题「%@」" = "Merge into new theme \"%@\"";
+"还没在你的日记里出现过" = "Hasn't appeared in your diary yet";
+"已保存为「%@」" = "Saved as \"%@\"";
+"已合并到「%@」" = "Merged into \"%@\"";
+"没有匹配的主题" = "No matching themes";
+"没有找到可能合并的主题。" = "No themes found that could be merged.";
+"还没有合并过的主题" = "No merged themes yet";
+"AI 扫描会找出意思相近的主题,比如昵称、同义词或中英文写法。确认后,洞察和回顾会把它们当作同一个主题。" = "AI scanning finds themes that mean the same thing, such as nicknames, synonyms, or Chinese and English spellings. After you confirm them, Insights and Review treat them as one theme.";
+"清空否决记录" = "Clear rejected records";
+"清空所有否决记录?" = "Clear all rejected records?";
+"点过『不是』的对子被永久跳过。如果想让 AI 重新考虑这些对子(下次扫描时再次提议),清空这里。" = "Pairs you tapped \"No\" on are permanently skipped. Clearing lets the AI reconsider them on the next scan.";
+"下次扫描时,之前点过『不是』的对子会重新被 AI 考虑。" = "On the next scan, previously rejected pairs will be reconsidered by the AI.";
+"全部清空" = "Clear All";
+"删除主题「%@」?" = "Delete theme \"%@\"?";
+"将从所有日记里抹掉这个主题(包括它的所有别名)。原日记内容不变。此操作不可撤销。" = "This will remove the theme (and all its aliases) from every diary entry. The entry text itself is preserved. This cannot be undone.";
+"删除「%@」失败,可能是磁盘空间不足或同步冲突。请稍后重试。" = "Failed to delete \"%@\". Disk may be full or there's a sync conflict. Please retry later.";
+"删除失败" = "Delete Failed";
+"更多操作" = "More";
+
+// MARK: - Reminder service
+
+"每天" = "Daily";
+"每 3 天" = "Every 3 days";
+"每周" = "Weekly";
+"今天的故事记一笔吧" = "Write down today's story";
+"过去几天有什么想写下来的吗?" = "Anything you'd like to write down from the past few days?";
+"已经 %d 天没记了,记一笔吧" = "It's been %d days — write something today";
+"已经 %d 天没记了,今天写一笔?" = "It's been %d days — care to write today?";
+"本周还没记呢,今天写一笔吧" = "You haven't written this week yet — write today";
+"本周还没记呢,已经 %d 天没写了" = "Nothing this week — %d days silent";
+"已把「%@」合并到「%@」" = "Merged \"%@\" into \"%@\"";
+"它们已经是同一组了" = "They're already in the same group";
+"『%@』已经是『%@』的别名" = "\"%@\" is already an alias of \"%@\"";
+"点这里直接保存为「%@」" = "Tap to save as \"%@\" directly";
+"点这里直接合并到「%@」" = "Tap to merge into \"%@\" directly";
+
+// MARK: - Settings rows: reminders + theme alias entry
+
+"提醒" = "Reminders";
+"写日记提醒" = "Diary reminder";
+"频率" = "Frequency";
+"时间" = "Time";
+"通知权限被拒" = "Notifications Denied";
+"打开 设置" = "Open Settings";
+"请在系统 设置 → Lumory → 通知 中开启,Lumory 才能在你设定的时间提醒你写日记。" = "Open System Settings → Lumory → Notifications and enable alerts so Lumory can remind you to write at the time you set.";
+"有待审建议" = "Pending suggestions";
+"把意指同一实体的标签合到一起" = "Group tags that refer to the same entity";
+"待审 %d 条" = "%d pending";
+"已合并 %d 组" = "%d merged";
+"立即同步" = "Sync now";
+"重建全部 AI 分析" = "Rebuild All AI Analysis";
+"部分步骤失败:%@。请检查网络后重试。" = "Some steps failed: %@. Please check your network and try again.";
+"合并到其他主题…" = "Merge into another theme…";
+"删除主题" = "Delete Theme";
+"无法连接到服务器,请稍后再试。" = "Couldn't reach the server. Please try again in a moment.";
+"AI 返回内容无法解析,请稍后再试。" = "Couldn't parse the AI response. Please try again later.";
+"想只跑其中一个时用。常规升级请用主页的『重建全部 AI 分析』。" = "Use these to run a single step. For normal upgrades, use 'Rebuild All AI Analysis' on the main Settings page.";
+"%d 篇" = "%d entries";
+"加载中…" = "Loading…";
+"没找到相关日记" = "No related entries";
+"(空)" = "(empty)";
+"用近期主题作文案" = "Use recent topics";
+"本周期已记" = "Cycle complete";
+"本周期未记" = "Cycle pending";
+"开始" = "Start";
+"主题" = "Themes";
+"情绪故事" = "Mood Story";
+"分项索引" = "Per-item Index";
+"诊断与修复" = "Diagnose & Fix";
+"搜索主题" = "Search themes";
+"把这个主题合并到" = "Merge this theme into";
+"%d 次 · 平均情绪 %d" = "%d entries · avg mood %d";
+"主题 %@，出现 %d 次，平均情绪 %d 分" = "Theme %@, appeared %d times, avg mood %d";
+"主题 %@，出现 %d 次，情绪起伏 %d 到 %d 分" = "Theme %@, appeared %d times, mood from %d to %d";
+"已删除主题「%@」" = "Theme \"%@\" deleted";
+"用最新的 AI 重新分析所有日记" = "Re-analyze all entries with the latest AI";
+"索引已是最新,无需重建" = "Index is up to date — no rebuild needed";

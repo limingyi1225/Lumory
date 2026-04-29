@@ -1,0 +1,335 @@
+import Foundation
+import CoreData
+
+// MARK: - ThemeAliasJudgeService
+//
+// 把"AI 判断 → 入待审队列"这条流水线封起来。两条入口:
+//   1) 写日记后(HomeView / DiaryDetailView)调 `judgeAfterWrite(...)`
+//   2) Settings 里"扫描已有主题"按钮调 `scanAllHistory(...)`
+//
+// 都是 @MainActor —— 与 ThemeBackfillService / EmbeddingBackfillService 同样的
+// "MainActor 隔离 runningTask" 模式,避免多入口 race。
+
+@MainActor
+final class ThemeAliasJudgeService: ObservableObject {
+    static let shared = ThemeAliasJudgeService()
+
+    /// 一次 scan 的进度(供 management view 显示)。on-write 路径不暴露进度,因为只跑一次 LLM 调用。
+    struct ScanProgress: Equatable {
+        let isRunning: Bool
+        let phase: Phase
+        let suggestionsAdded: Int
+        enum Phase: Equatable {
+            case idle
+            case fetchingInventory
+            case judging
+            case applying
+            case done
+            case failed(String)
+        }
+    }
+
+    @Published private(set) var scanProgress = ScanProgress(
+        isRunning: false, phase: .idle, suggestionsAdded: 0
+    )
+
+    private let persistence: PersistenceController
+    private let ai: AIServiceProtocol
+    private let resolver: ThemeAliasResolver
+
+    private var scanTask: Task<Void, Never>?
+    /// scanAllHistory race 兜底用的世代号。每次创建新 task 时 +1;trailing closure 比较
+    /// 捕获的 myGen 与当前 scanGen,只有匹配才清 scanTask。`var newTask: Task!` 内部
+    /// self-reference 模式在 Swift 6 strict mode 会触发 "mutated after capture" warning。
+    private var scanGen: Int = 0
+
+    /// `judgeAfterWrite` 的软节流。每次 ai.judgeThemeAliases 都把整个 100-150 主题 inventory
+    /// + 80 字符 summary snippet 上送 OpenAI proxy。无频率限制时,用户连续写日记(补昨天的、
+    /// 一天 10 篇)会触发 10 次完整 inventory 上送,白付 cost + 频繁 PII 暴露。
+    /// minJudgeInterval 内的二次调用直接 return(actuallyNew 短路 / inventory 短路 / AI 调用 全跳过)。
+    /// 60s 是经验值:用户写完一篇后 1 分钟内通常不会写出**完全不同**的新主题,
+    /// 即使 60s 内连续写 5 篇,真正新主题也会在第 6 分钟的下次 judge 一次性 cover。
+    private var lastJudgeAfterWriteAt: Date?
+    private let minJudgeInterval: TimeInterval = 60
+
+    init(
+        persistence: PersistenceController = .shared,
+        ai: AIServiceProtocol = OpenAIService.shared,
+        resolver: ThemeAliasResolver? = nil
+    ) {
+        self.persistence = persistence
+        self.ai = ai
+        // Swift 6: 默认参数表达式是 nonisolated context,直接写 `.shared` 命中 MainActor 错误。
+        // init 本身已经被 @MainActor 隔离(class 标签),内部访问 .shared 合法。
+        self.resolver = resolver ?? ThemeAliasResolver.shared
+    }
+
+    // MARK: - On-write entry point
+
+    /// 写完一篇日记后,把"刚抽出来的 newTags"和"用户已有库存"喂给 AI judge,
+    /// 把 high/medium 匹配落入 resolver 的 pending 队列。
+    /// **不阻塞**:HomeView 的 save 流程 fire-and-forget 调它,失败/空都安全。
+    /// excludingEntryID 是刚保存的这篇,用来从 inventory 里去掉(避免它和自己 alias)。
+    func judgeAfterWrite(
+        entryID: UUID,
+        newTags rawNewTags: [String]
+    ) async {
+        // 软节流:60s 内 second call 直接 return,避免连续写日记时反复全 inventory 上送。
+        // 注意:不在 entryID 维度去重 —— 同一个 entry 重复写也只 judge 一次足够。
+        if let last = lastJudgeAfterWriteAt, Date().timeIntervalSince(last) < minJudgeInterval {
+            Log.info("[ThemeAliasJudge] judgeAfterWrite: 60s 内已 judge 过,跳过(entry \(entryID))", category: .ai)
+            return
+        }
+        lastJudgeAfterWriteAt = Date()
+
+        // 把 "已经在 group 里的别名 / 已经是 canonical" 排掉,留下真正"新出现的"
+        let known = resolver.knownLowercasedTagsCovered()
+        let cleanedNewTags = rawNewTags
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .filter { !known.contains($0.lowercased()) }
+            .uniqued(byKey: { $0.lowercased() })
+
+        guard !cleanedNewTags.isEmpty else { return }
+
+        // **关于 Task.isCancelled 守卫的取舍**:本函数被调用方以 fire-and-forget 模式调
+        // (`Task { await judgeAfterWrite(...) }`,caller 不持 Task handle),没有外部 cancel
+        // 信号注入,Task.isCancelled 永远为 false。本来 round-1 在每个 await 后都加了 isCancelled
+        // 守卫,但全是 dead code 反而误导阅读者以为这函数能 cancel。删掉。
+        // **stale-write 防御仍保留**:`entryStillExists` guard 是抓"用户在 judge AI call 期间删了
+        // 当前 entry"的真实场景,跟 task cancellation 无关。
+
+        // 生成 inventory:扫所有 entry 的 themes,数频次,留最近 sample。
+        // 排除当前 entryID(它的 themes 就是 newTags,要避免"自己和自己 alias"的退化)。
+        let inventory = await fetchInventory(excluding: entryID)
+
+        // inventory 里如果某个 tag 的 lowercased 和 newTag 完全相同(逐字命中),
+        // 说明用户以前就用过同样的 tag,根本不是"新出现"——judge 不会找出 alias,跳过。
+        let inventoryKeys = Set(inventory.map { $0.tag.lowercased() })
+        let actuallyNew = cleanedNewTags.filter { !inventoryKeys.contains($0.lowercased()) }
+        guard !actuallyNew.isEmpty else { return }
+
+        let matches = await ai.judgeThemeAliases(
+            newTags: actuallyNew,
+            inventory: inventory
+        )
+
+        guard !matches.isEmpty else { return }
+
+        // stale-write 防御:judge 期间(数秒~数十秒)用户可能已经把刚写的 entry 删了。
+        // 此时仍 enqueue 会留 (entryID -> 已 tombstoned) 的 ghost suggestion,management view
+        // fetch sample entry 时拿不到,显示空白卡(codex P2 #13 fix)。
+        let entryStillExists = await persistence.container.performBackgroundTask { context in
+            let req: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            req.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+            req.fetchLimit = 1
+            return ((try? context.count(for: req)) ?? 0) > 0
+        }
+        guard entryStillExists else {
+            Log.info("[ThemeAliasJudge] judgeAfterWrite: entry \(entryID) 已被删,跳过 enqueue", category: .ai)
+            return
+        }
+
+        // 落 pending(过滤 negativePairs / 已合并 / 重复)。
+        var added = 0
+        for m in matches {
+            // resolver.enqueue 内部已经过滤,但提前过滤一遍少做一次 lookup
+            if resolver.isNegative(m.newTag, m.canonical) { continue }
+            let sampleIDs = await sampleEntryIDs(forTag: m.canonical, limit: 3)
+            let suggestion = PendingSuggestion(
+                newTag: m.newTag,
+                canonicalGuess: m.canonical,
+                confidence: PendingSuggestion.Confidence(judgeConfidence: m.confidence),
+                sampleEntryIds: sampleIDs,
+                source: .onWrite(entryID: entryID)
+            )
+            if resolver.enqueue(suggestion) { added += 1 }
+        }
+
+        Log.info("[ThemeAliasJudge] on-write: 新 tag \(actuallyNew.count), 入队 \(added)", category: .ai)
+    }
+
+    // MARK: - One-shot scan entry point
+
+    @discardableResult
+    func scanAllHistory() -> Task<Void, Never> {
+        // 用 scanProgress.isRunning 作为 gate(而不是 scanTask 是否非 nil)——
+        // 之前的版本:scanTask 完成后**没清空**,下次 if-let 仍真,反复点击退化成 noop。
+        // 现在:只要 progress 不是 isRunning,就允许新建一次 scan。
+        if scanProgress.isRunning, let scanTask {
+            return scanTask
+        }
+        // superreview P1 #5 fix:
+        // runScan 终止时把 scanProgress.isRunning 置 false,然后 trailing closure 清 scanTask。
+        // 旧实现 trailing 是 `await MainActor.run { self?.scanTask = nil }`,在 isRunning=false
+        // 后到 scanTask=nil 之间有 MainActor 重调度窗口,期间用户再点 → gate 通过 → 新 Task
+        // T2 写入 scanTask → 老 Task 的 trailing 闭包执行 → **清掉 T2 的 handle**。
+        // 修法:用世代号兜底 —— 闭包捕获 `let myGen`,完成后只在 `scanGen == myGen` 时清,
+        // 老 task 拿到的是 stale gen → 不会误清新 task 的 handle。
+        scanGen &+= 1
+        let myGen = scanGen
+        let task: Task<Void, Never> = Task { [weak self] in
+            await self?.runScan()
+            if let self, self.scanGen == myGen {
+                self.scanTask = nil
+            }
+        }
+        scanTask = task
+        return task
+    }
+
+    func cancelScan() {
+        scanTask?.cancel()
+        scanTask = nil
+        if scanProgress.isRunning {
+            scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: 0)
+        }
+    }
+
+    private func runScan() async {
+        scanProgress = ScanProgress(isRunning: true, phase: .fetchingInventory, suggestionsAdded: 0)
+
+        // 全部 distinct themes(不排除任何 entry)
+        let inventory = await fetchInventory(excluding: nil)
+        if Task.isCancelled {
+            scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: 0)
+            return
+        }
+        guard inventory.count >= 2 else {
+            scanProgress = ScanProgress(isRunning: false, phase: .done, suggestionsAdded: 0)
+            return
+        }
+
+        scanProgress = ScanProgress(isRunning: true, phase: .judging, suggestionsAdded: 0)
+
+        // 网络/后端/解析失败 → throw → 显示 .failed(reason);"真的 0 条" → return [] → .done w/ 0
+        let groups: [ThemeAliasJudgeGroup]
+        do {
+            groups = try await ai.scanThemeAliasGroups(candidates: inventory)
+        } catch {
+            Log.error("[ThemeAliasJudge] scan failed: \(error)", category: .ai)
+            let reason = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            scanProgress = ScanProgress(isRunning: false, phase: .failed(reason), suggestionsAdded: 0)
+            return
+        }
+        if Task.isCancelled {
+            scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: 0)
+            return
+        }
+
+        scanProgress = ScanProgress(isRunning: true, phase: .applying, suggestionsAdded: 0)
+
+        var added = 0
+        // 把 group 拆成 alias-级别的 PendingSuggestion(每个 alias 一条),用户可以单独确认/否决。
+        // **codex P2 fix**:之前 inner loop 看到 cancel 只 break 内层,外层 for g in groups 继续,
+        // 后续 group 的 suggestions 仍会入队。改成所有 cancel 检查点都 return。
+        for g in groups {
+            if Task.isCancelled {
+                scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: added)
+                return
+            }
+            let canonical = g.canonical
+            for alias in g.aliases {
+                if Task.isCancelled {
+                    scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: added)
+                    return
+                }
+                if resolver.isNegative(alias, canonical) { continue }
+                let sampleIDs = await sampleEntryIDs(forTag: canonical, limit: 3)
+                if Task.isCancelled {
+                    scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: added)
+                    return
+                }
+                let suggestion = PendingSuggestion(
+                    newTag: alias,
+                    canonicalGuess: canonical,
+                    confidence: PendingSuggestion.Confidence(judgeConfidence: g.confidence),
+                    sampleEntryIds: sampleIDs,
+                    source: .scan
+                )
+                if resolver.enqueue(suggestion) { added += 1 }
+            }
+        }
+
+        Log.info("[ThemeAliasJudge] scan: 入队 \(added)", category: .ai)
+        scanProgress = ScanProgress(isRunning: false, phase: .done, suggestionsAdded: added)
+    }
+
+    // MARK: - DB helpers
+
+    /// 拿全量 themes 直方图。`excluding` 是某 entry 的 UUID(on-write 路径排掉自己;scan 不排)。
+    /// 不排"已合并的别名"——本来就要让 judge 看到 Abby 和 宝贝 共存才能判出对子。
+    private func fetchInventory(excluding excludeID: UUID?) async -> [ThemeAliasJudgeCandidate] {
+        await persistence.container.performBackgroundTask { context in
+            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            request.predicate = NSPredicate(format: "themes != nil AND themes != %@", "")
+            request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+            request.fetchBatchSize = 200
+            guard let entries = try? context.fetch(request) else { return [] }
+
+            var counts: [String: Int] = [:]
+            var samples: [String: String] = [:]
+            for entry in entries {
+                if let excludeID, entry.id == excludeID { continue }
+                let tags = entry.themeArray
+                // **隐私**:snippet 只取 `entry.summary`(已是 AI 总结后的短语,十几个字),
+                // **绝不**回退到 raw `entry.text`。之前的 `summary ?? text` fallback 会把
+                // 整篇日记的前 80 字符发上后端,与"alias 判别只需 tag"的设计意图相悖
+                // (codex P1 #9 fix)。summary 为 nil 时这条 tag 没 snippet,模型靠
+                // tag literal 名字判别已足够。
+                let snippetSource = entry.summary ?? ""
+                for tag in tags where !tag.isEmpty && !InsightsEngine.isBannedTheme(tag) {
+                    counts[tag, default: 0] += 1
+                    if samples[tag] == nil, !snippetSource.isEmpty {
+                        let trimmed = snippetSource.replacingOccurrences(of: "\n", with: " ")
+                        samples[tag] = String(trimmed.prefix(80))
+                    }
+                }
+            }
+            return counts.map { tag, count in
+                ThemeAliasJudgeCandidate(tag: tag, count: count, sampleSnippet: samples[tag])
+            }.sorted { $0.count > $1.count }
+        }
+    }
+
+    /// 给 PendingSuggestion 准备最多 N 条引文的 entry id —— management view 用 id 去 fetch 真 entry 显示卡片。
+    private func sampleEntryIDs(forTag tag: String, limit: Int) async -> [UUID] {
+        await persistence.container.performBackgroundTask { context in
+            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            request.predicate = NSPredicate(format: "themes CONTAINS[c] %@", tag)
+            request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+            request.fetchLimit = limit * 3   // CONTAINS 是子串匹配,可能误命中"Tokyo Japan" 找 "Tokyo",再用 themeArray 精确判断
+            guard let entries = try? context.fetch(request) else { return [] }
+            let exact = entries.filter { entry in
+                entry.themeArray.contains { $0.lowercased() == tag.lowercased() }
+            }
+            return Array(exact.prefix(limit)).compactMap { $0.id }
+        }
+    }
+}
+
+// MARK: - Helpers
+
+private extension PendingSuggestion.Confidence {
+    init(judgeConfidence c: ThemeAliasJudgeMatch.Confidence) {
+        switch c {
+        case .high: self = .high
+        case .medium: self = .medium
+        }
+    }
+
+    init(judgeConfidence c: ThemeAliasJudgeGroup.Confidence) {
+        switch c {
+        case .high: self = .high
+        case .medium: self = .medium
+        }
+    }
+}
+
+private extension Array {
+    func uniqued<Key: Hashable>(byKey key: (Element) -> Key) -> [Element] {
+        var seen = Set<Key>()
+        return filter { seen.insert(key($0)).inserted }
+    }
+}

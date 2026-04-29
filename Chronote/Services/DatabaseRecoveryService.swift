@@ -92,15 +92,23 @@ final class DatabaseRecoveryService {
                 }
             } else {
                 Log.info("[DatabaseRecovery] Successfully recreated store", category: .persistence)
-                
+
                 // Trigger CloudKit sync to restore data
                 self.triggerCloudKitSync(container: container)
-                
+
                 // Post notification for UI refresh
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(name: .databaseRecreated, object: nil)
+                    // DB 重建相当于把所有 entry 拉空(随后 CloudKit 异步重 import)。
+                    // 跟 SettingsView.deleteAllEntries 同样的清理:alias state 与 prompt cache
+                    // 都会引用已不存在的 entry,不清的话 banner / 通知 body 显示死主题。
+                    Task { @MainActor in
+                        ThemeAliasResolver.shared.resetForBulkEntryWipe()
+                        PromptSuggestionEngine.shared.clearCache()
+                        ReminderService.shared.requestReschedule()
+                    }
                 }
-                
+
                 completion(.success(()))
             }
         }

@@ -44,7 +44,10 @@ struct DiaryTextEditor: View {
             // 转录状态指示器
             if isTranscribing {
                 TranscriptionIndicator()
-                    .position(x: 300, y: 30) // Fixed position for macOS
+                    .padding(.top, 12)
+                    .padding(.trailing, 16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .allowsHitTesting(false)
             }
             
             // 错误提示

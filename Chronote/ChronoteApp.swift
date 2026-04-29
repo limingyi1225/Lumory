@@ -11,6 +11,9 @@ import UIKit
 #endif
 import CoreData
 import AVFoundation
+#if canImport(UserNotifications)
+import UserNotifications
+#endif
 
 @main
 struct ChronoteApp: App {
@@ -37,6 +40,9 @@ struct ChronoteApp: App {
         #if canImport(UIKit)
         UITableView.appearance().separatorStyle = .none
         UITableView.appearance().tableFooterView = UIView()
+        #endif
+        #if canImport(UserNotifications)
+        UNUserNotificationCenter.current().delegate = ReminderNotificationRouter.shared
         #endif
 
         // 注意：以前这里有 checkDatabaseHealth()——和 PersistenceController 内部的那条
@@ -287,6 +293,10 @@ struct ChronoteApp: App {
             // background↔active 切换不会反复打 CloudKit;用户主动刷新走 forceSync(),
             // 那条路径绕过冷却。
             syncMonitor.checkCloudKitStatus()
+            // 智能 reminder reschedule:用户可能在别的设备上写了日记(CloudKit 同步过来),
+            // 或者今天 hour:minute 已过应该取消 today schedule。requestReschedule 内部
+            // task cancel + replace,频繁 active/background 切换不会堆 task。
+            ReminderService.shared.requestReschedule()
         case .inactive:
             break
         @unknown default:

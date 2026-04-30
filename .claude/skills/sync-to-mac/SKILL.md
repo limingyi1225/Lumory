@@ -75,16 +75,23 @@ git status                               # 检查本地有没有未提交改动
    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
    git push
    ```
-4. 把 main 同步回 dev,保持 dev 不落后:
+4. 把 dev **重置**对齐 main(不是 merge!),清掉已经 squash 过的 wip 痕迹:
    ```
    git checkout dev
-   git merge main
-   git push
+   git reset --hard origin/main
+   git push --force-with-lease
+   git checkout main                     # 默认留在 main,等下次主动切
    ```
+
+   **为什么 reset 不 merge**:dev 上的 wip commit 已经被 squash 进 main 一条新 SHA 的 commit。
+   `git merge main` 会因为 tree 相同只加个空 merge commit,导致 dev 永远比 main 多两条 dangling
+   commit(history 看着 ahead 但内容相同)。reset 直接对齐,dev 重新当干净的 wip 中转站。
+   `--force-with-lease` 是安全的 force-push:只覆盖你最后看到的状态,对面机器偷偷动过 dev
+   会被拒绝。dev 是个人 wip 分支,这个 trade-off 合理。
 
 ## 安全规则
 
-- **绝不** `git push --force` 到 main(到 dev 时只用 `--force-with-lease`,且要用户主动要求)
+- **绝不** `git push --force` 到 main。dev 上 ship 后的对齐 reset **可以**用 `--force-with-lease`(不是裸 `--force`),因为 dev 是个人 wip 分支且语义上 ship 后理应清空。其他场景动 dev 的 force-with-lease 仍要用户主动要求。
 - **绝不**自动决定 stash:本地有未提交改动遇到 pull / ship,**停下来问**
 - **绝不**在 ship 时用"wip" / 自动生成的语义 message:必须问用户
 - **绝不**删 dev 分支

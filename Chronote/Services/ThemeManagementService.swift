@@ -14,13 +14,19 @@ final class ThemeManagementService: ObservableObject {
 
     private let persistence: PersistenceController
     private let resolver: ThemeAliasResolver
+    /// 注入点 — 默认 `try $0.save()`,**仅测试覆盖 save-failure 路径**用 closure 替换。
+    /// 不抽 protocol 是因为只需要这一个方法,closure DI 比 protocol 简洁。
+    /// `@Sendable` 必要 — closure 在 `performBackgroundTask` 的 Sendable 闭包内调用,跨 actor 边界。
+    private let saveAction: @Sendable (NSManagedObjectContext) throws -> Void
 
     init(
         persistence: PersistenceController = .shared,
-        resolver: ThemeAliasResolver? = nil
+        resolver: ThemeAliasResolver? = nil,
+        saveAction: @escaping @Sendable (NSManagedObjectContext) throws -> Void = { try $0.save() }
     ) {
         self.persistence = persistence
         self.resolver = resolver ?? ThemeAliasResolver.shared
+        self.saveAction = saveAction
     }
 
     struct DeletionOutcome {
@@ -51,6 +57,7 @@ final class ThemeManagementService: ObservableObject {
         // "没 entry 命中"(正常)也可能表示"save 失败"(灾难),无法区分。
         // codex review 指出:保存失败时仍 deleteGroup 会让 alias map 删但 raw themes 留下,
         // 用户感知是"主题没删干净"。区分后只在 succeeded=true 时删 group。
+        let saveAction = self.saveAction  // capture before sendable closure boundary
         let outcome: (success: Bool, affected: Int) = await persistence.container.performBackgroundTask { context in
             // 用户在 viewContext 上正改某条 entry 的 themes / 同步刚拉到一份,跟 bg 删除并发
             // 时,默认 errorMergePolicy 会让 save 抛 NSManagedObjectMergeError → rollback,
@@ -79,7 +86,7 @@ final class ThemeManagementService: ObservableObject {
             }
             if context.hasChanges {
                 do {
-                    try context.save()
+                    try saveAction(context)
                     return (true, changed)
                 } catch {
                     Log.error("[ThemeManagement] deleteTheme save 失败: \(error)", category: .persistence)

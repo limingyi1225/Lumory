@@ -43,6 +43,21 @@ final class ThemeAliasJudgeService: ObservableObject {
     /// self-reference 模式在 Swift 6 strict mode 会触发 "mutated after capture" warning。
     private var scanGen: Int = 0
 
+    // MARK: - Test seams (DEBUG-only)
+
+    #if DEBUG
+    /// 给 race-stale 测试读 scanGen 当前值。
+    var scanGenForTesting: Int { scanGen }
+    /// 给 race-stale 测试读取当前 scanTask handle。
+    var scanTaskForTesting: Task<Void, Never>? { scanTask }
+    /// 给测试**模拟 T2 在 T1 挂起时进入** —— 直接 bump scanGen + 替换 scanTask。
+    /// 用法:T1 挂起在 ai.suspendScan 期间调,模拟"老 T1 的 trailing 闭包不该清掉新 T2 的 handle"。
+    func simulateConcurrentScanStartForTesting(replacementTask: Task<Void, Never>) {
+        scanGen &+= 1
+        scanTask = replacementTask
+    }
+    #endif
+
     /// `judgeAfterWrite` 的软节流。每次 ai.judgeThemeAliases 都把整个 100-150 主题 inventory
     /// + 80 字符 summary snippet 上送 OpenAI proxy。无频率限制时,用户连续写日记(补昨天的、
     /// 一天 10 篇)会触发 10 次完整 inventory 上送,白付 cost + 频繁 PII 暴露。

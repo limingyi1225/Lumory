@@ -109,9 +109,11 @@ final class ScreenshotTests: XCTestCase {
 
         let scroll = app.scrollViews.firstMatch
         if scroll.exists {
-            // 短距 swipe:从屏幕 75% 滑到 35%,刚好把 mood chart 顶出去 + 月历完整露出
+            // **swipe 距离要短**:75%→35% 拉太多,会把月历后面的"主题/关联洞察/WritingHeatmap stats"
+            // 一起拉到屏幕里,导致底部 stats 行被 home indicator 区切掉(2026-04-29 用户抓到)。
+            // 75%→55% 只露出"心情故事曲线被推走 + 月历完整居中",月历下面没有其他卡。
             let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
-            let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+            let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
             start.press(forDuration: 0.05, thenDragTo: end)
             usleep(800_000)
         }

@@ -1800,6 +1800,83 @@ struct ThemeManagementServiceTests {
         #expect(!themes.flatMap { $0 }.contains("Person A"))
         #expect(!themes.flatMap { $0 }.contains("Person A Nickname"))
     }
+
+    /// **B3 — save-failure 分支**:context.save() 抛 → resolver group 必须保留(避免 alias 删了
+    /// 但 raw entry.themes 还在的不一致状态)。`saveAction` closure 注入失败模拟。
+    @Test func deleteTheme_saveFailure_preservesResolverGroupAndReportsFailure() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let context = persistence.container.viewContext
+
+        insertDiaryEntry(
+            context: context,
+            date: makeDate(year: 2024, month: 6, day: 1),
+            themes: ["Person A"]
+        )
+        insertDiaryEntry(
+            context: context,
+            date: makeDate(year: 2024, month: 6, day: 2),
+            themes: ["Person A Nickname"]
+        )
+        try context.save()
+
+        // 先建一个 group(模拟用户已合并 Person A Nickname → Person A)
+        let suggestion = PendingSuggestion(
+            newTag: "Person A Nickname",
+            canonicalGuess: "Person A",
+            confidence: .high,
+            source: .scan
+        )
+        #expect(resolver.enqueue(suggestion))
+        resolver.confirm(suggestion, canonical: "Person A")
+        #expect(resolver.groups["Person A"] != nil, "前置:group 应已建立")
+
+        // 注入失败 saveAction
+        struct ForcedSaveError: Error {}
+        let service = ThemeManagementService(
+            persistence: persistence,
+            resolver: resolver,
+            saveAction: { _ in throw ForcedSaveError() }
+        )
+
+        let outcome = await service.deleteTheme(canonical: "Person A")
+
+        #expect(!outcome.succeeded, "save 失败 → succeeded 必须 false")
+        #expect(outcome.affected == 0, "save 失败 → affected 必须 0")
+
+        // **关键不变量**:save 失败时 resolver group **必须保留**,否则 alias map 删了
+        // 但 entry.themes raw CSV 还在,Insights 上 "已合并" 数减但主题词又冒出来。
+        #expect(resolver.groups["Person A"] != nil, "save 失败时 resolver group 必须保留")
+        #expect(resolver.groups["Person A"]?.contains("Person A Nickname") == true,
+                "alias 也必须保留")
+
+        // entry.themes 也应未变(rollback 生效)
+        let themes = await fetchThemeArrays(persistence)
+        #expect(themes.contains(["Person A"]) || themes.flatMap { $0 }.contains("Person A"),
+                "rollback 后 raw themes 应保留")
+    }
+
+    /// **B3 配套**:成功路径仍然走得通(saveAction 默认 try $0.save() 等价于原行为)。
+    /// 这条是 sanity check,确保加 saveAction 注入没破坏默认行为。
+    @Test func deleteTheme_defaultSaveAction_stillWorks() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let context = persistence.container.viewContext
+
+        insertDiaryEntry(
+            context: context,
+            date: makeDate(year: 2024, month: 6, day: 1),
+            themes: ["TestTag"]
+        )
+        try context.save()
+
+        // 不传 saveAction → 默认 try context.save()
+        let service = ThemeManagementService(persistence: persistence, resolver: resolver)
+        let outcome = await service.deleteTheme(canonical: "TestTag")
+
+        #expect(outcome.succeeded)
+        #expect(outcome.affected == 1)
+    }
 }
 
 // MARK: - ThemeAliasJudgeService
@@ -1940,6 +2017,44 @@ struct ThemeAliasJudgeServiceTests {
 
         #expect(ai.judgeCalls == 1)
         #expect(resolver.pending.isEmpty)
+    }
+
+    /// **B4 race test** — T1 挂起在 AI scanThemeAliasGroups,T2 模拟进入(bump scanGen + 替换 scanTask)。
+    /// T1 释放后其 trailing closure `if scanGen == myGen` 必须 false → 不该清掉 T2 的 sentinel scanTask。
+    /// 这条锁的是 `superreview P1 #5` 修的世代号语义:旧实现下 T1 的 trailing 直接 `scanTask = nil`
+    /// 会清掉 T2 的 handle,导致 isRunning gate 失效;改世代号后 stale T1 早返,T2 handle 保留。
+    @Test func scanGen_staleCompletionDoesNotClearNewerTaskHandle() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        try seedEntries(persistence, [
+            (["A"], makeDate(year: 2024, month: 6, day: 1)),
+            (["B"], makeDate(year: 2024, month: 6, day: 2))
+        ])
+        let ai = ThemeAliasAITestDouble()
+        ai.suspendScan = true  // T1 进入 ai.scanThemeAliasGroups 后挂住
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let service = ThemeAliasJudgeService(persistence: persistence, ai: ai, resolver: resolver)
+
+        // T1 启动,会捕获 myGen=1,挂在 AI suspendScan 处
+        let t1 = service.scanAllHistory()
+        await ai.waitForSuspendedScan()
+        let t1Gen = service.scanGenForTesting
+
+        // 模拟 T2 racing in:bump scanGen 到 2,替换 scanTask 为 sentinel
+        let sentinel = Task<Void, Never> { /* T2 sentinel,不实际跑 */ }
+        service.simulateConcurrentScanStartForTesting(replacementTask: sentinel)
+        let postBumpGen = service.scanGenForTesting
+        #expect(postBumpGen == t1Gen &+ 1, "simulateConcurrent should bump gen by 1")
+        #expect(service.scanTaskForTesting == sentinel, "scanTask 应已替换为 sentinel")
+
+        // 释放 T1 → runScan 完成 → trailing closure 跑 `if scanGen (2) == myGen (1)` → false → 跳过清空
+        ai.releaseScan()
+        await t1.value
+
+        // **关键不变量**:T1 的 stale trailing 闭包不能清掉 T2 的 handle
+        #expect(service.scanTaskForTesting == sentinel,
+                "T1(stale gen)trailing closure 不该清掉 T2 的 scanTask handle")
+
+        sentinel.cancel()
     }
 
     @Test func scanAllHistory_failureSetsFailedProgress() async throws {

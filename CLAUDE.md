@@ -151,15 +151,14 @@ iOS:
 
 下面这些是历次 superreview 抓出来的、**有意识跳过**的活儿。代码本身没坏,但测试覆盖 / 抽象基建 / 隐私 hardening 欠了一笔。下次有空再补,不补也能 ship。
 
-### 测试覆盖缺口(都需要先建抽象 / 测试基建)
+### 测试覆盖缺口
 
 - **`parseImportedDiaries` 错误路径 + `StreamEvent.truncated` 端到端消费侧测试** —— 现在 `MockAIService` / `ThemeAliasAITestDouble` 能注入 throw / `.truncated` 事件,但 `NarrativeReader` / `AskPastView` 消费侧无单测断言 `isIncomplete` flag 翻 true。需要给 view-state 观察建一个测试基础设施(可能引入 ViewInspector 或自己写 binding-tap helper),先把这条测试基建落地再补具体用例。
-- **`ThemeManagementService.deleteTheme` save-failure 分支测试** —— 现在 happy path 全覆盖,但 `context.save() throws` 走 `succeeded=false` + `resolver.groups[canonical]` 保留的不变量没测。需要把 `PersistenceController` 抽出 protocol 才能 inject failing stub。建议跟上一条一起做(都需要 DI 抽象)。
-- **Generation-counter race 的 stale 场景测试**(`scanGen` / `currentRescheduleGen`)—— 现有测试只覆盖 happy 单线程语义。"老 Task await 完发现 gen 已变 → 不该清掉新 task 的状态"这种竞争 case 没有专门测试,refactor 把世代号换成 task identity 静默回归。需要 `suspendScan` / `releaseScan` 配合多次快速触发的并发测试。
+- **`ReminderService.currentRescheduleGen` race stale 场景测试** —— `ThemeAliasJudgeService.scanGen` 的 race 测试已覆盖(`scanGen_staleCompletionDoesNotClearNewerTaskHandle`,通过 `simulateConcurrentScanStartForTesting` 注入),但 `ReminderService` 没装 race test seam(强耦 UN center,要 mock UN 才能干净测)。下次拆 ReminderService 时一并解决。
 
 ### 隐私 hardening
 
-- **`ThemeAliasResolver` 主题名(妈妈/前任/Abby 等 PII)从 UserDefaults 明文 → Keychain 迁移** —— UserDefaults plist 在 jailbreak / MDM 设备 / 未加密 iTunes 备份场景暴露。考虑迁 Keychain `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`,200 entries 装得下。Trade-off:Keychain 在 simulator 不持久化、卸载重装会丢 alias map → 需要 iCloud KV-store 或 CloudKit private DB 做 backup,工作量中。
+- **不要单独把 ThemeAliasResolver 主题名搬 Keychain**(2026-04-29 评估):看着像 PII 加固但其实**不治本**。日记原文存 CoreData SQLite 的默认 file protection 是 `NSFileProtectionCompleteUntilFirstUserAuthentication`(用户首次解锁后明文可读),跟 UserDefaults plist 一档;主题词单独搬 Keychain 等于"大门敞开却锁了厨房柜子"——日记原文里反复出现这些主题词,加密 alias map 不增加真实威胁面。真正的隐私 hardening 应该是**统一升级 SQLite 文件保护级别**(`NSFileProtectionComplete` 锁屏即不可读,但会让后台同步 / 通知调度失效)或**端到端 user passphrase 加密**(像 Signal,大工程)。这两条是产品决策,不是 backlog 单条能解决,在那之前 Keychain 迁移工作量 ≥ 收益,**不做**。
 
 ### 重构 / 待续
 

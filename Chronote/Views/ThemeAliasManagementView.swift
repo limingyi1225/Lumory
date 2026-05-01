@@ -377,29 +377,10 @@ struct ThemeAliasManagementView: View {
     private var groupsSection: some View {
         if !resolver.groups.isEmpty {
             Section(header: header(String(format: NSLocalizedString("已合并 (%d)", comment: "Merged groups header"), resolver.groups.count))) {
-                ForEach(sortedGroupKeys, id: \.self) { canonical in
-                    groupRow(canonical: canonical, aliases: resolver.groups[canonical] ?? [])
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        // leading/trailing 16,跟 pendingCard 和 HomeView 时间线 row 一致 ——
-                        // 之前用 0 让 liquidGlassCard 顶满整个 Form inset row container 边缘,
-                        // 跟系统 Form 的 rounded chrome 视觉叠出"突兀阴影"。给卡留 16pt 呼吸空间
-                        // 后只显示自己的玻璃边,系统 chrome 在外面看不见。
-                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(role: .destructive) {
-                                groupPendingDeletion = canonical
-                            } label: {
-                                Label(NSLocalizedString("删除", comment: "Delete theme"), systemImage: "trash")
-                            }
-                            Button {
-                                resolver.deleteGroup(canonical: canonical)
-                            } label: {
-                                Label(NSLocalizedString("拆开", comment: "Unmerge group"), systemImage: "arrow.up.and.down.and.arrow.left.and.right")
-                            }
-                            .tint(.orange)
-                        }
-                }
+                mergedGroupsPanel
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
             }
         }
     }
@@ -439,43 +420,82 @@ struct ThemeAliasManagementView: View {
     }
 
     @ViewBuilder
-    private func groupRow(canonical: String, aliases: [String]) -> some View {
-        let cornerRadius: CGFloat = 16
+    private var mergedGroupsPanel: some View {
+        let keys = sortedGroupKeys
+        GlassEffectContainer(spacing: 8) {
+            VStack(spacing: 0) {
+                ForEach(keys.indices, id: \.self) { index in
+                    let canonical = keys[index]
+                    groupPanelRow(canonical: canonical, aliases: resolver.groups[canonical] ?? [])
+
+                    if index < keys.count - 1 {
+                        Divider()
+                            .padding(.leading, 18)
+                            .padding(.trailing, 14)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .liquidGlassCard(cornerRadius: 14, interactive: false)
+        }
+    }
+
+    @ViewBuilder
+    private func groupPanelRow(canonical: String, aliases: [String]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
+            HStack(spacing: 8) {
                 Text(canonical)
                     .font(.callout.weight(.semibold))
-                Spacer()
+                Spacer(minLength: 8)
                 Text(String(format: NSLocalizedString("%d 个别名", comment: "Alias count"), aliases.count))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Menu {
+                    Button {
+                        resolver.deleteGroup(canonical: canonical)
+                    } label: {
+                        Label(NSLocalizedString("拆开", comment: "Unmerge group"), systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+                    }
+                    Button(role: .destructive) {
+                        groupPendingDeletion = canonical
+                    } label: {
+                        Label(NSLocalizedString("删除", comment: "Delete theme"), systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(NSLocalizedString("更多操作", comment: "More actions"))
             }
             FlowLayout(spacing: 6) {
                 ForEach(aliases, id: \.self) { alias in
-                    // contextMenu 比 Menu 更符合 iOS 26 标准:长按/触摸-保持 出菜单,
-                    // 单击不触发任何操作(纯展示)。Menu 在 iOS 26 上单击即弹出菜单,
-                    // 用户摸到 chip 时容易误触。
-                    Text(alias)
-                        .font(.caption)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        // 中性 glass capsule(去蓝)
-                        .liquidGlassCapsule(interactive: true)
-                        .foregroundStyle(Color.primary)
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                resolver.unmerge(canonical: canonical, removeAlias: alias)
-                            } label: {
-                                Label(NSLocalizedString("从这组拆出", comment: "Unmerge alias"), systemImage: "scissors")
-                            }
+                    Menu {
+                        Button(role: .destructive) {
+                            resolver.unmerge(canonical: canonical, removeAlias: alias)
+                        } label: {
+                            Label(NSLocalizedString("从这组拆出", comment: "Unmerge alias"), systemImage: "scissors")
                         }
+                    } label: {
+                        Text(alias)
+                            .font(.caption)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            // 中性 glass capsule(去蓝)
+                            .liquidGlassCapsule(interactive: true)
+                            .foregroundStyle(Color.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .menuActionDismissBehavior(.enabled)
                 }
             }
         }
-        .padding(.init(top: 12, leading: 18, bottom: 12, trailing: 14))
+        .padding(.init(top: 10, leading: 18, bottom: 10, trailing: 10))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlassCard(cornerRadius: cornerRadius, interactive: false)
-        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Helpers
@@ -498,13 +518,6 @@ struct ThemeAliasManagementView: View {
         switch c {
         case .high: return NSLocalizedString("高置信", comment: "High confidence")
         case .medium: return NSLocalizedString("中置信", comment: "Medium confidence")
-        }
-    }
-
-    private func confidenceColor(_ c: PendingSuggestion.Confidence) -> Color {
-        switch c {
-        case .high: return Color.accentColor
-        case .medium: return .orange
         }
     }
 
@@ -650,5 +663,4 @@ private struct MgmtChipModifier: ViewModifier {
     }
 }
 
-// 复用 DiaryDetailView 里已有的 FlowLayout(默认 spacing=8,struct level internal)。
-// 不再自定义,避免符号冲突。
+// 复用 Components/FlowLayout.swift 里的共享 FlowLayout。

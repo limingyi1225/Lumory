@@ -13,51 +13,43 @@ struct MarkdownText: View {
     var inlineFont: Font = .body
     var lineSpacing: CGFloat = 4
 
-    // **blocks 缓存**：body 每次重评都 full-parse 的 O(n) 扫描成本在流式下不可接受——
-    // AskPast 每 chunk 都触发 body 重评，文案从几百字长到几千字，主线程被解析打满。
-    // @State 存 parse 结果 + 最后 parse 的字符串；只有字符串真变了才重算。
+    // **blocks 缓存**：body 每次重评都 full-parse 的 O(n) 扫描成本在流式下不可接受。
+    // 缓存从 task(id:) 异步填充；init/body 都不做 markdown 解析，避免 SwiftUI 重建 view
+    // 时 eager 计算再被已有 @State 丢弃。
     @State private var cachedBlocks: [Block] = []
-    @State private var cacheKey: String = ""
+    @State private var cacheKey: String?
+
+    init(markdown: String, inlineFont: Font = .body, lineSpacing: CGFloat = 4) {
+        self.markdown = markdown
+        self.inlineFont = inlineFont
+        self.lineSpacing = lineSpacing
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             // `id: \.self` (Block 需要 Hashable) 让 SwiftUI 按 block **内容**决定 view identity。
             // 以前 `id: \.offset` 是位置 id——流式中 index N 处从 paragraph 变成 heading 就会
             // destroy + recreate 那行 view，用户正在长按 / textSelection 的选区被打断。
-            ForEach(Array(currentBlocks.enumerated()), id: \.element) { _, block in
+            ForEach(Array(cachedBlocks.enumerated()), id: \.element) { _, block in
                 render(block)
             }
         }
-        .onChange(of: markdown) { _, newValue in
-            cachedBlocks = Self.parse(newValue)
-            cacheKey = newValue
+        .task(id: markdown) {
+            await refreshCache(for: markdown)
         }
-        .onAppear {
-            if cacheKey != markdown {
-                cachedBlocks = Self.parse(markdown)
-                cacheKey = markdown
-            }
-        }
-    }
-
-    /// body 第一次渲染时 @State 还是空的——兜底：cacheKey 跟当前 markdown 对不上就即时解析一次。
-    /// `.onAppear` 之后会落缓存；随后流式每 chunk 只走 onChange path。
-    private var currentBlocks: [Block] {
-        if cacheKey == markdown { return cachedBlocks }
-        return Self.parse(markdown)
     }
 
     @ViewBuilder
     private func render(_ block: Block) -> some View {
         switch block {
         case .paragraph(let text):
-            Text(Self.inlineAttributed(text))
+            Text(text)
                 .font(inlineFont)
                 .lineSpacing(lineSpacing)
                 .fixedSize(horizontal: false, vertical: true)
 
         case .heading(let level, let text):
-            Text(Self.inlineAttributed(text))
+            Text(text)
                 .font(headingFont(level))
                 .fontWeight(.semibold)
                 .fixedSize(horizontal: false, vertical: true)
@@ -69,7 +61,7 @@ struct MarkdownText: View {
                     .font(inlineFont)
                     .foregroundStyle(.secondary)
                     .frame(minWidth: 16, alignment: .trailing)
-                Text(Self.inlineAttributed(text))
+                Text(text)
                     .font(inlineFont)
                     .lineSpacing(lineSpacing)
                     .fixedSize(horizontal: false, vertical: true)
@@ -96,7 +88,7 @@ struct MarkdownText: View {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(Color.secondary.opacity(0.4))
                     .frame(width: 3)
-                Text(Self.inlineAttributed(text))
+                Text(text)
                     .font(inlineFont)
                     .foregroundStyle(.secondary)
                     .italic()
@@ -120,14 +112,32 @@ struct MarkdownText: View {
         }
     }
 
+    private func refreshCache(for value: String) async {
+        guard cacheKey != value else { return }
+
+        if value.isEmpty {
+            cachedBlocks = []
+            cacheKey = value
+            return
+        }
+
+        let blocks = await Task.detached(priority: .userInitiated) {
+            Self.parse(value)
+        }.value
+
+        guard !Task.isCancelled else { return }
+        cachedBlocks = blocks
+        cacheKey = value
+    }
+
     // MARK: Block model
 
-    enum Block: Equatable, Hashable {
-        case paragraph(String)
-        case heading(Int, String)
-        case listItem(String, String)  // text, marker ("•" or "1.")
+    enum Block: Equatable, Hashable, Sendable {
+        case paragraph(AttributedString)
+        case heading(Int, AttributedString)
+        case listItem(AttributedString, String)  // text, marker ("•" or "1.")
         case codeBlock(String)
-        case blockquote(String)
+        case blockquote(AttributedString)
         case divider
     }
 
@@ -147,7 +157,7 @@ struct MarkdownText: View {
             guard !paragraph.isEmpty else { return }
             let joined = paragraph.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             if !joined.isEmpty {
-                blocks.append(.paragraph(joined))
+                blocks.append(.paragraph(Self.inlineAttributed(joined)))
             }
             paragraph.removeAll(keepingCapacity: true)
         }
@@ -185,19 +195,19 @@ struct MarkdownText: View {
             // 标题
             if let (level, text) = parseHeading(trimmed) {
                 flushParagraph()
-                blocks.append(.heading(level, text))
+                blocks.append(.heading(level, Self.inlineAttributed(text)))
                 continue
             }
             // 块引用
             if trimmed.hasPrefix("> ") {
                 flushParagraph()
-                blocks.append(.blockquote(String(trimmed.dropFirst(2))))
+                blocks.append(.blockquote(Self.inlineAttributed(String(trimmed.dropFirst(2)))))
                 continue
             }
             // 无序列表
             if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
                 flushParagraph()
-                blocks.append(.listItem(String(trimmed.dropFirst(2)), "•"))
+                blocks.append(.listItem(Self.inlineAttributed(String(trimmed.dropFirst(2))), "•"))
                 continue
             }
             // 有序列表
@@ -210,7 +220,7 @@ struct MarkdownText: View {
                 let numberRange = match.range(at: 1)
                 let marker = nsTrimmed.substring(with: numberRange) + "."
                 let rest = nsTrimmed.substring(from: markerRange.upperBound)
-                blocks.append(.listItem(rest, marker))
+                blocks.append(.listItem(Self.inlineAttributed(rest), marker))
                 continue
             }
             // 普通段落

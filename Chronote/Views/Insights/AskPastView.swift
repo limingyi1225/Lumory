@@ -49,6 +49,7 @@ struct AskPastView: View {
     @State private var lastAutoScrollAt: Date = .distantPast
 
     private let engine = InsightsEngine.shared
+    private static let streamFlushInterval: TimeInterval = 0.08
 
     var body: some View {
         NavigationStack {
@@ -296,27 +297,52 @@ struct AskPastView: View {
         messages.append(Message(id: aiMessageID, role: .ai, text: "", citedEntryIds: [], isStreaming: true))
 
         activeTask = Task {
-            for await chunk in engine.ask(question) {
-                if Task.isCancelled { break }
+            var pendingText = ""
+            var lastFlushAt = Date()
+
+            func flushPendingText() async {
+                guard !pendingText.isEmpty else { return }
+                let text = pendingText
+                pendingText = ""
+                lastFlushAt = Date()
                 await MainActor.run {
                     update(messageID: aiMessageID) { msg in
-                        switch chunk.kind {
-                        case .citation:
-                            msg.citedEntryIds = chunk.citedEntryIds
-                        case .text:
-                            msg.text += chunk.text
-                        case .truncated:
-                            // 流中断(已有部分正文) —— 不把 `⚠️…` 当正文 append,set flag,
-                            // UI 渲染独立提示条 + "重新生成"按钮。
-                            msg.isIncomplete = true
-                        case .failed:
-                            // 流完全失败 —— 把 localized error 塞进 errorText,
-                            // 气泡里直接显示 "Error: <原因>",用户能区分离线/认证/5xx。
-                            msg.errorText = chunk.text
+                        msg.text += text
+                    }
+                }
+            }
+
+            for await chunk in engine.ask(question) {
+                if Task.isCancelled { break }
+                switch chunk.kind {
+                case .text:
+                    pendingText += chunk.text
+                    if Date().timeIntervalSince(lastFlushAt) >= Self.streamFlushInterval {
+                        await flushPendingText()
+                    }
+                case .citation, .truncated, .failed:
+                    await flushPendingText()
+                    await MainActor.run {
+                        update(messageID: aiMessageID) { msg in
+                            switch chunk.kind {
+                            case .citation:
+                                msg.citedEntryIds = chunk.citedEntryIds
+                            case .truncated:
+                                // 流中断(已有部分正文) —— 不把 `⚠️…` 当正文 append,set flag,
+                                // UI 渲染独立提示条 + "重新生成"按钮。
+                                msg.isIncomplete = true
+                            case .failed:
+                                // 流完全失败 —— 把 localized error 塞进 errorText,
+                                // 气泡里直接显示 "Error: <原因>",用户能区分离线/认证/5xx。
+                                msg.errorText = chunk.text
+                            case .text:
+                                break
+                            }
                         }
                     }
                 }
             }
+            await flushPendingText()
             let wasCancelled = Task.isCancelled
             await MainActor.run {
                 update(messageID: aiMessageID) { msg in
@@ -374,7 +400,6 @@ struct AskPastView: View {
         await applyFreshestSuggestions()
         isLoadingPresets = false
     }
-
     /// 用户点 refresh 按钮时调。
     private func regeneratePresets() async {
         isLoadingPresets = true

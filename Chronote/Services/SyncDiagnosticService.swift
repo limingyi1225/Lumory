@@ -115,38 +115,15 @@ struct SyncDiagnosticService {
         return await withCheckedContinuation { continuation in
             let container = CKContainer(identifier: "iCloud.com.Mingyi.Lumory")
             let database = container.privateCloudDatabase
-            
-            // Perform a simple query to test connectivity.
-            // **必须**用带 built-in 索引的谓词——`NSPredicate(value: true)` 在 production schema
-            // 没对应 query index，CloudKit 会抛 invalidArguments，被此函数误判为 `.networkUnavailable`。
-            // CloudKitSyncMonitor.swift 已改，这里是漏改的 sibling call site。
-            let query = CKQuery(
-                recordType: "CD_DiaryEntry",
-                predicate: NSPredicate(format: "modificationDate > %@", Date.distantPast as NSDate)
-            )
-            
-            if #available(macOS 12.0, iOS 15.0, *) {
-                database.fetch(withQuery: query, inZoneWith: nil, desiredKeys: nil, resultsLimit: 1) { result in
-                    switch result {
-                    case .success:
-                        continuation.resume(returning: true)
-                    case .failure(let error):
-                        if let ckError = error as? CKError {
-                            let isNetworkError = ckError.code == .networkUnavailable || ckError.code == .networkFailure
-                            continuation.resume(returning: !isNetworkError)
-                        } else {
-                            continuation.resume(returning: false)
-                        }
-                    }
-                }
-            } else {
-                database.perform(query, inZoneWith: nil) { _, error in
-                    if let error = error as? CKError {
-                        let isNetworkError = error.code == .networkUnavailable || error.code == .networkFailure
-                        continuation.resume(returning: !isNetworkError)
-                    } else {
-                        continuation.resume(returning: true)
-                    }
+
+            // Querying CD_DiaryEntry fields requires production schema indexes. Fetching zones
+            // tests CloudKit database reachability without depending on record-field queryability.
+            database.fetchAllRecordZones { _, error in
+                if let error = error as? CKError {
+                    let isNetworkError = error.code == .networkUnavailable || error.code == .networkFailure
+                    continuation.resume(returning: !isNetworkError)
+                } else {
+                    continuation.resume(returning: error == nil)
                 }
             }
         }

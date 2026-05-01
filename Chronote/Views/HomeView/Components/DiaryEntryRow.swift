@@ -2,7 +2,7 @@ import SwiftUI
 
 struct DiaryEntryRow: View {
     let entry: DiaryEntry
-    @State private var imageData: Data?
+    @State private var thumbnailImage: ThumbnailImageDecoder.PlatformImage?
     @State private var loadedThumbnailFileName: String?
     @State private var shimmerPhase: CGFloat = 0
     // 默认值必须跟随系统 locale，否则首次启动前强制英语与其他读 `appLanguage` 的组件不一致。
@@ -70,26 +70,21 @@ struct DiaryEntryRow: View {
             }
             
             // Thumbnail
-            if let imageData = imageData {
+            if let thumbnailImage {
                 #if canImport(UIKit)
-                if let uiImage = UIImage(data: imageData) {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 40, height: 40)
-                        .clipped()
-                        .cornerRadius(8)
-                }
-                #else
-                // For macOS, use NSImage
-                if let nsImage = NSImage(data: imageData) {
-                    Image(nsImage: nsImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 40, height: 40)
-                        .clipped()
-                        .cornerRadius(8)
-                }
+                Image(uiImage: thumbnailImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 40, height: 40)
+                    .clipped()
+                    .cornerRadius(8)
+                #elseif canImport(AppKit)
+                Image(nsImage: thumbnailImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 40, height: 40)
+                    .clipped()
+                    .cornerRadius(8)
                 #endif
             } else if !entry.imageFileNameArray.isEmpty {
                 // 只有"这条日记确实有图片、但还在加载"的时候才显示占位；
@@ -210,20 +205,21 @@ struct DiaryEntryRow: View {
     @MainActor
     private func loadThumbnail(fileName: String?) async {
         guard let fileName else {
-            imageData = nil
+            thumbnailImage = nil
             loadedThumbnailFileName = nil
             return
         }
         guard loadedThumbnailFileName != fileName else { return }
-        imageData = nil
+        thumbnailImage = nil
 
         // 只捕获文件名（值类型）——不跨线程持有 managed object。
         // 静态 `loadImageData(fileName:)` 会依次查 iCloud / LumoryImages / 老位置三处。
-        let data = await Task.detached(priority: .utility) {
-            DiaryEntry.loadImageData(fileName: fileName)
+        let image = await Task.detached(priority: .utility) { () -> ThumbnailImageDecoder.PlatformImage? in
+            guard let data = DiaryEntry.loadImageData(fileName: fileName) else { return nil }
+            return ThumbnailImageDecoder.decode(data: data, maxPixelSize: 120)
         }.value
         guard !Task.isCancelled else { return }
-        imageData = data
+        thumbnailImage = image
         loadedThumbnailFileName = fileName
     }
 }

@@ -618,7 +618,6 @@ final class ThemeAliasResolver: ObservableObject {
             request.resultType = .dictionaryResultType
             request.propertiesToFetch = ["themes"]
             request.predicate = NSPredicate(format: "themes != nil AND themes != %@", "")
-            request.fetchBatchSize = 200
             guard let rows = try? context.fetch(request) else { return Set<String>() }
             var labels = Set<String>()
             for row in rows {

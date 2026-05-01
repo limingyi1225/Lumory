@@ -728,7 +728,7 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 10) {
                 textInputArea
                 recordingsSection
-                if !photoVM.selectedImages.isEmpty { photosSection }
+                if !photoVM.selectedImageItems.isEmpty { photosSection }
                 // 卡内分隔线:把"内容区"和"动作区(工具栏)"隔开。
                 Capsule()
                     .fill(Color.primary.opacity(0.06))
@@ -912,7 +912,7 @@ struct HomeView: View {
         //
         // 关键改动 2:**保序 + 配对收集**。每个 (PhotosPickerItem, Data?) 一起收回来,
         // 失败的丢弃但**两边一起丢弃**。之前只 compactMap selectedImages,
-        // selectedPhotos 没动 → 长度不一致 → 删除时 firstIndex(of:) 找 selectedImages 的 idx
+        // selectedPhotos 没动 → 长度不一致 → 删除时按 selectedImageItems 的 idx
         // 然后用同 idx 删 selectedPhotos 删错。F2 fix:同步重建 selectedPhotos。
         var indexed: [(Int, Data?)] = []
 
@@ -946,16 +946,16 @@ struct HomeView: View {
             }
 
         let prunedItems = successful.map(\.0)
-        let images = successful.map(\.1)
+        let imageItems = successful.map { HomePhotoViewModel.SelectedImage(data: $0.1) }
 
         await MainActor.run {
-            photoVM.selectedImages = images
+            photoVM.selectedImageItems = imageItems
             // F2:把 selectedPhotos 也剪枝到只剩压缩成功的 items,保证两边长度严格对齐。
             // 等值检查避免触发自身的 .onChange 死循环 —— PhotosPickerItem 是 Equatable。
             if photoVM.selectedPhotos != prunedItems {
                 photoVM.selectedPhotos = prunedItems
             }
-            Log.info("[HomeView] Total compressed images: \(photoVM.selectedImages.count)", category: .ui)
+            Log.info("[HomeView] Total compressed images: \(photoVM.selectedImageItems.count)", category: .ui)
         }
     }
 
@@ -1009,7 +1009,7 @@ struct HomeView: View {
                     inputVM.inputText = ""
                     recordingVM.currentAudioFileName = nil
                     recordingVM.audioRecordings.removeAll()
-                    photoVM.selectedImages.removeAll()
+                    photoVM.selectedImageItems.removeAll()
                     photoVM.selectedPhotos.removeAll()
                 }
                 hideKeyboard()
@@ -1073,7 +1073,7 @@ struct HomeView: View {
                         recordingVM.audioRecordings = audioToSend.map {
                             [Recording(id: $0, fileName: $0, duration: audioDurationToRestore)]
                         } ?? []
-                        photoVM.selectedImages = imagesToSend
+                        photoVM.selectedImageItems = imagesToSend.map { HomePhotoViewModel.SelectedImage(data: $0) }
                         photoVM.selectedPhotos = photosToSend
                     }
                 }
@@ -1116,20 +1116,18 @@ struct HomeView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    // 用 Data 内容作 id —— InputPhotoThumbnail 内部 @State 缓存解码后的
-                    // UIImage,如果用 index 作 id,删掉中间一张图后剩下的图接管它的 index
-                    // 但 @State 还在 → 一闪"错图配错按钮"。Data 作 id 让 SwiftUI 按内容
-                    // 追踪 cell 身份,删除/重排都不会让仍存在的 cell 重新解码。
-                    ForEach(photoVM.selectedImages, id: \.self) { data in
+                    // 用压缩完成时分配的 UUID 作 id。不要用 Data 自身作 id:
+                    // SwiftUI 每次 diff 都会 hash 图片 payload,选 9 张图后输入会被拖慢。
+                    ForEach(photoVM.selectedImageItems) { item in
                         InputPhotoThumbnail(
-                            data: data,
-                            dataID: data.hashValue,
+                            data: item.data,
+                            dataID: item.id,
                             onRemove: {
                                 withAnimation(AnimationConfig.stiffSpring) {
-                                    // 按内容查当前 index —— closure 捕获的 index 在
-                                    // selectedImages 被其他事件改过后会过期。
-                                    if let idx = photoVM.selectedImages.firstIndex(of: data) {
-                                        photoVM.selectedImages.remove(at: idx)
+                                    // 按稳定 id 查当前 index —— closure 捕获的 index 在
+                                    // selectedImageItems 被其他事件改过后会过期。
+                                    if let idx = photoVM.selectedImageItems.firstIndex(where: { $0.id == item.id }) {
+                                        photoVM.selectedImageItems.remove(at: idx)
                                         if idx < photoVM.selectedPhotos.count {
                                             photoVM.selectedPhotos.remove(at: idx)
                                         }
@@ -1471,10 +1469,10 @@ struct HomeView: View {
     }()
 
     private var photoCountLabel: String {
-        if photoVM.selectedImages.count == 1 {
+        if photoVM.selectedImageItems.count == 1 {
             return NSLocalizedString("1张照片", comment: "")
         }
-        return String(format: NSLocalizedString("%d张照片", comment: ""), photoVM.selectedImages.count)
+        return String(format: NSLocalizedString("%d张照片", comment: ""), photoVM.selectedImageItems.count)
     }
 
     private func relativeDateLabel(_ date: Date?) -> String {
@@ -1767,7 +1765,7 @@ struct HomeView: View {
         inputVM.inputText = ""
         recordingVM.currentAudioFileName = nil
         recordingVM.audioRecordings.removeAll()
-        photoVM.selectedImages.removeAll()
+        photoVM.selectedImageItems.removeAll()
         photoVM.selectedPhotos.removeAll()
         inputVM.moodValue = 0.5
 
@@ -1861,7 +1859,7 @@ extension HomeView {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(photoVM.selectedImages.count >= 9)
+        .disabled(photoVM.selectedImageItems.count >= 9)
         .accessibilityLabel(NSLocalizedString("添加照片", comment: "Add photos"))
         .accessibilityIdentifier("home.keyboard.photo")
         .photosPicker(
@@ -1951,7 +1949,7 @@ extension HomeView {
         // guard 兜底，双重保险。
         (!inputVM.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !recordingVM.audioRecordings.isEmpty
-            || !photoVM.selectedImages.isEmpty) && !recordingVM.isTranscribing && !inputVM.isSending
+            || !photoVM.selectedImageItems.isEmpty) && !recordingVM.isTranscribing && !inputVM.isSending
     }
 }
 
@@ -2141,7 +2139,7 @@ struct RecordingRow: View {
 
 struct InputPhotoThumbnail: View {
     let data: Data
-    let dataID: Int
+    let dataID: UUID
     let onRemove: () -> Void
 
     #if canImport(UIKit)
@@ -2186,12 +2184,8 @@ struct InputPhotoThumbnail: View {
         .task(id: dataID) {
             // detached → 解码不占主线程,选 9 张图后输入框立刻能用,缩略图陆续浮上来。
             let bytes = data
-            let image = await Task.detached(priority: .userInitiated) {
-                #if canImport(UIKit)
-                return UIImage(data: bytes)
-                #else
-                return NSImage(data: bytes)
-                #endif
+            let image = await Task.detached(priority: .userInitiated) { () -> ThumbnailImageDecoder.PlatformImage? in
+                ThumbnailImageDecoder.decode(data: bytes, maxPixelSize: 240)
             }.value
             await MainActor.run { self.decoded = image }
         }

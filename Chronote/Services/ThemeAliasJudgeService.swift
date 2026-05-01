@@ -354,7 +354,6 @@ final class ThemeAliasJudgeService: ObservableObject {
             request.propertiesToFetch = ["id", "themes"]
             request.predicate = NSCompoundPredicate(orPredicateWithSubpredicates: subPredicates)
             request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
-            request.fetchBatchSize = 500
             guard let rows = try? context.fetch(request) else {
                 return Dictionary(uniqueKeysWithValues: tags.map { ($0, []) })
             }

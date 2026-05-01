@@ -353,10 +353,22 @@ struct ThemeAliasManagementView: View {
     }
 
     private func snippetText(for snap: CitationSnapshot) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = NSLocalizedString("M月d日", comment: "Date short")
-        let dateStr = formatter.string(from: snap.date)
+        let format = NSLocalizedString("M月d日", comment: "Date short")
+        let dateStr = Self.snippetDateFormatter(format: format).string(from: snap.date)
         return "\(dateStr) — \(snap.snippet)"
+    }
+
+    private static let snippetDateFormatterLock = NSLock()
+    private static var snippetDateFormatterCache: [String: DateFormatter] = [:]
+
+    private static func snippetDateFormatter(format: String) -> DateFormatter {
+        snippetDateFormatterLock.lock()
+        defer { snippetDateFormatterLock.unlock() }
+        if let cached = snippetDateFormatterCache[format] { return cached }
+        let formatter = DateFormatter()
+        formatter.dateFormat = format
+        snippetDateFormatterCache[format] = formatter
+        return formatter
     }
 
     // MARK: - Groups section

@@ -843,23 +843,19 @@ private struct AsyncPhotoThumbnail: View {
     let fileName: String
     let index: Int
     let onTap: (Int) -> Void
-    @State private var imageData: Data?
+    @State private var thumbnailImage: ThumbnailImageDecoder.PlatformImage?
 
     var body: some View {
         Group {
-            if let data = imageData {
+            if let thumbnailImage {
                 #if os(iOS)
-                if let uiImage = UIImage(data: data) {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFill()
-                }
-                #else
-                if let nsImage = NSImage(data: data) {
-                    Image(nsImage: nsImage)
-                        .resizable()
-                        .scaledToFill()
-                }
+                Image(uiImage: thumbnailImage)
+                    .resizable()
+                    .scaledToFill()
+                #elseif canImport(AppKit)
+                Image(nsImage: thumbnailImage)
+                    .resizable()
+                    .scaledToFill()
                 #endif
             } else {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -872,11 +868,12 @@ private struct AsyncPhotoThumbnail: View {
         .shadow(color: Color.black.opacity(0.1), radius: 6, y: 2)
         .onTapGesture { onTap(index) }
         .task(id: fileName) {
-            if imageData == nil {
-                let data = await Task.detached(priority: .utility) {
-                    DiaryEntry.loadImageData(fileName: fileName)
+            if thumbnailImage == nil {
+                let image = await Task.detached(priority: .utility) { () -> ThumbnailImageDecoder.PlatformImage? in
+                    guard let data = DiaryEntry.loadImageData(fileName: fileName) else { return nil }
+                    return ThumbnailImageDecoder.decode(data: data, maxPixelSize: 390)
                 }.value
-                await MainActor.run { self.imageData = data }
+                await MainActor.run { self.thumbnailImage = image }
             }
         }
     }

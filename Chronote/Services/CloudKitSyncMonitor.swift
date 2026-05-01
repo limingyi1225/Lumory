@@ -267,43 +267,21 @@ class CloudKitSyncMonitor: ObservableObject {
     }
 
     private func checkDatabaseAccessibility(container: CKContainer) {
-        // Test database accessibility by performing a simple query.
-        // 之前用 `NSPredicate(value: true)` —— 这个谓词如果没有对应的 query index 会在
-        // production schema 被 CloudKit 拒掉（`CKError.invalidArguments`），然后用户一直
-        // 看到 `.error` 状态。换成 `modificationDate > distantPast` 这种必然存在 built-in
-        // 索引的谓词，既能检测可达性，又不依赖 schema-level query index。
+        // Test database accessibility without querying record fields. CKQuery predicates/sorts
+        // require schema query indexes in production, including system fields like ___modTime.
         let database = container.privateCloudDatabase
-        let query = CKQuery(
-            recordType: "CD_DiaryEntry",
-            predicate: NSPredicate(format: "modificationDate > %@", Date.distantPast as NSDate)
-        )
-        query.sortDescriptors = [NSSortDescriptor(key: "CD_date", ascending: false)]
 
         // CloudKit `database.fetch/perform` callback 在 CK 后台队列触发,**不在主线程**,
         // 所以这里不能用 `MainActor.assumeIsolated`(会断言失败崩溃)。
-        // `handleDatabaseQueryResult` 本身是 main isolated → 用 `Task { @MainActor in ... }` hop。
-        if #available(macOS 12.0, iOS 15.0, *) {
-            database.fetch(withQuery: query, inZoneWith: nil, desiredKeys: nil, resultsLimit: 1) { [weak self] result in
-                Task { @MainActor in
-                    switch result {
-                    case .success(let (matchResults, _)):
-                        let records = matchResults.compactMap { try? $0.1.get() }
-                        self?.handleDatabaseQueryResult(records: records, error: nil)
-                    case .failure(let error):
-                        self?.handleDatabaseQueryResult(records: nil, error: error)
-                    }
-                }
-            }
-        } else {
-            database.perform(query, inZoneWith: nil) { [weak self] records, error in
-                Task { @MainActor in
-                    self?.handleDatabaseQueryResult(records: records, error: error)
-                }
+        // `handleDatabaseAccessibilityResult` 本身是 main isolated → 用 `Task { @MainActor in ... }` hop。
+        database.fetchAllRecordZones { [weak self] _, error in
+            Task { @MainActor in
+                self?.handleDatabaseAccessibilityResult(error: error)
             }
         }
     }
 
-    private func handleDatabaseQueryResult(records: [CKRecord]?, error: Error?) {
+    private func handleDatabaseAccessibilityResult(error: Error?) {
         DispatchQueue.main.async { [weak self] in
             if let error = error {
                 let ckError = error as? CKError
@@ -423,9 +401,9 @@ class CloudKitSyncMonitor: ObservableObject {
 
             // Wait a moment for CloudKit to process the changes.
             // 注意:这个 2s 是在用户主动 forceSync (pull-to-refresh) 之后触发的,只是给 CloudKit
-            // 上一步的 viewContext.save() 一点处理时间,然后用 verifySync 做一次只读 query
-            // 验证可达性。**reachability ≠ export 完成**——`verifySync` 拿到 records 仅说明
-            // CloudKit zone 可访问,并不保证刚保存的数据已经上传完。真正"导出完成"信号
+            // 上一步的 viewContext.save() 一点处理时间,然后用 verifySync 做一次只读 zone fetch
+            // 验证可达性。**reachability ≠ export 完成**——`verifySync` 成功仅说明
+            // CloudKit database 可访问,并不保证刚保存的数据已经上传完。真正"导出完成"信号
             // 只能从 `NSPersistentCloudKitContainer.eventChangedNotification` (.export, succeeded)
             // 拿,见 handleCloudKitEvent。这里把 .synced 弱化到只覆盖"reachable + 没账户错误"
             // 的语义,实际 export 完成由事件回调最终矫正。
@@ -436,42 +414,20 @@ class CloudKitSyncMonitor: ObservableObject {
     }
 
     private func verifySync() {
-        // Perform a simple query to verify CloudKit connectivity
+        // Verify CloudKit connectivity without querying record fields. Actual export completion
+        // still comes from NSPersistentCloudKitContainer.eventChangedNotification.
         let ckContainer = CKContainer(identifier: "iCloud.com.Mingyi.Lumory")
         let database = ckContainer.privateCloudDatabase
-        // **必须**和 checkDatabaseAccessibility 用同一个谓词——production schema 下
-        // `NSPredicate(value: true)` 没有对应的 query index，CloudKit 会直接 invalidArguments，
-        // 让 `forceSync` → pull-to-refresh 永远翻到 .error 即使 CloudKit 是健康的。
-        // modificationDate > distantPast 有 built-in 索引，既能验可达性又不依赖 schema query index。
-        let query = CKQuery(
-            recordType: "CD_DiaryEntry",
-            predicate: NSPredicate(format: "modificationDate > %@", Date.distantPast as NSDate)
-        )
-        query.sortDescriptors = [NSSortDescriptor(key: "CD_date", ascending: false)]
 
         // 同 `checkDatabaseAccessibility`:CK callback 后台队列触发,Task @MainActor hop。
-        if #available(macOS 12.0, iOS 15.0, *) {
-            database.fetch(withQuery: query, inZoneWith: nil, desiredKeys: nil, resultsLimit: 1) { [weak self] result in
-                Task { @MainActor in
-                    switch result {
-                    case .success(let (matchResults, _)):
-                        let records = matchResults.compactMap { try? $0.1.get() }
-                        self?.handleSyncVerificationResult(records: records, error: nil)
-                    case .failure(let error):
-                        self?.handleSyncVerificationResult(records: nil, error: error)
-                    }
-                }
-            }
-        } else {
-            database.perform(query, inZoneWith: nil) { [weak self] records, error in
-                Task { @MainActor in
-                    self?.handleSyncVerificationResult(records: records, error: error)
-                }
+        database.fetchAllRecordZones { [weak self] _, error in
+            Task { @MainActor in
+                self?.handleSyncVerificationResult(error: error)
             }
         }
     }
 
-    private func handleSyncVerificationResult(records: [CKRecord]?, error: Error?) {
+    private func handleSyncVerificationResult(error: Error?) {
         DispatchQueue.main.async { [weak self] in
             if let error = error {
                 let ckError = error as? CKError

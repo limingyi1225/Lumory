@@ -86,23 +86,25 @@ struct SuggestionTargetPickerSheet: View {
                         ProgressView()
                             .padding(.top, 40)
                     } else {
-                        VStack(spacing: 10) {
-                            if let custom = customCandidate {
-                                customOptionCard(name: custom)
-                            }
-                            // 输入是已有 alias → 提示"它已经是某 canonical 的别名",鼓励用户改输 canonical
-                            let trimmed = searchText.trimmingCharacters(in: .whitespaces)
-                            if customCandidate == nil, !trimmed.isEmpty {
-                                let parent = aliasParent(of: trimmed)
-                                if !parent.isEmpty {
-                                    aliasHintCard(input: trimmed, canonical: parent)
+                        GlassEffectContainer(spacing: 10) {
+                            VStack(spacing: 10) {
+                                if let custom = customCandidate {
+                                    customOptionCard(name: custom)
                                 }
-                            }
-                            if filteredOptions.isEmpty && customCandidate == nil {
-                                emptyState.padding(.top, 30)
-                            } else {
-                                ForEach(filteredOptions) { option in
-                                    candidateCard(option: option)
+                                // 输入是已有 alias → 提示"它已经是某 canonical 的别名",鼓励用户改输 canonical
+                                let trimmed = searchText.trimmingCharacters(in: .whitespaces)
+                                if customCandidate == nil, !trimmed.isEmpty {
+                                    let parent = aliasParent(of: trimmed)
+                                    if !parent.isEmpty {
+                                        aliasHintCard(input: trimmed, canonical: parent)
+                                    }
+                                }
+                                if filteredOptions.isEmpty && customCandidate == nil {
+                                    emptyState.padding(.top, 30)
+                                } else {
+                                    ForEach(filteredOptions) { option in
+                                        candidateCard(option: option)
+                                    }
                                 }
                             }
                         }

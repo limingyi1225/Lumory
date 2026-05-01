@@ -1375,6 +1375,10 @@ struct HomeView: View {
             selectedEntry = entry
         } label: {
             timelineCard(for: entry)
+                .contentShape(
+                    .contextMenuPreview,
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                )
                 .padding(.bottom, 10)
                 .contentShape(Rectangle())
         }
@@ -2266,9 +2270,13 @@ struct DiaryPreviewView: View {
             }
             .padding(.init(top: 16, leading: 20, bottom: 14, trailing: 16))
             .frame(width: 300, height: 400, alignment: .topLeading)
-            .liquidGlassCard(cornerRadius: cornerRadius, interactive: true)
+            .liquidGlassCard(cornerRadius: cornerRadius, interactive: false)
             .moodAccentBar(entry.moodColor, cornerRadius: cornerRadius)
-            .contentShape(Rectangle())
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .contentShape(
+                .contextMenuPreview,
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            )
             .onTapGesture { onTap() }
         } else {
             // 如果 entry 已被删除或无效，显示一个占位符或空视图

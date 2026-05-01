@@ -48,7 +48,6 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,target/sch
 - `Scripts/generate-screenshots.sh` — 自动跑 `ChronoteUITests/ScreenshotTests` 出 6 张 1320×2868 的 App Store 截图到 `Screenshots/zh-Hans/`。流程:boot iPhone 17 Pro Max → `simctl status_bar override`(9:41 / 满电) → `xcodebuild test -only-testing ... -parallel-testing-enabled NO` → `xcresulttool export attachments`。
 - `.claude/` — Claude Code 本地自动化配置。
   - `skills/screenshot/SKILL.md` — 封装截图流水线(iPhone / iPad + 坑位清单)。用户说"截图 / 上架截图"自动触发。
-  - `skills/swift-verify/SKILL.md` — `xcodebuild build/test` + Lumory 特有陷阱读法。改完 Swift 想快速确认时触发。
   - `agents/coredata-migration-reviewer.md` — **改任何 CoreData schema / `DiaryEntry+Extensions` / `PersistenceController` 后应主动召唤**,按 CloudKit 兼容性 + `embedding` / `themes` / backfill 清单审查。
   - `hooks/server-lint.sh` + `settings.json` — PostToolUse hook:编辑 `server/*.js` 后静默跑 `eslint --fix` + `prettier --write`。失败不阻塞。
   - `settings.local.json` — 个人权限 allowlist,别把它 check 进 git。
@@ -171,7 +170,7 @@ iOS:
 - **MCP servers**(`~/.claude.json` 本项目 scope):
   - `xcodebuildmcp` — 封装 `xcodebuild` / `simctl` / UI 自动化。**优先用它的工具**而不是 Bash 跑 `xcodebuild`,能省 2 分钟默认 timeout 且错误结构化返回。
   - `context7`(插件)— 查 SwiftUI / CoreData / CloudKit / Express 5 等官方文档时用,避免训练截止日之后的 API 漂移。
-- **Skills** 在 `.claude/skills/`:`screenshot`(截图流水线 + 坑)、`swift-verify`(build/test + 陷阱)。用户说截图 / build / 测试时会自动匹配。
+- **Skills** 在 `.claude/skills/`:`screenshot`(截图流水线 + 坑)。用户说截图 / 上架截图时会自动匹配。
 - **Subagent** `coredata-migration-reviewer`(`.claude/agents/`):**改 `.xcdatamodeld` / `DiaryEntry+Extensions.swift` / `PersistenceController.swift` / 任何动 `DiaryEntry` schema 的服务后,主动召唤它跑一遍审查**,别等出事。
 - **可用的 `subagent_type` 池**(harness allowlist,**派单前别瞎猜**):`code-reviewer` / `general-purpose` / `Explore` / `Plan` / `coredata-migration-reviewer` / `sse-pipeline-reviewer` / `debugger` / `code-simplifier:code-simplifier` / `feature-dev:*` / `plugin-dev:*` / `agent-sdk-dev:*` / `codex:codex-rescue` / `claude-code-guide` / `statusline-setup`。**`security-auditor` / `test-automator` / `architect-review` / `performance-engineer` / `database-optimizer` 等行业常见名字都不在池里**(直接 hard error)—— security / test-gap / architecture / perf review 这类专项视角统一走 `code-reviewer` 或 `general-purpose`,焦点写在 prompt 里。superreview 流水线踩过这坑(3/8 个 agent 派失败重新发)。
 - **Hook** `.claude/hooks/server-lint.sh`(PostToolUse):编辑 `server/*.js` 后自动 `eslint --fix` + `prettier --write`,失败不阻塞对话。改了 hook 脚本记得 `chmod +x`。

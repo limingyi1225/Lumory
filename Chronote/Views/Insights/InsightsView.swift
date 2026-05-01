@@ -770,9 +770,11 @@ private struct ThemeMergeIntoSheet: View {
                             emptyState
                                 .padding(.top, 40)
                         } else {
-                            VStack(spacing: 10) {
-                                ForEach(filteredCandidates) { target in
-                                    candidateCard(for: target)
+                            GlassEffectContainer(spacing: 10) {
+                                VStack(spacing: 10) {
+                                    ForEach(filteredCandidates) { target in
+                                        candidateCard(for: target)
+                                    }
                                 }
                             }
                             .padding(.horizontal, 16)

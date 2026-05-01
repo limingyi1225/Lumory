@@ -462,7 +462,7 @@ struct ThemeAliasManagementView: View {
         }
         .padding(.init(top: 12, leading: 18, bottom: 12, trailing: 14))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlassCard(cornerRadius: cornerRadius, interactive: true)
+        .liquidGlassCard(cornerRadius: cornerRadius, interactive: false)
         .accessibilityElement(children: .combine)
     }
 

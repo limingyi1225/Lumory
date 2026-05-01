@@ -1,0 +1,7 @@
+[mcp_servers.xcodebuildmcp]
+args = [
+    "-y",
+    "xcodebuildmcp@latest",
+    "mcp",
+]
+command = "npx"

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/Users/isaac/Lumory/.codex/hooks/server-lint.sh'"
+          }
+        ]
+      }
+    ]
+  }
+}

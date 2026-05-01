@@ -18,6 +18,7 @@ enum SettingsEntryDeletionService {
             // 已死主题词。negativePairs 保留(用户主观判断与 entry 存在与否无关)。
             ThemeAliasResolver.shared.resetForBulkEntryWipe()
             PromptSuggestionEngine.shared.clearCache()
+            InsightsResultCache.shared.clear()
         } catch {
             Log.error("[SettingsView] 删除所有日记失败: \(error)", category: .ui)
             viewContext.rollback()

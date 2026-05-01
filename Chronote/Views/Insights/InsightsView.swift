@@ -347,8 +347,21 @@ struct InsightsView: View {
         // View struct 的 method 隐式 @MainActor,这些写入直接同步即可,
         // 不必再 `await MainActor.run`(SwiftUI 已经把 reload 调用调度到 main)。
         loadToken = token
-        isLoadingCharts = true
-        isLoadingThemes = true
+
+        // SWR: 命中缓存 → 立刻显示旧数据,跳过 loading skeleton。
+        // 后台仍跑 reload,完成后用新数据覆盖。详见 InsightsResultCache.swift 注释。
+        if let cached = InsightsResultCache.shared.snapshot(for: range) {
+            self.moodPoints = cached.moodPoints
+            self.themes = cached.themes
+            self.stats = cached.stats
+            self.dailyCells = cached.dailyCells
+            self.facts = cached.facts
+            self.isLoadingCharts = false
+            self.isLoadingThemes = false
+        } else {
+            isLoadingCharts = true
+            isLoadingThemes = true
+        }
 
         // Fix #23: range 切换时 SwiftUI cancel 外层 Task,但 `engine.*` 内部的
         // `performBackgroundTask` 不响应外层 Task cancellation —— 旧实现下快速来回切 range
@@ -376,13 +389,25 @@ struct InsightsView: View {
         // 由它自己的结尾负责清 false。老 reload 若在这里抢先清 false,新 reload 还没返回,
         // UI 会出现"已加载 → 又加载中"的视觉抖动。
         guard token == loadToken else { return }
+        let newFacts = CorrelationFactGenerator.generate(points: points, themes: loadedThemes, stats: loadedStats)
         self.moodPoints = points
         self.themes = loadedThemes
         self.stats = loadedStats
         self.dailyCells = loadedCells
-        self.facts = CorrelationFactGenerator.generate(points: points, themes: loadedThemes, stats: loadedStats)
+        self.facts = newFacts
         self.isLoadingCharts = false
         self.isLoadingThemes = false
+
+        InsightsResultCache.shared.update(
+            .init(
+                moodPoints: points,
+                themes: loadedThemes,
+                stats: loadedStats,
+                dailyCells: loadedCells,
+                facts: newFacts
+            ),
+            for: range
+        )
     }
 
     private func fetchDailyCells(in range: DateInterval, lookbackDays: Int = 140) async -> [DailyCell] {

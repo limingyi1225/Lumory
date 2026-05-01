@@ -106,6 +106,7 @@ final class DatabaseRecoveryService {
                         ThemeAliasResolver.shared.resetForBulkEntryWipe()
                         PromptSuggestionEngine.shared.clearCache()
                         ReminderService.shared.requestReschedule()
+                        InsightsResultCache.shared.clear()
                     }
                 }
 

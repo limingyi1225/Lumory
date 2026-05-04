@@ -19,7 +19,7 @@ struct DiaryImportView: View {
         case error(String)
     }
     @State private var outcome: ImportOutcome = .finished(succeeded: 0, failed: 0, skipped: 0)
-    @AppStorage("appLanguage") private var appLanguage: String = {
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
         let currentLocale = Locale.current.identifier
         if currentLocale.hasPrefix("zh") {
             return "zh-Hans"

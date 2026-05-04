@@ -20,7 +20,7 @@ struct SettingsView: View {
         sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
     ) private var entries: FetchedResults<DiaryEntry>
 
-    @AppStorage("appLanguage") private var appLanguage: String = {
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
         Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"
     }()
 

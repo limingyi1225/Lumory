@@ -54,7 +54,7 @@ struct DiaryDetailView: View {
         }
     }
     
-    @AppStorage("appLanguage") private var appLanguage: String = {
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
         let currentLocale = Locale.current.identifier
         if currentLocale.hasPrefix("zh") {
             return "zh-Hans"

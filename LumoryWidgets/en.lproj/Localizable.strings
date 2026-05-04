@@ -1,0 +1,14 @@
+/* Lumory Widget — English */
+
+"widget.display_name" = "Capture This";
+"widget.description" = "Glance at your writing streak and tap to capture today's moment.";
+
+"widget.cta.write_today" = "Write today";
+"widget.cta.fresh_start" = "Tap to start your first entry";
+"widget.state.recorded" = "Recorded today";
+
+"widget.streak.day_count" = "%d-day streak";
+"widget.streak.longest_inline" = "Longest %d";
+
+"widget.stats.streak" = "Streak";
+"widget.stats.longest" = "Longest";

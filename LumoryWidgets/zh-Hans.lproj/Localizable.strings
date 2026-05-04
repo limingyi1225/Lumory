@@ -1,0 +1,14 @@
+/* Lumory Widget — Simplified Chinese */
+
+"widget.display_name" = "记录此刻";
+"widget.description" = "瞥一眼连续天数,点开就能记录今天。";
+
+"widget.cta.write_today" = "记录今天";
+"widget.cta.fresh_start" = "点开记录第一篇";
+"widget.state.recorded" = "今天已记录";
+
+"widget.streak.day_count" = "连续 %d 天";
+"widget.streak.longest_inline" = "最长 %d";
+
+"widget.stats.streak" = "连续天数";
+"widget.stats.longest" = "最长";

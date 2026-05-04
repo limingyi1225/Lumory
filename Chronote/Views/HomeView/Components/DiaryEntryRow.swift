@@ -6,7 +6,7 @@ struct DiaryEntryRow: View {
     @State private var loadedThumbnailFileName: String?
     @State private var shimmerPhase: CGFloat = 0
     // 默认值必须跟随系统 locale，否则首次启动前强制英语与其他读 `appLanguage` 的组件不一致。
-    @AppStorage("appLanguage") private var appLanguage: String = DiaryEntryRow.defaultAppLanguage
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = DiaryEntryRow.defaultAppLanguage
 
     private static var defaultAppLanguage: String {
         Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"

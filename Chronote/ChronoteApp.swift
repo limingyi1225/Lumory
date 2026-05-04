@@ -24,7 +24,9 @@ struct ChronoteApp: App {
     @StateObject private var importService = CoreDataImportService()
     @StateObject private var syncMonitor = CloudKitSyncMonitor(container: PersistenceController.shared.container)
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage("appLanguage") private var appLanguage: String = {
+    // **App Group store** —— widget 跟主 App 共享同一份 `appLanguage`,主 App 切语言 widget 跟着走。
+    // 读取链在 `LocalizationHelper.appLanguageBundle`,有 standard 回退,不会因 App Group 暂不可用而崩。
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
         let currentLocale = Locale.current.identifier
         if currentLocale.hasPrefix("zh") {
             return "zh-Hans"
@@ -44,6 +46,18 @@ struct ChronoteApp: App {
         #if canImport(UserNotifications)
         UNUserNotificationCenter.current().delegate = ReminderNotificationRouter.shared
         #endif
+
+        // **`appLanguage` 一次性迁移**:之前所有 `@AppStorage("appLanguage")` 都写到 `UserDefaults.standard`,
+        // 这次切到了 `AppGroup.userDefaults` 让 widget 能读同一份偏好。老用户升级后 App Group
+        // store 还没写过,@AppStorage 会读到 nil 落到 default(系统 locale 推断),如果用户之前手动
+        // 选过中文(但设备是英文)、或选过英文(但设备是中文),会被翻到错的语言。
+        // 这里 idempotent 一次性 copy:App Group 没写过且 standard 里有值 → 拷过去。运行多次无副作用。
+        let standardDefaults = UserDefaults.standard
+        let groupDefaults = AppGroup.userDefaults
+        if groupDefaults.object(forKey: "appLanguage") == nil,
+           let legacy = standardDefaults.string(forKey: "appLanguage") {
+            groupDefaults.set(legacy, forKey: "appLanguage")
+        }
 
         // 注意：以前这里有 checkDatabaseHealth()——和 PersistenceController 内部的那条
         // 一起是双重预检，且会在 WAL 被其他进程持有时误报。已经移除（PersistenceController
@@ -92,6 +106,14 @@ struct ChronoteApp: App {
         // `backfillIfNeeded`，"一键重建"走 `forceBackfill`，都是幂等的）。
         Task.detached(priority: .utility) {
             await WordCountBackfillService.backfillIfNeeded()
+        }
+
+        // 启动时刷一次 widget snapshot —— PersistenceController 的 DidSave / RemoteChange
+        // observer 只在"有写"时才 fire,冷启动后第一次 widget reload 需要 snapshot 落盘。
+        // service 内部 250ms debounce + isInMemory guard,跟 backfill 并发也安全。
+        let persistenceForWidget = persistenceController
+        Task.detached(priority: .utility) {
+            await WidgetSnapshotService.shared.requestRefresh(persistence: persistenceForWidget)
         }
 
         // NOTE：以前这里还自动跑过 `EmbeddingBackfillService.shared.backfillAll()`
@@ -258,6 +280,11 @@ struct ChronoteApp: App {
             }
             .onChange(of: scenePhase) { _, newPhase in
                 handleScenePhaseChange(newPhase)
+            }
+            .onOpenURL { url in
+                // 目前仅处理 `lumory://compose`(widget tap)。Reminder 通知点击走
+                // ReminderNotificationRouter.didReceive,不会经过这里。
+                LumoryURLRouter.handle(url)
             }
             .onReceive(NotificationCenter.default.publisher(for: .persistentStoreLoadFailed)) { note in
                 if let error = note.userInfo?["error"] as? NSError {

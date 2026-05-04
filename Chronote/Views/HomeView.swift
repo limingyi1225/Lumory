@@ -67,7 +67,7 @@ struct HomeView: View {
         }
     }
 
-    @AppStorage("appLanguage") private var appLanguage: String = HomeView.defaultAppLanguage
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = HomeView.defaultAppLanguage
 
     // MARK: - View-level 路由 / 搜索 / 生命周期 state
     // 这些**留在 HomeView**:和 NavigationStack / sheet / .searchable 生命周期耦合,

@@ -100,13 +100,20 @@ final class DatabaseRecoveryService {
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(name: .databaseRecreated, object: nil)
                     // DB 重建相当于把所有 entry 拉空(随后 CloudKit 异步重 import)。
-                    // 跟 SettingsView.deleteAllEntries 同样的清理:alias state 与 prompt cache
-                    // 都会引用已不存在的 entry,不清的话 banner / 通知 body 显示死主题。
+                    // 跟 SettingsView.deleteAllEntries 同样的"五件套"清理。
+                    //
+                    // **Best-effort:不阻塞 completion**。recovery 流程是用户主动确认的多步操作
+                    // (走完 alert + recovery 几秒钟),已经过了"刚 toggle 立刻锁屏"的高危窗口,
+                    // 不像 SettingsEntryDeletionService.deleteAll 那样 race-prone。
+                    // 即便清理在 background grace 中被截掉:CK 后续 import 触发
+                    // `PersistenceController` 的 RemoteChange observer → 重新 schedule
+                    // widget snapshot refresh,自动 self-heal。
                     Task { @MainActor in
                         ThemeAliasResolver.shared.resetForBulkEntryWipe()
                         PromptSuggestionEngine.shared.clearCache()
                         ReminderService.shared.requestReschedule()
                         InsightsResultCache.shared.clear()
+                        await WidgetSnapshotService.shared.clear()
                     }
                 }
 

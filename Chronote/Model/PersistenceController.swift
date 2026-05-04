@@ -173,6 +173,11 @@ final class PersistenceController {
                 if let url = storeDescription.url {
                     Log.info("[PersistenceController] Store location: \(url.path)", category: .persistence)
                 }
+                // **Store load 完成立刻 schedule 一次 widget snapshot refresh** —— 防 ChronoteApp.init
+                // 阶段 `Task.detached` 起的早期 refresh 跑得太早(stores 还没 ready),fetch 拿空,
+                // 写出 empty snapshot 把磁盘上的有效数据覆盖。WidgetSnapshotService 里 `requestRefresh`
+                // 也加了"stores 没 load 就 early return"的守卫双保险,这里负责在 ready 后 self-heal。
+                self?.scheduleWidgetSnapshotRefresh()
             }
         }
         
@@ -185,12 +190,31 @@ final class PersistenceController {
             forName: .NSPersistentStoreRemoteChange,
             object: container.persistentStoreCoordinator,
             queue: .main
-        ) { _ in
+        ) { [weak self] _ in
             Log.info("[PersistenceController] iCloud sync: Remote changes detected", category: .persistence)
             // automaticallyMergesChangesFromParent already merges CloudKit changes.
             // A blanket refreshAllObjects() here would discard unsaved edits in viewContext.
+            self?.scheduleWidgetSnapshotRefresh()
         }
         observers.append(remoteChangeObserver)
+
+        // **本进程 save** —— widget snapshot 刷新触发器之二。
+        // **必须 filter** `context.persistentStoreCoordinator === container.persistentStoreCoordinator`,
+        // 不然单测套件里 N 个 PersistenceController 实例会互相串台(CLAUDE.md 已记)。
+        // 仅 production store 挂(in-memory 不挂),避免 screenshot / 测试模式污染真实 widget snapshot。
+        if !inMemory {
+            let coordinator = container.persistentStoreCoordinator
+            let didSaveObserver = NotificationCenter.default.addObserver(
+                forName: .NSManagedObjectContextDidSave,
+                object: nil,
+                queue: nil
+            ) { [weak self] note in
+                guard let context = note.object as? NSManagedObjectContext,
+                      context.persistentStoreCoordinator === coordinator else { return }
+                self?.scheduleWidgetSnapshotRefresh()
+            }
+            observers.append(didSaveObserver)
+        }
 
         // 监听导入/导出事件 (iOS 14+ / macOS 11+)
         if #available(iOS 14.0, macOS 11.0, *) {
@@ -235,6 +259,16 @@ final class PersistenceController {
             object: self,
             userInfo: ["error": error]
         )
+    }
+
+    /// 主 App 端 widget snapshot 刷新的统一入口。
+    /// `WidgetSnapshotService` 内部已 250ms debounce,这里只是 hop 进 actor。
+    /// in-memory store 已被 service 内部 guard,不需要再判一次。
+    private func scheduleWidgetSnapshotRefresh() {
+        Task { [weak self] in
+            guard let self else { return }
+            await WidgetSnapshotService.shared.requestRefresh(persistence: self)
+        }
     }
     
     deinit {

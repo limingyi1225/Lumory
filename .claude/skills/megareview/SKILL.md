@@ -1,26 +1,31 @@
 ---
 name: megareview
-description: 不计成本对**整个 repo**(不是 uncommitted diff)做最严的 bug + 优化机会审计 —— 按目录 / 关注点切片并行召唤多个 Opus subagent + 跑 codex 仓库级 audit(走 codex:codex-rescue 的 read-only task,不是 /codex:review),最后主 agent 交叉核对量化事实并产出分级报告。用户说"megareview / 整库审查 / 全仓审计 / repo audit / 整个仓库找 bug 和优化点"时触发。
+description: 不计成本对**整个 repo**(不是 uncommitted diff)做最严的 bug + 优化 + **新功能机会**审计 —— 按目录 / 关注点切片**分波**召唤多个 Opus subagent(避免一次性 10+ 并发触发服务器限流)+ 跑 codex 仓库级 audit(走 codex:codex-rescue 的 read-only task,不是 /codex:review),最后主 agent 交叉核对量化事实并产出分级报告,**报告写完再让 codex:rescue 做一遍最终复审**。用户说"megareview / 整库审查 / 全仓审计 / repo audit / 整个仓库找 bug 和优化点 / 找新功能机会"时触发。
 ---
 
 # Megareview - 不计成本的整仓审计
 
 和 `/superreview` 同源,但 scope 不一样:
 - **superreview**:审 uncommitted changes(working tree / branch diff),commit/push/上架前的关。
-- **megareview**(本 skill):审**整个 repository 的现状** —— 找已经在 main 里、可能已经跑了几个月、但没人翻过的 bug + 高价值优化机会。不依赖 git diff。
+- **megareview**(本 skill):审**整个 repository 的现状** —— 找已经在 main 里、可能已经跑了几个月、但没人翻过的 bug + 高价值优化机会 + **可加的新功能 / 可以做得更好的体验点**。不依赖 git diff。
 
 ## 核心理念
 
 1. **整仓不能一锅端**:把 repo 按目录 + 关注点切成 N 个 slice,每个 subagent 只看一个 slice 一个角度。一锅 prompt "review 整仓"必然糊。
-2. **多视角并行 + 跨模型**:Opus(找语义 / 项目约定 / 隐藏耦合) + Codex(找语法层 bug / 库行为 / 大范围 grep 模式)互补。
-3. **Bug 与优化分两档**:这个 skill 不是只找 P0,**优化机会(性能 / 抽象 / 死代码 / 测试空白)是一等公民**。最终报告里要有"高 ROI 优化"区。
-4. **主 agent 强制核对**:Opus 在量化精度上系统性偏弱(行号 / 计数 / "未被使用" / 库行为),所有 finding 主 agent **必须 grep + Read + context7 验证**才能进最终报告(见 user memory `feedback_review_quality.md`)。
-5. **不计成本**:subagent `model: "opus"`,数量按仓库大小给到 8-15 个,Codex 也是 1-2 个 task 同时跑,**不为省 token 砍人头**。
+2. **多视角并行 + 跨模型**:Opus(找语义 / 项目约定 / 隐藏耦合 / 产品视角的"可以更好") + Codex(找语法层 bug / 库行为 / 大范围 grep 模式)互补。
+3. **三档输出**:这个 skill **不只是找 bug**:
+   - **BUG**(P0/P1/P2)— 已经错了
+   - **OPT**(HIGH/MID/LOW)— 技术债 / 性能 / 死代码 / 测试空白(internal facing)
+   - **FEAT**(HIGH/MID/LOW)— **能加的新功能 + 现在 work 但可以 work 更好的产品/UX 点**(user facing)
+   FEAT 是一等公民,不是附录。
+4. **主 agent 强制核对**:Opus 在量化精度上系统性偏弱(行号 / 计数 / "未被使用" / 库行为),所有 BUG/OPT finding 主 agent **必须 grep + Read + context7 验证**才能进最终报告。FEAT 不要核对存在性(本来就不存在),但要核对"是否已经实现了"(grep 关键词,别提已有的功能)。
+5. **不计成本但要分波发**:subagent `model: "opus"`,数量按仓库大小给到 8-15 个,Codex 1-2 个 task —— **但不能一条消息里全发出去**,会触发服务器并发限流(用户实测踩过)。改用**波次调度**:每波 3-4 个,**等当前波 Agent 全部回收后再发下一波**(Agent 是同步阻塞,每波本身就分钟级,自然错开,不需要显式 sleep)。详见 Step 3。
+6. **报告做完再让 codex 复审一次**:主 agent 写完 `megareview-*.md` 后,起一个 `codex:rescue` task 读这份报告,做"二审"—— 找漏掉的 angle / 误判的等级 / 重复条目 / 主 agent 自己也有 Opus 系统性偏弱的可能。详见 Step 5。
 
 ## 何时触发
 
-- 用户输入 `/megareview` 或说"megareview / 整库审查 / 全仓审计 / repo audit / 把整个仓库扒一遍找 bug / 整个项目找优化点"
-- 大版本上线前 / 季度技术债盘点 / 接手老代码后想全面摸底
+- 用户输入 `/megareview` 或说"megareview / 整库审查 / 全仓审计 / repo audit / 把整个仓库扒一遍找 bug / 整个项目找优化点 / 看看还能加什么功能 / 现在哪里可以做得更好"
+- 大版本上线前 / 季度技术债盘点 / 接手老代码后想全面摸底 / 想要新一轮 roadmap 候选
 - superreview 已经跑过 diff,但用户怀疑老代码里也有问题
 
 ## 何时**不**该用
@@ -49,94 +54,156 @@ git log --since=90.days --name-only --pretty=format: | sort | uniq -c | sort -rn
 git grep -nE 'TODO|FIXME|HACK|XXX|@deprecated' -- '*.swift' '*.js' '*.ts' | wc -l
 # 大文件(>500 行通常是重构候选)
 git ls-files | xargs wc -l 2>/dev/null | awk '$1>500 && $2!="total"' | sort -rn | head -20
+# Lumory 专属:CLAUDE.md 里的 "Follow-up backlog" / 项目内 P1/TODO 收集
+grep -nE 'P1|backlog|TODO' CLAUDE.md 2>/dev/null | head -30
 ```
 
-按规模决定 subagent 数量:
+按规模决定 subagent 数量 + 波次:
 
-| 仓库规模 | Opus subagents | Codex tasks |
-|---|---|---|
-| 小(< 5k LoC) | 6 | 1 |
-| 中(5k-30k LoC) | 8-10 | 1-2 |
-| 大(> 30k LoC) | 12-15+,按目录分片 | 2 |
+| 仓库规模 | Opus subagents | Codex tasks | 波次安排 |
+|---|---|---|---|
+| 小(< 5k LoC) | 6 | 1 | 2 波 × 3 个 |
+| 中(5k-30k LoC) | 8-10 | 1-2 | 3 波 × 3-4 个 |
+| 大(> 30k LoC) | 12-15+ | 2 | 4 波 × 3-4 个 |
 
 ### Step 2 — 切片(slice)+ 视角(angle)
 
 **切片维度**(按目录):每个 slice 是一组语义相关的文件。Lumory 参考切法:
 - **Models/Persistence**:`Chronote/Model/*` + `PersistenceController.swift` + `*BackfillService.swift`
 - **AI/Network/SSE**:`OpenAIService.swift` + `AIService.swift` + `NetworkRetryHelper.swift` + `InsightsEngine.swift` + `ContextPromptGenerator.swift`
-- **Audio/Speech**:`AppleSpeechRecognizer.swift` + `AudioRecorder.swift` + 相关 Views
+- **Audio/Speech**:`AudioRecorder.swift` + `OpenAITranscriber.swift` + `Transcriber.swift` + 相关 Views
 - **Home VM stack**:`Chronote/Views/HomeView.swift` + `Chronote/Views/HomeView/`(三个 @Observable VM)
 - **Insights/AskPast**:`Chronote/Views/Insights/*`
 - **Search/Detail/Settings**:`SearchView.swift` + `DiaryDetailView.swift` + `SettingsView.swift` + `DiaryImportView.swift` + `DiaryExportView.swift`
+- **Reminder/Widget/URL**:`ReminderService.swift` + `WidgetSnapshotService.swift` + `LumoryURLRouter.swift` + `LumoryWidgets/` + `LumoryWidgetShared/`
 - **Backend**:`server/*.js` + `ecosystem.config.js`
 - **Tests**:`ChronoteTests/*` + `ChronoteUITests/*`
 - **Scripts/Build**:`Scripts/*` + 根目录 `*.sh` + `Lumory.xcconfig` + `Lumory-Info.plist`
-- **Cross-cutting**(给单独的 subagent):dead code / 未引用 symbol / 重复逻辑 / 命名不一致
+- **Cross-cutting**:dead code / 未引用 symbol / 重复逻辑 / 命名不一致 / **产品体验**(单独 slice 给 FEAT 视角用)
 
 **视角维度**(按关注点):
 
-| 视角 | 推荐 subagent_type | 重点 |
-|---|---|---|
-| Bug — 正确性 | code-reviewer | 逻辑错 / off-by-one / 边界 / null / 异常吞掉 / 错误返回值 / 数据竞争 |
-| Bug — 并发 | general-purpose(Lumory: Swift Concurrency 重点) | actor 隔离 / @MainActor 违反 / Sendable 漏标 / 取消语义 / `performAndWait` 内 main.sync 死锁 |
-| Bug — 安全 | security-auditor / backend-security-coder | 注入 / 鉴权 / fail-open / 密钥泄漏 / SSE 错误处理 / OWASP |
-| Bug — 数据 | **coredata-migration-reviewer**(项目 agent) | CoreData schema 不兼容 / CloudKit 限制 / backfill 幂等性 / DTO Sendable |
-| Perf | performance-engineer / database-optimizer | 主线程 IO / N+1 fetch / 缓存缺失 / 内存泄漏 / O(n²) 在热路径 / 不必要的 reactive 重渲染 |
-| 优化 — 抽象 | architect-review | 抽象泄漏 / 重复逻辑 / SRP 违反 / 应该提的 helper / 应该砍的中间层 |
-| 优化 — 死代码 | code-reviewer / general-purpose | 未被任何 caller 引用的 func/class/file / 已废弃 flag / 注释掉的代码 / 未跑的测试 |
-| 优化 — 测试 | test-automator | 关键路径无单测 / mock 错配 / 边界没覆盖 / UI 测试脆弱 |
-| 优化 — DX/构建 | devops-troubleshooter / general-purpose | 构建脚本脆 / CI 缺失 / 工具链漂移 / 重复 lint 规则 |
-| API contract | api-design-principles | 后端 vs 客户端协议匹配 / 错误码 / 版本化 / SSE 帧格式 |
-| Style/约定 | code-reviewer | 项目既有约定(CLAUDE.md)/ 命名 / 文件组织 / 日志 API 用法 |
+⚠️ **subagent_type 必须是 harness allowlist 内的**(CLAUDE.md 列了池子):`code-reviewer` / `general-purpose` / `Explore` / `Plan` / `coredata-migration-reviewer` / `sse-pipeline-reviewer` / `debugger` / `code-simplifier:code-simplifier` / `feature-dev:*` / `plugin-dev:*` / `agent-sdk-dev:*` / `codex:codex-rescue` / `claude-code-guide`。**`security-auditor` / `performance-engineer` / `architect-review` / `test-automator` / `devops-troubleshooter` / `database-optimizer` / `api-design-principles` / `backend-security-coder` 都不在池里 —— 派进去 hard error**。下面表里专项视角全部走 `code-reviewer` 或 `general-purpose`,把视角焦点写进 prompt。
 
-**切片 × 视角 = subagent**。一个 subagent 一组(slice, angle)。同一个 slice 可以被多个 angle 各看一次,同一个 angle 可以扫多个 slice(看哪种更贴这次审计目标)。
+| 视角 | subagent_type | 重点 | 类别 |
+|---|---|---|---|
+| Bug — 正确性 | code-reviewer | 逻辑错 / off-by-one / 边界 / null / 异常吞掉 | BUG |
+| Bug — 并发 | general-purpose | actor 隔离 / @MainActor 违反 / Sendable 漏标 / 取消语义 / 死锁 | BUG |
+| Bug — 安全 | code-reviewer | 注入 / 鉴权 / fail-open / 密钥泄漏 / SSE 错误处理 | BUG |
+| Bug — 数据 | **coredata-migration-reviewer** | CoreData schema / CloudKit 限制 / backfill 幂等性 | BUG |
+| Bug — SSE 管道 | **sse-pipeline-reviewer** | 服务端 res.destroy vs [DONE] / 客户端 SSEParser / NetworkRetryHelper | BUG |
+| Perf | general-purpose | 主线程 IO / N+1 fetch / 缓存缺失 / 内存泄漏 / 不必要重渲染 | OPT |
+| 优化 — 抽象 | general-purpose | 抽象泄漏 / 重复逻辑 / SRP / 应该提的 helper | OPT |
+| 优化 — 死代码 | code-reviewer | 未被引用的 func/class/file / 注释掉的代码 | OPT |
+| 优化 — 测试 | general-purpose | 关键路径无单测 / mock 错配 / 边界没覆盖 | OPT |
+| 优化 — DX/构建 | general-purpose | 构建脚本脆 / CI 缺失 / 工具链漂移 | OPT |
+| API contract | code-reviewer | 后端 vs 客户端协议 / 错误码 / SSE 帧格式 | OPT/BUG |
+| **FEAT — 新功能** | **general-purpose** | **基于现有 model/service 自然延伸的功能(导出格式 / 新可视化 / 新交互)/ 用户已经在用但缺 affordance 的隐性需求** | **FEAT** |
+| **FEAT — UX/Polish** | **general-purpose** | **现在 work 但可以更好:loading 态缺失 / 错误提示糊 / 空态生硬 / 动效缺失 / 无障碍 / i18n 漏字符串 / 边角交互(键盘 / VoiceOver / iPad 适配)** | **FEAT** |
+| Style/约定 | code-reviewer | CLAUDE.md 约定 / 命名 / 日志 API 用法 | OPT |
+
+**切片 × 视角 = subagent**。一个 subagent 一组(slice, angle)。同一个 slice 可以被多个 angle 各看一次。
 
 **Lumory 强制视角**(一定要召唤):
 - `coredata-migration-reviewer` 看 Models/Persistence + 任何动 `DiaryEntry` schema 的服务
-- backend-security 看 `server/*.js`(SSE 错误关闭 / rate-limit / X-App-Secret fail-closed / `res.destroy(error)` vs `data: [DONE]`)
-- 死代码扫(整仓):上次 `e01fd29 refactor: drop dead code (28 iOS symbols + 1 backend devDep)` 砍掉 28 个,这是反复要扫的场景
+- `sse-pipeline-reviewer` 看 AI/Network/SSE slice(项目自带 agent)
+- 死代码扫(整仓):反复要扫的场景
+- **FEAT — 新功能 + UX/Polish 至少各 1 个**(user 这次明确要求,以后默认带)
 
-### Step 3 — 并行召唤(单条消息内 N 个 Agent tool call + Codex)
+### Step 3 — **波次调度**召唤(关键改动:不能一次性全发)
 
-每个 Opus subagent prompt **必须**包含:
-- **本次审计目标**:"找仓库已存在的 bug 和高 ROI 优化点;这不是 diff review"
+**为什么分波**:用户实测一条消息里 10+ Agent tool call 会触发服务器并发限流(具体表现可能是部分 subagent 直接 fail / 排队超时)。即使没限流,响应回来同步等也容易超 context window。
+
+**波次规则**:
+- **每波 3-4 个 Agent + 至多 1 个 codex task**
+- 波之间**不需要显式 sleep** —— `Agent` 调用本身是同步阻塞,每波回完都已经分钟级,自然错开。主 agent 一拿到 wave N 全部 result 就发 wave N+1,**别在 result 没回齐前预发下一波**(那等于绕过分波)。
+- Codex task 是 `--background`,不阻塞,**第一波就发**(让它边跑边等)
+- **Wave 1**:**强制视角 + Codex** —— `coredata-migration-reviewer`(Models/Persistence)、`sse-pipeline-reviewer`(AI/SSE)、整仓 dead code 扫、Codex bug audit。这一波最关键,先发。
+- **Wave 2**:bug 类剩余 angle —— 并发 / 安全 / API contract / Home VM stack 等
+- **Wave 3**:OPT 类 —— 抽象 / 测试 / 性能 / DX
+- **Wave 4**(中大型仓库):FEAT 类 + 第二个 Codex task(产品/UX 视角,可以单独跑)。FEAT 放最后是因为它最不紧急,如果前面已经把 context 用满了可以从 4 波退回 3 波
+
+**示意结构**(伪代码,主 agent 实际照这个流程发):
+
+```
+# Wave 1 (单条消息内并行)
+  Agent { subagent_type: "coredata-migration-reviewer", model: "opus", ... }
+  Agent { subagent_type: "sse-pipeline-reviewer", model: "opus", ... }
+  Agent { subagent_type: "code-reviewer", description: "Dead code scan", model: "opus", ... }
+  Skill { skill: "codex:rescue", args: "--background --fresh ..." }
+
+# === 等 Wave 1 全部 Agent 同步回收 (Codex 仍后台跑) ===
+
+# Wave 2 (单条消息内并行)
+  Agent { subagent_type: "general-purpose", description: "Concurrency review on AI/Network", model: "opus", ... }
+  Agent { subagent_type: "code-reviewer", description: "Backend security", model: "opus", ... }
+  Agent { subagent_type: "general-purpose", description: "Home VM stack correctness", model: "opus", ... }
+
+# === 等 Wave 2 回完 ===
+
+# Wave 3 (单条消息内并行)
+  Agent { subagent_type: "general-purpose", description: "Perf hot paths", model: "opus", ... }
+  Agent { subagent_type: "general-purpose", description: "Test coverage gaps", model: "opus", ... }
+  Agent { subagent_type: "general-purpose", description: "Abstraction / SRP audit", model: "opus", ... }
+
+# === 等 Wave 3 回完 ===
+
+# Wave 4 (单条消息内并行) - FEAT
+  Agent { subagent_type: "general-purpose", description: "FEAT: new feature opportunities", model: "opus", ... }
+  Agent { subagent_type: "general-purpose", description: "FEAT: UX polish & accessibility", model: "opus", ... }
+  Skill { skill: "codex:rescue", args: "--background --fresh Audit Lumory for product-side improvements: empty states, error UX, loading states, i18n gaps, accessibility, iPad adaptation. Read-only." }
+```
+
+**每个 Opus subagent prompt 必须包含**:
+- **本次审计目标**:"找仓库已存在的 bug / 高 ROI 优化点 / **新功能机会和体验改进点**;这不是 diff review"
 - **slice 文件清单**(具体路径,别让 agent 自己猜)
 - **专项 angle**(只看这个角度,其他 angle 别人会看)
-- **输出格式**:`[BUG-P0/P1/P2 | OPT-HIGH/MID/LOW] file:line — 一句话问题 — 一句话修复 — 一段证据(代码片段或调用链)`
-- **量化要求**:所有"X 处"/"未被使用"/"N 次"陈述必须给 grep 结果或代码片段,主 agent 会逐条核对
-- **范围克制**:不要建议大重构,只标"应该被处理的点"
+- **输出格式**:`[BUG-P0/P1/P2 | OPT-HIGH/MID/LOW | FEAT-HIGH/MID/LOW] file:line — 一句话标题 — 问题/机会描述 — 建议 — 证据(代码片段或调用链;FEAT 类给"为什么用户会受益"的理由)`
+- **量化要求**(BUG/OPT):所有"X 处"/"未被使用"/"N 次"陈述必须给 grep 结果或代码片段
+- **范围克制**:不要建议大重构;FEAT 标"小到中等改动量"的点,大功能(>1 周工作量)单独标 FEAT-HIGH 但写明"需要拆 epic"
 - 显式 `subagent_type` + `model: "opus"`
 
-#### Codex 任务(关键,和 Opus 同时发)
+#### FEAT subagent prompt 特别强调
+
+FEAT 视角的 prompt 要写清楚**不要的东西**:
+- ❌ "应该做 AI agent 化 / 大模型 finetune" 这类天上掉下来的方向 → 这是产品战略不是 review
+- ❌ 已经在 CLAUDE.md "Follow-up backlog" 里的(可以搜一下避免重复)
+- ❌ 模糊建议"加更多动画" → 必须指出**哪个具体场景**的动画缺失
+
+要的:
+- ✅ "DiaryDetailView 的图片预览没有 zoom-pinch,但 ImageViewerView 已经实现了 zoom,这两处行为不一致 — 把 ImageViewerView 风格挪到 detail 里"
+- ✅ "Insights 的 ThemeCardList 长按缺 haptic feedback,其他 list 都有 — 体验不一致"
+- ✅ "Reminder Settings 的 hour:minute picker 没有'下次将于 X 触发'的预览 — 用户拨完没确认感"
+
+#### Codex 任务(Wave 1 + Wave 4 各一)
 
 **不要**用 `/codex:review` 或 `/codex:adversarial-review` —— 它们只看 git state,在 megareview 场景里 diff 通常是空的,会被 codex 直接回"nothing to review"。
 
 **正确做法**:走 `codex:codex-rescue`(=`codex-companion.mjs task`),把 audit 当任务派发,**显式 read-only**(让 rescue agent 不加 `--write`)。
 
-最简调用,在主消息里和 Opus 并行触发:
+Wave 1 Codex(bug-focused):
 
 ```
 Skill({
   skill: "codex:rescue",
-  args: "--background --fresh Audit the entire Lumory repository read-only. Do NOT edit any files. Find: (1) latent bugs in production code (concurrency, error handling, edge cases, security, data integrity), (2) high-ROI optimizations (perf hot paths, dead code, repeated logic, missing tests). Focus on Chronote/Services and server/index.js first. Output a prioritized list with file:line evidence. Do not run builds or tests."
+  args: "--background --fresh Audit the entire Lumory repository read-only. Do NOT edit any files. Find: latent bugs (concurrency, error handling, edge cases, security, data integrity) and high-ROI optimizations (perf hot paths, dead code, repeated logic). Focus on Chronote/Services and server/index.js first. Output a prioritized list with file:line evidence. Do not run builds or tests."
 })
 ```
 
-(`--fresh` 防 resume 上次,`--background` 让 codex 后台跑;主对话继续推进 Opus 这条线。)
+Wave 4 Codex(product/UX-focused,可选):
 
-**仓库特别大 / 想要双视角**:开两个 codex task,一个聚焦 iOS / Swift Concurrency,一个聚焦 server + SSE + 鉴权。两个独立 background task,prompt 写清楚分工。
-
-#### Step 3 调用模板(单条消息内,N 个 Agent + 1-2 个 codex skill)
-
-主 agent 一条 message 里同时发:
-- N 个 `Agent` 调用(每个 `model: "opus"`,见上面 angle × slice 矩阵)
-- 1-2 个 `Skill({ skill: "codex:rescue", ... })`
-
-**不要**串行发,subagent 之间无依赖。
+```
+Skill({
+  skill: "codex:rescue",
+  args: "--background --fresh Audit Lumory read-only for product/UX improvements: empty states, error toasts, loading states, missing haptic feedback, accessibility (VoiceOver labels, Dynamic Type), i18n string gaps, iPad layout adaptation, keyboard shortcuts. Output as FEAT-HIGH/MID/LOW with file:line and a one-sentence user-benefit rationale."
+})
+```
 
 ### Step 4 — 等回收 + 主 agent 核对(最关键 — 不要跳)
 
-Opus subagents 回完之后,Codex background task 用 `/codex:status` 看进度,完成后 `/codex:result` 取结果(skill 形式:`Skill({ skill: "codex:result" })`)。如果 Codex 还在跑且 Opus 已经齐了,**等**,megareview 就是不计成本,不要为了快漏掉 Codex 那一份。
+各波 Opus 同步回完后,Codex background task 由 `codex:rescue` skill 自己管 lifecycle —— 它返回的内容里包含 task id / 状态。如果 wave 1 codex 还没回结果就再 `Skill({ skill: "codex:rescue", args: "<原 task id 或 follow-up 引用>" })` 询问进度,直到拿到完整 audit。**Codex 还在跑就等**,megareview 是不计成本。
+
+(实际机制以 `codex:rescue` 当前版本为准 —— 不要假设有 `/codex:status` 或 `codex:result` 这类独立 skill,本仓 skill 池里没有。)
 
 **不能**直接合并 paste。必须做:
 
@@ -144,11 +211,11 @@ Opus subagents 回完之后,Codex background task 用 `/codex:status` 看进度,
 
 - 同一处问题被多个 reviewer 提到 → 合一条,credit 多个来源(可信度↑)
 - finding 之间互相矛盾 → 标"冲突",自己读代码裁决
-- "Bug" 和 "优化"分两堆,不混着写
+- BUG / OPT / FEAT 分三堆,**不混着写**
 
 #### B. 量化事实核对(Opus 系统性弱点 — 必查)
 
-对每条 finding 中的:**计数 / 行号 / 文件位置 / "未被使用" / "dead code" / "X 处" / 库行为陈述**,主 agent 必须验证:
+对每条 BUG/OPT finding 中的:**计数 / 行号 / 文件位置 / "未被使用" / "dead code" / "X 处" / 库行为陈述**,主 agent 必须验证:
 
 | 陈述类型 | 验证手段 |
 |---|---|
@@ -159,26 +226,36 @@ Opus subagents 回完之后,Codex background task 用 `/codex:status` 看进度,
 | "运行时一定崩 / 死锁" | 看实际调用入口和调用顺序,Read 上下文 50 行 |
 | "重复逻辑 N 处" | grep 关键 token,确认是真重复还是只是相似命名 |
 
+**FEAT 的核对**:不查"是否真有 bug",查**"是否已经实现"**:
+- 提议"加 X 功能" → grep 关键词,确认仓里没有
+- 提议"改进 Y 体验" → Read 对应 view,确认 reviewer 描述的现状是真的(不是看错了已经存在的实现)
+- CLAUDE.md "Follow-up backlog" 里已经记录的 → 标注"已在 backlog,本次确认仍未做",不当成新发现
+
 **核对不通过的**:
-- 数字错了 → 改正后保留 finding
-- 完全错了(dead code 其实活的 / "崩"实际不会跑到)→ 移到"已被否决"区,写否决理由
-- 没法验证 → 降级到"待确认"区,**不放进 P0/P1 或 OPT-HIGH**
+- 数字错了 → 改正后保留
+- 完全错了 → 移到"已被否决"区,写否决理由
+- 没法验证 → 降级到"待确认",**不放进 P0/P1 或 HIGH**
 
 #### C. 分级校准
 
 **Bug 档**:
-- **P0** = 必须修:已观察到 / 确定能复现的 crash / 数据丢失 / 鉴权破洞 / fail-closed 失效
+- **P0** = 必须修:确定能复现的 crash / 数据丢失 / 鉴权破洞 / fail-closed 失效
 - **P1** = 应该修:逻辑错(已被实际调用)/ 性能踩坑 / 关键路径缺测试覆盖
 - **P2** = nice to fix:可读性 / 边角 case / 罕见路径
 
 **优化档**:
-- **OPT-HIGH** = ROI 高:大段死代码可以删 / 热路径 N+1 → batch / 主线程阻塞改 background / 重复逻辑提取一次性收益大
-- **OPT-MID** = 值得做:抽象更清晰 / 测试覆盖补关键路径 / 日志/可观测性补
+- **OPT-HIGH** = ROI 高:大段死代码可删 / 热路径 N+1 → batch / 主线程阻塞改 background
+- **OPT-MID** = 值得做:抽象更清晰 / 测试覆盖补关键路径 / 日志/可观测性
 - **OPT-LOW** = 看心情:命名 / 风格 / 可读性
 
-把每条 P0/P1/OPT-HIGH 的等级跟"实际 runtime / 用户能感知到"对一遍 —— dead helper 的 bug 应降级、写一次的优化收益小的应降级。
+**新功能/体验档**:
+- **FEAT-HIGH** = 高用户价值 + 改动 ≤ 1-3 天:用户每天都会触发 / 一致性补齐 / 关键路径的体验空缺
+- **FEAT-MID** = 锦上添花:明确受益但不是高频
+- **FEAT-LOW** = 等有空再说:边角 case / 极少数用户的体验
 
-#### D. 写最终报告
+把 P0/P1/OPT-HIGH/FEAT-HIGH 跟"实际 runtime / 用户能感知到"对一遍 —— dead helper 的 bug 应降级、写一次的优化收益小的应降级、用户一辈子触发不到的 FEAT 应降级。
+
+#### D. 写第一版报告
 
 写到 `CodeReview/megareview-YYYYMMDD-HHmm.md`(`CodeReview/` 已在 .gitignore;如未在则加上):
 
@@ -189,14 +266,14 @@ Opus subagents 回完之后,Codex background task 用 `/codex:status` 看进度,
 - 总文件 / LoC / 顶层目录分布
 - 最近 90 天 churn 热点文件 top N
 - TODO/FIXME 总数
-- 触发的视角:[列出 subagent 视角 + slice 清单]
+- 触发的视角 + 波次:[列出 subagent 视角 + slice 清单 + 每波时间戳]
 
 ## Bug — P0(必修)
 ### 1. <一句话标题>
 - **来源**:correctness × codex(2 个 reviewer 都标了)
 - **位置**:`Chronote/Foo.swift:123`
 - **问题**:...
-- **核对**:grep 了 `funcName` 全仓 7 处调用,确认是热路径(`Bar.swift:45`、`Baz.swift:200` ...)
+- **核对**:grep 了 `funcName` 全仓 7 处调用,确认热路径
 - **建议修复**:...
 
 ## Bug — P1(应修)
@@ -209,42 +286,86 @@ Opus subagents 回完之后,Codex background task 用 `/codex:status` 看进度,
 ### 1. <一句话标题>
 - **来源**:dead-code × architect
 - **位置**:`Chronote/Services/UnusedThing.swift`(整文件)
-- **问题**:...
-- **核对**:`grep -r UnusedThing` 全仓 0 caller(包含测试 / xcconfig / plist 都 0)
-- **预估收益**:删 ~120 行 / 减一个并发盲点
+- **核对**:`grep -r UnusedThing` 全仓 0 caller(测试 / xcconfig / plist 都 0)
+- **预估收益**:删 ~120 行
 - **建议**:删
 
-## 优化 — OPT-MID
+## 优化 — OPT-MID / OPT-LOW
 ...
 
-## 优化 — OPT-LOW
+## 新功能 / 体验改进 — FEAT-HIGH
+### 1. <一句话标题>
+- **来源**:UX-polish reviewer
+- **位置**:`Chronote/Views/DiaryDetailView.swift:430-460`
+- **现状**:用户在 detail 看图,只能 tap 进 ImageViewerView 才能 zoom;detail inline 预览本身不支持 pinch。
+- **机会**:把 ImageViewerView 的 zoom gesture 复用到 inline 预览;一致性 + 减一次 navigation。
+- **核对**:grep `MagnificationGesture` 在 DiaryDetailView 0 命中,ImageViewerView 1 命中;现状描述属实。
+- **改动量**:小(~30 行 + gesture 提取成 modifier)
+- **用户受益**:每个有图日记的用户都会触发(高频)
+
+## FEAT-MID / FEAT-LOW
 ...
 
-## 待确认(reviewer 提到但主 agent 没法验证 — 让用户决定)
+## 待确认(reviewer 提到但主 agent 没法验证)
 - ...
 
 ## 已否决(reviewer 提到但核对不通过)
-- <原 finding>:否决理由(grep 结果 / 文档链接)
+- <原 finding>:否决理由
 
 ## Reviewer 矩阵
-| Slice | Angle | subagent | 提了 N 条 | 命中率 |
-|---|---|---|---|---|
-| Models/Persistence | data | coredata-migration-reviewer (Opus) | 5 | 4/5 |
-| Services/AI | concurrency | general-purpose (Opus) | 8 | 6/8 |
-| server/ | security | backend-security-coder (Opus) | 4 | 3/4 |
-| 整仓 | dead code | code-reviewer (Opus) | 6 | 5/6 |
-| 整仓 | codex audit | codex-rescue | 12 | 9/12 |
-| ...
+| 波次 | Slice | Angle | subagent | 提了 N 条 | 命中率 |
+|---|---|---|---|---|---|
+| W1 | Models/Persistence | data | coredata-migration-reviewer | 5 | 4/5 |
+| W1 | AI/SSE | sse-pipeline | sse-pipeline-reviewer | 3 | 3/3 |
+| W1 | 整仓 | bug audit | codex-rescue | 12 | 9/12 |
+| W2 | ... | ... | ... | ... | ... |
+| W4 | 整仓 | UX/polish | general-purpose | 8 | 7/8 |
 ```
 
-报告写完后告诉用户路径,**不要**在主对话里 paste 全文(太长,用户去文件看)。可以摘:
-- P0 数量 + 标题(全列)
+### Step 5 — 让 codex:rescue 复审报告(新增)
+
+主 agent **不能信任自己**(Opus 系统性偏弱也适用于自己整合的报告 —— 可能漏 angle、误判等级、重复条目没发现)。报告 `megareview-YYYYMMDD-HHmm.md` 写完后,起一个 codex task 做二审:
+
+```
+Skill({
+  skill: "codex:rescue",
+  args: "--background --fresh Read the megareview report at CodeReview/megareview-<YYYYMMDD-HHmm>.md. Do NOT edit any files. Critique it: (1) Are any P0/P1/OPT-HIGH/FEAT-HIGH items mis-prioritized (too high or too low) given the actual codebase impact? (2) Are there obvious BUG / OPT / FEAT angles the report missed entirely (do a sanity grep across Chronote/ and server/ for things like force-unwraps, retained-cycle risks, unused public APIs, missing accessibility labels, hardcoded English in zh-Hans paths)? (3) Any duplicate findings that should be merged? (4) Any '已否决' items that were actually correct and should be reinstated? Output verdict per existing finding (KEEP / DOWNGRADE / UPGRADE / DROP) plus a list of missed findings. Read-only — do not modify the report file."
+})
+```
+
+`--background` + `--fresh`,完成后由 `codex:rescue` 自身机制返回结果(同 Step 4 备注 —— 没有独立的 `/codex:status` / `codex:result` skill)。
+
+拿到 codex 二审结果后:
+- **Verdict 表**:跟主 agent 自己的判断逐条对一遍。codex 升降级理由如果合理 → 接受并改 report;不合理 → 在 report 末尾"复审反驳"小节写为什么不接受
+- **Missed findings**:逐条核对(同 Step 4-B 的核对手段 —— grep + Read);确认存在的话补进 report 对应分级
+- **重复合并**:接受
+- 如果 codex 复审产出超过 3 条主 agent 接受的修订 → 在报告头部加一行"经 codex 二审,X 条调整 / Y 条新增"
+
+最后在 report 末尾加一段:
+
+```markdown
+## Codex 二审结果(Step 5)
+- 复审时间:<timestamp>
+- 调整:<keep/upgrade/downgrade/drop 计数>
+- 新增 finding:<N> 条(已并入对应分级)
+- 主 agent 反驳:<列出不接受 codex 调整的条目 + 理由>
+```
+
+### Step 6 — 主对话回报
+
+主对话**只回**:
+- 报告路径
+- BUG-P0 数量 + 标题(全列)
 - OPT-HIGH 前 3 条标题
-- 一句话整体观感(技术债集中在哪 / 哪个模块最值得动)
+- **FEAT-HIGH 前 3 条标题**
+- Codex 二审带来的关键修订(1-2 句)
+- 一句话整体观感(技术债集中在哪 / 哪个模块最值得动 / 哪条 FEAT 最该排上日程)
+
+**不要 paste 全文**,用户去文件看。
 
 ## Lumory 项目专属核对清单
 
-主 agent 在 Step 4 的核对阶段,拿这份清单过一遍 finding 是否覆盖了已知踩坑(也是 reviewer 没提就该自己补的):
+主 agent 在 Step 4 的核对阶段,拿这份清单过一遍 finding 是否覆盖了已知踩坑(reviewer 没提就该自己补的):
 
 - [ ] 有没有 main thread 调 `bg.performAndWait` block 内 `DispatchQueue.main.sync`(SIGTRAP 9005...)
 - [ ] SSE 上游错误是不是 `res.destroy(error)` 而不是 `data: [DONE]`
@@ -255,35 +376,42 @@ Opus subagents 回完之后,Codex background task 用 `/codex:status` 看进度,
 - [ ] bash 脚本 `cmd | cmd || true` 有没有覆盖 `PIPESTATUS`
 - [ ] 后端 `APP_SHARED_SECRET` 缺失是不是仍然 fail-closed
 - [ ] `AppSecrets.swift` 有没有新硬编码 secret(应该走 xcconfig 注入链)
-- [ ] `URLSession.sslTolerantSession` 有没有人误以为是绕证书的实现(其实只是 timeout 配置,有没有引入新的 URLSessionDelegate didReceiveChallenge)
-- [ ] `NSManagedObject` 跨 await 有没有漏 `@MainActor`(Swift 6 Sendable 报错)
+- [ ] `URLSession.sslTolerantSession` 有没有人误以为是绕证书的实现
+- [ ] `NSManagedObject` 跨 await 有没有漏 `@MainActor`(Swift 6 Sendable)
 - [ ] UITestSampleData guard(`NSInMemoryStoreType` + url=/dev/null)有没有被破坏
-- [ ] xcconfig / pbxproj 里 `showEnvVarsInLog = 0` 有没有被改回 1(secret 进 build log)
+- [ ] xcconfig / pbxproj 里 `showEnvVarsInLog = 0` 有没有被改回 1
 - [ ] `Log.warn`(错的)vs `Log.warning`(对的);`Log.Category` 有没有用了未注册的分类
+- [ ] **批量删 entry "五件套"清理**(Reminder + ThemeAlias + PromptSuggestion + InsightsResultCache + WidgetSnapshot)有没有漏
+- [ ] **Widget snapshot V2 schema** 有没有新加正文/snippet 字段(不该加)
+- [ ] **`useContextualBody` / 未来 `useContextualPrompt`** 默认值翻转有没有漏 sentinel migration
 
 ## 调用示例
 
 用户:`/megareview`
 
 主 agent 该做:
-1. 跑摸底命令(并行 Bash:`git ls-files | wc -l` / 各目录文件数 / churn / TODO 统计 / 大文件)
-2. 看仓库规模选 slice × angle 矩阵(Lumory 中等规模 → 8-10 Opus + 1-2 Codex)
-3. 单条消息内:
-   - N 个 Agent tool call(每个 `model: "opus"`,prompt 自包含 slice + angle + 输出格式 + 量化要求)
-   - 1-2 个 `Skill({ skill: "codex:rescue", args: "--background --fresh ..." })`
-4. 等回收(Opus 同步,Codex 用 `/codex:status` 轮询;Codex 还在跑就等)
+1. 跑摸底 Bash(并行命令)
+2. 看仓库规模选 slice × angle 矩阵 + 波次数(Lumory 中等 → 3 波 + Wave 4 FEAT,共 8-10 Opus + 2 Codex)
+3. **波次发送**:Wave 1 → 等同步 Agent 回完 → Wave 2 → 等回完 → Wave 3 → 等回完 → Wave 4(每波本身就分钟级,自然错开,不需要显式 sleep)
+4. 等 Codex background task 由 codex:rescue 自身机制返回
 5. 跑核对(grep + Read + context7 + Lumory 清单)
-6. 写 `CodeReview/megareview-*.md`
-7. 主对话只回:报告路径 + P0 数量 + OPT-HIGH top-3 标题 + 一句话总结
+6. 写 `CodeReview/megareview-*.md` 第一版
+7. **Step 5: codex:rescue 二审报告**,根据 verdict 修订
+8. 主对话回:报告路径 + P0 数 + OPT-HIGH top-3 + **FEAT-HIGH top-3** + codex 二审摘要 + 一句话总结
 
 ## 失败模式 / 别这么干
 
-- ❌ 用 `/codex:review` 而不是 `codex:rescue`:diff 通常是空的,codex 会直接说"nothing to review",这个 skill 就废了
+- ❌ **一条消息发 10+ Agent call**:服务器并发限流,部分 subagent 直接挂或排队超时。必须分波。
+- ❌ 波次间不等当前波 result 回完就直接发下一波:等于没分波。同步 Agent 必须先全部回收,再发下一波。
+- ❌ **跳过 Step 5(codex 复审报告)**:主 agent 自己整合的 report 同样有 Opus 系统性偏弱,二审是质量保证,不是可选。
+- ❌ FEAT 视角省略 → 用户明确要求要看新功能/UX 改进点,这次默认要带
+- ❌ FEAT prompt 模糊("帮我想想还能加什么") → reviewer 会回一堆产品战略层级的空话。必须限定:小到中改动量 + 已存在功能的体验缺口 / 一致性补齐
+- ❌ 用 `/codex:review` 而不是 `codex:rescue`:diff 通常是空的,codex 会直接说"nothing to review"
 - ❌ 把所有 subagent 输出原样拼起来当报告 → 量化错误会被原样保留
 - ❌ subagent 数量缩水(为省钱跑 3 个) → 失去多视角互补的意义,这个 skill 就是不计成本
 - ❌ 跳过核对步骤 → 用户读到错的行号 / 错的"dead code"判断,修了反而引入 regression
 - ❌ 给 subagent 模糊 prompt("帮我看看整个仓库") → 视角散,大量重复 + 鸡毛蒜皮 finding
-- ❌ slice 不切就一锅塞:让一个 subagent 看 80 个文件,prompt 装不下,context 爆,输出糊
-- ❌ 全部串行 → 没必要,subagent 之间无依赖
-- ❌ Codex 给 `--write`(默认会加)→ 这是 read-only audit,显式在 prompt 写 "Do NOT edit any files",让 rescue agent 把 `--write` 关掉
-- ❌ 把"建议大重构"当 finding → 这个 skill 只标点,不画蓝图;重构请走 feature-dev / architect-review 流程
+- ❌ slice 不切就一锅塞:让一个 subagent 看 80 个文件,prompt 装不下,context 爆
+- ❌ Codex 给 `--write`(默认会加)→ 这是 read-only audit,显式在 prompt 写 "Do NOT edit any files"
+- ❌ 把"建议大重构"当 BUG/OPT finding → 重构请走 feature-dev / brainstorming 流程,不是 review
+- ❌ FEAT 写成"该做 AI 化 / 大模型 finetune" → 这是产品战略不是 review

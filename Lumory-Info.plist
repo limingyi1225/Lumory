@@ -22,5 +22,21 @@
 	     AppSecrets.swift 检测到 "$(" 前缀会落到空字符串 fallback → 后端 401。 -->
 	<key>APP_SHARED_SECRET</key>
 	<string>$(APP_SHARED_SECRET)</string>
+	<!-- URL scheme:widget tap "lumory://compose" 走 .onOpenURL → LumoryURLRouter
+	     → ReminderNotificationRouter.requestComposeFocus()。
+	     scheme 名跟 LumoryURLRouter.route(for:) 的 case 强一致 —— 改这里要同步改 router。 -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>Mingyi.Lumory.urls</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>lumory</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

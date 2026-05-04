@@ -185,12 +185,31 @@ final class PersistenceController {
             forName: .NSPersistentStoreRemoteChange,
             object: container.persistentStoreCoordinator,
             queue: .main
-        ) { _ in
+        ) { [weak self] _ in
             Log.info("[PersistenceController] iCloud sync: Remote changes detected", category: .persistence)
             // automaticallyMergesChangesFromParent already merges CloudKit changes.
             // A blanket refreshAllObjects() here would discard unsaved edits in viewContext.
+            self?.scheduleWidgetSnapshotRefresh()
         }
         observers.append(remoteChangeObserver)
+
+        // **本进程 save** —— widget snapshot 刷新触发器之二。
+        // **必须 filter** `context.persistentStoreCoordinator === container.persistentStoreCoordinator`,
+        // 不然单测套件里 N 个 PersistenceController 实例会互相串台(CLAUDE.md 已记)。
+        // 仅 production store 挂(in-memory 不挂),避免 screenshot / 测试模式污染真实 widget snapshot。
+        if !inMemory {
+            let coordinator = container.persistentStoreCoordinator
+            let didSaveObserver = NotificationCenter.default.addObserver(
+                forName: .NSManagedObjectContextDidSave,
+                object: nil,
+                queue: nil
+            ) { [weak self] note in
+                guard let context = note.object as? NSManagedObjectContext,
+                      context.persistentStoreCoordinator === coordinator else { return }
+                self?.scheduleWidgetSnapshotRefresh()
+            }
+            observers.append(didSaveObserver)
+        }
 
         // 监听导入/导出事件 (iOS 14+ / macOS 11+)
         if #available(iOS 14.0, macOS 11.0, *) {
@@ -235,6 +254,16 @@ final class PersistenceController {
             object: self,
             userInfo: ["error": error]
         )
+    }
+
+    /// 主 App 端 widget snapshot 刷新的统一入口。
+    /// `WidgetSnapshotService` 内部已 250ms debounce,这里只是 hop 进 actor。
+    /// in-memory store 已被 service 内部 guard,不需要再判一次。
+    private func scheduleWidgetSnapshotRefresh() {
+        Task { [weak self] in
+            guard let self else { return }
+            await WidgetSnapshotService.shared.requestRefresh(persistence: self)
+        }
     }
     
     deinit {

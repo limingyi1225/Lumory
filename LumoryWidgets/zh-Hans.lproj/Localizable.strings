@@ -1,0 +1,22 @@
+/* Lumory Widget — Simplified Chinese */
+
+"widget.display_name" = "记录此刻";
+"widget.description" = "在主屏快速记录今天,顺便看看连续天数和总字数。";
+
+"widget.cta.write_today" = "记录今天";
+"widget.state.recorded" = "今天已记录";
+
+"widget.streak.day_count" = "连续 %d 天";
+"widget.streak.zero" = "开启你的连续记录";
+
+"widget.stats.streak" = "连续";
+"widget.stats.longest_streak" = "最长";
+"widget.stats.total_entries" = "总篇数";
+"widget.stats.total_words" = "总字数";
+"widget.stats.entries_words" = "%d 篇 · %d 字";
+
+"widget.mood.today" = "今日心情";
+
+"widget.recent.title" = "最近记录";
+"widget.recent.fallback" = "已记录";
+"widget.empty.no_entries" = "暂无日记,从今天开始吧";

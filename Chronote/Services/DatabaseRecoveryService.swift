@@ -108,6 +108,9 @@ final class DatabaseRecoveryService {
                         ReminderService.shared.requestReschedule()
                         InsightsResultCache.shared.clear()
                     }
+                    // Widget snapshot:store 重建相当于全删,清掉防 stale 显示。
+                    // CloudKit 后续 import 进来后 PersistenceController observer 会再触发 refresh。
+                    Task { await WidgetSnapshotService.shared.clear() }
                 }
 
                 completion(.success(()))

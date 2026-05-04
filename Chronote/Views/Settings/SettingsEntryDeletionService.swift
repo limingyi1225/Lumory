@@ -19,6 +19,9 @@ enum SettingsEntryDeletionService {
             ThemeAliasResolver.shared.resetForBulkEntryWipe()
             PromptSuggestionEngine.shared.clearCache()
             InsightsResultCache.shared.clear()
+            // Widget snapshot:同步清空,防 widget 显示已删 entry 的 stale 数据。
+            // service.clear() 内部 sync 写 empty + reload,不需 await。
+            Task { await WidgetSnapshotService.shared.clear() }
         } catch {
             Log.error("[SettingsView] 删除所有日记失败: \(error)", category: .ui)
             viewContext.rollback()

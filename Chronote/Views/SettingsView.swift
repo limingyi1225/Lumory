@@ -47,6 +47,7 @@ struct SettingsView: View {
                 appHeaderSection
                 aiIndexSection
                 reminderSection
+                widgetSection
                 dataSection
                 languageSection
                 advancedSection
@@ -317,6 +318,46 @@ struct SettingsView: View {
                     hour: comps.hour ?? 21,
                     minute: comps.minute ?? 0
                 )
+            }
+        )
+    }
+
+    // MARK: - Widget
+
+    /// 主屏小组件设置。语义跟 reminderSection 不同(那条管通知文案,这条管主屏可见性),
+    /// 单独成 section。当前只有一个 toggle —— 是否把日记正文写进 widget snapshot。
+    /// **default off**(privacy-first,跟 reminder useContextualBody 同 idiom)。
+    @ViewBuilder
+    private var widgetSection: some View {
+        Section(header: Text(NSLocalizedString("主屏小组件", comment: "Home Screen Widget section"))) {
+            Toggle(
+                NSLocalizedString("在小组件显示日记内容", comment: "Toggle: show diary text in widget"),
+                isOn: widgetShowSnippetsBinding
+            )
+            Text(NSLocalizedString("关闭后,小组件只显示统计与状态(连续天数、总字数、今日心情),不写入正文。", comment: "Widget snippets toggle footer"))
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// Setter 路径需要三步:
+    /// 1. 把 UserDefaults 翻到位(给后续 refresh 读到正确值)
+    /// 2. on→off:同步先 scrub snapshot 里残留正文(防 250ms debounce 期进程被杀)
+    /// 3. 跑一次 refresh(`bypassDebounce: true`,await 完成)把 metadata 重算到位
+    private var widgetShowSnippetsBinding: Binding<Bool> {
+        Binding(
+            get: { UserDefaults.standard.bool(forKey: WidgetSnapshotService.showSnippetsDefaultsKey) },
+            set: { newValue in
+                let oldValue = UserDefaults.standard.bool(forKey: WidgetSnapshotService.showSnippetsDefaultsKey)
+                UserDefaults.standard.set(newValue, forKey: WidgetSnapshotService.showSnippetsDefaultsKey)
+                let persistence = PersistenceController.shared
+                if oldValue && !newValue {
+                    // on → off:立即同步擦盘,防 debounce 期进程退出
+                    WidgetSnapshotService.shared.scrubSnippetsImmediately()
+                }
+                Task {
+                    await WidgetSnapshotService.shared.requestRefresh(persistence: persistence, bypassDebounce: true)
+                }
             }
         )
     }

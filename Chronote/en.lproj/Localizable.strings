@@ -521,3 +521,8 @@
 "已删除主题「%@」" = "Theme \"%@\" deleted";
 "用最新的 AI 重新分析所有日记" = "Re-analyze all entries with the latest AI";
 "索引已是最新,无需重建" = "Index is up to date — no rebuild needed";
+
+/* Widget */
+"主屏小组件" = "Home Screen Widget";
+"在小组件显示日记内容" = "Show diary content in widget";
+"关闭后,小组件只显示统计与状态(连续天数、总字数、今日心情),不写入正文。" = "When off, the widget only shows stats and status (streak, total words, today's mood) — no diary text is written.";

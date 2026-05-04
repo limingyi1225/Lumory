@@ -8,7 +8,22 @@
 
 /* Begin PBXBuildFile section */
 		6A4D7E0D2F0E8BA400F8E6B1 /* Lumory.icon in Resources */ = {isa = PBXBuildFile; fileRef = 6A4D7E0C2F0E8BA400F8E6B1 /* Lumory.icon */; };
+		6A9900D0000000000000000D /* LumoryWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6A9900020000000000000002 /* LumoryWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		6A99000A0000000000000A00 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				6A9900D0000000000000000D /* LumoryWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXContainerItemProxy section */
 		6A2378392DE1CA9500544A70 /* PBXContainerItemProxy */ = {
@@ -25,6 +40,13 @@
 			remoteGlobalIDString = 6A23782A2DE1CA9400544A70;
 			remoteInfo = Chronote;
 		};
+		6A99000C0000000000000000 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6A2378232DE1CA9400544A70 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 6A9900010000000000000001;
+			remoteInfo = LumoryWidgets;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +57,9 @@
 		6A77D1042DEAA16200CEDDE5 /* ChronoteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChronoteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6A77D1052DEAA16200CEDDE5 /* ChronoteUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChronoteUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6A77D1172DEB27AA00CEDDE5 /* Lumory-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Lumory-Info.plist"; sourceTree = "<group>"; };
+		6A9900020000000000000002 /* LumoryWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = LumoryWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		6A9900030000000000000003 /* LumoryWidgets-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "LumoryWidgets-Info.plist"; sourceTree = "<group>"; };
+		6A9900040000000000000004 /* LumoryWidgets.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LumoryWidgets.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -51,6 +76,16 @@
 		6A2378452DE1CA9500544A70 /* ChronoteUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = ChronoteUITests;
+			sourceTree = "<group>";
+		};
+		6A9900050000000000000005 /* LumoryWidgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = LumoryWidgets;
+			sourceTree = "<group>";
+		};
+		6A9900060000000000000006 /* LumoryWidgetShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = LumoryWidgetShared;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -77,6 +112,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		6A9900080000000000000008 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -87,10 +129,15 @@
 				6A77D1172DEB27AA00CEDDE5 /* Lumory-Info.plist */,
 				6A77D1022DEAA14B00CEDDE5 /* Lumory.entitlements */,
 				6A4D7E0C2F0E8BA400F8E6B1 /* Lumory.icon */,
+				6A9900030000000000000003 /* LumoryWidgets-Info.plist */,
+				6A9900040000000000000004 /* LumoryWidgets.entitlements */,
+				6A9900060000000000000006 /* LumoryWidgetShared */,
 				6A23782D2DE1CA9400544A70 /* Chronote */,
+				6A9900050000000000000005 /* LumoryWidgets */,
 				6A23783B2DE1CA9500544A70 /* ChronoteTests */,
 				6A2378452DE1CA9500544A70 /* ChronoteUITests */,
 				6A77D1032DEAA14B00CEDDE5 /* Lumory.app */,
+				6A9900020000000000000002 /* LumoryWidgets.appex */,
 				6A77D1042DEAA16200CEDDE5 /* ChronoteTests.xctest */,
 				6A77D1052DEAA16200CEDDE5 /* ChronoteUITests.xctest */,
 			);
@@ -107,13 +154,16 @@
 				6A2378272DE1CA9400544A70 /* Sources */,
 				6A2378282DE1CA9400544A70 /* Frameworks */,
 				6A2378292DE1CA9400544A70 /* Resources */,
+				6A99000A0000000000000A00 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				6A99000B0000000000000B00 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				6A23782D2DE1CA9400544A70 /* Chronote */,
+				6A9900060000000000000006 /* LumoryWidgetShared */,
 			);
 			name = Lumory;
 			packageProductDependencies = (
@@ -121,6 +171,29 @@
 			productName = Lumory;
 			productReference = 6A77D1032DEAA14B00CEDDE5 /* Lumory.app */;
 			productType = "com.apple.product-type.application";
+		};
+		6A9900010000000000000001 /* LumoryWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6A9900100000000000001000 /* Build configuration list for PBXNativeTarget "LumoryWidgets" */;
+			buildPhases = (
+				6A9900070000000000000007 /* Sources */,
+				6A9900080000000000000008 /* Frameworks */,
+				6A9900090000000000000009 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				6A9900050000000000000005 /* LumoryWidgets */,
+				6A9900060000000000000006 /* LumoryWidgetShared */,
+			);
+			name = LumoryWidgets;
+			packageProductDependencies = (
+			);
+			productName = LumoryWidgets;
+			productReference = 6A9900020000000000000002 /* LumoryWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		6A2378372DE1CA9500544A70 /* ChronoteTests */ = {
 			isa = PBXNativeTarget;
@@ -189,6 +262,9 @@
 						CreatedOnToolsVersion = 16.3;
 						TestTargetID = 6A23782A2DE1CA9400544A70;
 					};
+					6A9900010000000000000001 = {
+						CreatedOnToolsVersion = 16.3;
+					};
 				};
 			};
 			buildConfigurationList = 6A2378262DE1CA9400544A70 /* Build configuration list for PBXProject "Lumory" */;
@@ -207,6 +283,7 @@
 			projectRoot = "";
 			targets = (
 				6A23782A2DE1CA9400544A70 /* Lumory */,
+				6A9900010000000000000001 /* LumoryWidgets */,
 				6A2378372DE1CA9500544A70 /* ChronoteTests */,
 				6A2378412DE1CA9500544A70 /* ChronoteUITests */,
 			);
@@ -230,6 +307,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		6A2378402DE1CA9500544A70 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6A9900090000000000000009 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -282,6 +366,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		6A9900070000000000000007 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -294,6 +385,11 @@
 			isa = PBXTargetDependency;
 			target = 6A23782A2DE1CA9400544A70 /* Lumory */;
 			targetProxy = 6A2378432DE1CA9500544A70 /* PBXContainerItemProxy */;
+		};
+		6A99000B0000000000000B00 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 6A9900010000000000000001 /* LumoryWidgets */;
+			targetProxy = 6A99000C0000000000000000 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -601,6 +697,71 @@
 			};
 			name = Release;
 		};
+		6A99000E0000000000000E00 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0AAAAA000000000000000001 /* Lumory.xcconfig */;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = LumoryWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 34;
+				DEVELOPMENT_TEAM = 9W3S5586KN;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "LumoryWidgets-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Lumory;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 4.4;
+				PRODUCT_BUNDLE_IDENTIFIER = Mingyi.Lumory.Widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		6A99000F0000000000000F00 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0AAAAA000000000000000001 /* Lumory.xcconfig */;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = LumoryWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 34;
+				DEVELOPMENT_TEAM = 9W3S5586KN;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "LumoryWidgets-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Lumory;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 4.4;
+				PRODUCT_BUNDLE_IDENTIFIER = Mingyi.Lumory.Widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -636,6 +797,15 @@
 			buildConfigurations = (
 				6A2378532DE1CA9500544A70 /* Debug */,
 				6A2378542DE1CA9500544A70 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		6A9900100000000000001000 /* Build configuration list for PBXNativeTarget "LumoryWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6A99000E0000000000000E00 /* Debug */,
+				6A99000F0000000000000F00 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

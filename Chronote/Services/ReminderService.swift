@@ -36,6 +36,14 @@ final class ReminderNotificationRouter: NSObject, ObservableObject, UNUserNotifi
         return requestID
     }
 
+    /// 共享 focus 入口:reminder 通知点击和 widget URL (`lumory://compose`) 都走这里。
+    /// 唯一一条 focus 通路 —— 新功能想触发 composer 都从这进。
+    nonisolated func requestComposeFocus() {
+        Task { @MainActor in
+            self.composeFocusRequestID = UUID()
+        }
+    }
+
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
@@ -47,9 +55,7 @@ final class ReminderNotificationRouter: NSObject, ObservableObject, UNUserNotifi
             categoryIdentifier: request.content.categoryIdentifier,
             userInfo: request.content.userInfo
         ) {
-            Task { @MainActor in
-                composeFocusRequestID = UUID()
-            }
+            requestComposeFocus()
         }
         completionHandler()
     }
@@ -94,6 +100,8 @@ final class ReminderNotificationRouter: ObservableObject {
     func consumeComposeFocusRequest() -> UUID? {
         nil
     }
+
+    nonisolated func requestComposeFocus() {}
 }
 #endif
 

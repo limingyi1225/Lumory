@@ -94,6 +94,14 @@ struct ChronoteApp: App {
             await WordCountBackfillService.backfillIfNeeded()
         }
 
+        // 启动时刷一次 widget snapshot —— PersistenceController 的 DidSave / RemoteChange
+        // observer 只在"有写"时才 fire,冷启动后第一次 widget reload 需要 snapshot 落盘。
+        // service 内部 250ms debounce + isInMemory guard,跟 backfill 并发也安全。
+        let persistenceForWidget = persistenceController
+        Task.detached(priority: .utility) {
+            await WidgetSnapshotService.shared.requestRefresh(persistence: persistenceForWidget)
+        }
+
         // NOTE：以前这里还自动跑过 `EmbeddingBackfillService.shared.backfillAll()`
         // 和 `ThemeBackfillService.shared.backfillProblems()`，想给 v3→v4 老用户
         // 免手动地把 embedding / themes 补齐。实际踩到：
@@ -258,6 +266,11 @@ struct ChronoteApp: App {
             }
             .onChange(of: scenePhase) { _, newPhase in
                 handleScenePhaseChange(newPhase)
+            }
+            .onOpenURL { url in
+                // 目前仅处理 `lumory://compose`(widget tap)。Reminder 通知点击走
+                // ReminderNotificationRouter.didReceive,不会经过这里。
+                LumoryURLRouter.handle(url)
             }
             .onReceive(NotificationCenter.default.publisher(for: .persistentStoreLoadFailed)) { note in
                 if let error = note.userInfo?["error"] as? NSError {

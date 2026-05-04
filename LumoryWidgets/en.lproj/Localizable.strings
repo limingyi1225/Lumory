@@ -1,0 +1,22 @@
+/* Lumory Widget — English */
+
+"widget.display_name" = "Capture This";
+"widget.description" = "Capture today's diary from your home screen and check your streak at a glance.";
+
+"widget.cta.write_today" = "Write today";
+"widget.state.recorded" = "Recorded today";
+
+"widget.streak.day_count" = "%d-day streak";
+"widget.streak.zero" = "Start your streak";
+
+"widget.stats.streak" = "Streak";
+"widget.stats.longest_streak" = "Longest";
+"widget.stats.total_entries" = "Entries";
+"widget.stats.total_words" = "Words";
+"widget.stats.entries_words" = "%d entries · %d words";
+
+"widget.mood.today" = "Today's mood";
+
+"widget.recent.title" = "Recent";
+"widget.recent.fallback" = "Recorded";
+"widget.empty.no_entries" = "No entries yet — start today";

@@ -327,9 +327,11 @@ final class ReminderService: ObservableObject {
         #endif
     }
 
-    /// Prefix-cancel 所有 `lumory.reminder.*` pending 通知。
-    /// 给 `disable()`(理论上)和 `refreshAuthorizationStatus`(权限被撤后)用 —— 不需要重排,
-    /// 只是要清掉 UN center 里残留的一次性请求,避免用户后续状态变化时旧通知仍然响。
+    /// Prefix-cancel 所有 `lumory.reminder.*` pending **和** delivered 通知。
+    /// 给 `disable()` 和 `refreshAuthorizationStatus`(权限被撤后)用。
+    /// - **pending**:还没 fire 的 one-shot,清掉防止未来 fire。
+    /// - **delivered**:已经 fire 落在通知中心 / 锁屏摘要里的,清掉防止用户关 reminder 后通知中心
+    ///   里还堆着旧 reminder 一直能看到。`removePendingNotificationRequests` 不清这个 list。
     private func cancelAllPendingReminderNotifications() async {
         #if canImport(UserNotifications)
         let center = UNUserNotificationCenter.current()
@@ -339,6 +341,19 @@ final class ReminderService: ObservableObject {
         }
         if !toCancel.isEmpty {
             center.removePendingNotificationRequests(withIdentifiers: toCancel)
+        }
+        let delivered = await center.deliveredNotifications()
+        let toRemoveDelivered = delivered.compactMap { notif -> String? in
+            notif.request.identifier.hasPrefix(identifierPrefix) ? notif.request.identifier : nil
+        }
+        if !toRemoveDelivered.isEmpty {
+            center.removeDeliveredNotifications(withIdentifiers: toRemoveDelivered)
+        }
+        if !toCancel.isEmpty || !toRemoveDelivered.isEmpty {
+            Log.info(
+                "[ReminderService] cleared pending=\(toCancel.count), delivered=\(toRemoveDelivered.count)",
+                category: .general
+            )
         }
         #endif
     }
@@ -381,14 +396,28 @@ final class ReminderService: ObservableObject {
         #endif
     }
 
-    // 以下 4 个函数曾标 `async`,但内部 0 个 await(纯写 @Published / UserDefaults / 调 sync
-    // requestReschedule)。强制 caller 写 `await` 是噪音 + 多绕一圈 Task hop。改成 sync。
-    // SettingsView 的 Binding setter 仍要 `Task { @MainActor in ... }` 包(setter 在 nonisolated
-    // 闭包里),但 Task 体内可以直接 sync 调,不需要 await。
-    func disable() {
+    // 以下 3 个 update*/disable 函数 update* 内部 0 await,sync。disable 因为要**同步等清理完成**(否则
+    // fire-and-forget 模式下用户关 toggle 立即切后台,iOS suspend 进程时 cancel Task 可能还没跑,
+    // 已挂的 cycleEnd.0..7 多条未来 one-shot 仍会按计划 fire 出去)所以是 async。
+    // SettingsView 的 Binding setter 在 `Task { @MainActor in ... }` 里,可以 await。
+
+    /// 关 reminder。**必须 await** —— caller 不能 fire-and-forget,清理工作要保证完成。
+    /// 步骤(两步式 cancel,防 in-flight race):
+    /// 1. 标 isEnabled=false + persist + bump gen,任何后续 reschedule 入口都被 `guard isEnabled` 挡掉。
+    /// 2. **第一次** await prefix 清 pending + delivered —— 抓存量。如果用户切后台 / 杀进程导致
+    ///    后续步骤跑不完,至少这一次清掉了大头。
+    /// 3. await 老 reschedule task `.value`,等它跑完 —— 它可能正卡在 `await center.add(...)`,
+    ///    add 完成那一瞬间又往 UN center 添一条新 pending(race 窗口)。
+    /// 4. **第二次** await prefix 清 pending + delivered —— 抓 race 新增。
+    func disable() async {
         isEnabled = false
         defaults.set(false, forKey: enabledKey)
-        requestReschedule()
+        let oldTask = rescheduleTask
+        rescheduleTask?.cancel()
+        currentRescheduleGen &+= 1
+        await cancelAllPendingReminderNotifications()  // 1) 存量
+        await oldTask?.value  // Task<Void, Never>:cancel 后 await .value 仍等到 Task 退出
+        await cancelAllPendingReminderNotifications()  // 2) race 新增
     }
 
     func updateTime(hour newHour: Int, minute newMinute: Int) {

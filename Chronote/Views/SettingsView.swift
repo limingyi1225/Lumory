@@ -274,7 +274,7 @@ struct SettingsView: View {
                             showReminderDeniedAlert = true
                         }
                     } else {
-                        reminderService.disable()
+                        await reminderService.disable()
                     }
                 }
             }

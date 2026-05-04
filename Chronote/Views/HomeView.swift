@@ -1228,11 +1228,25 @@ struct HomeView: View {
             recordingVM.isTranscribing = false
             if let transcribedText = transcribedTextOpt {
                 Log.info("[HomeView transcriptionTask] 成功,长度=\(transcribedText.count)", category: .ui)
-                let punctuation = transcribedText.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil ? "。" : "."
+                // gpt-4o-mini-transcribe 会自带句末标点;只在缺失时补一个,避免双句号("test.." / "你好。。")。
+                // 末尾如果是闭合引号 / 括号 / 中文版书名号(常见模式 "test." / 他说"你好。"),
+                // 视作已终结 —— 句末标点惯例放在闭合符号内,外面再补 `.` 反而怪。
+                let endingPunctuation: Set<Character> = [
+                    ".", "。", "?", "？", "!", "！", "…",
+                    "\"", "'", "”", "’", "」", "』", "》",
+                    ")", "）", "】", "]", "}"
+                ]
+                let alreadyTerminated = transcribedText.last.map { endingPunctuation.contains($0) } ?? true
+                let suffix: String = {
+                    guard !alreadyTerminated else { return "" }
+                    let isChinese = transcribedText.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil
+                    return isChinese ? "。" : "."
+                }()
+                let toAppend = transcribedText + suffix
                 if inputVM.inputText.isEmpty {
-                    inputVM.inputText = transcribedText + punctuation
+                    inputVM.inputText = toAppend
                 } else {
-                    inputVM.inputText += transcribedText + punctuation
+                    inputVM.inputText += toAppend
                 }
                 recordingVM.transcriptionError = nil
                 // 转录后不再自动分析情绪,等待发送时统一分析

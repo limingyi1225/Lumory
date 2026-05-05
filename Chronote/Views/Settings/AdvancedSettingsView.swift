@@ -111,7 +111,7 @@ struct AdvancedSettingsView: View {
                             .foregroundStyle(Color.primary)
                     } icon: {
                         Image(systemName: "wrench.and.screwdriver")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Color.semanticWarning)
                             .symbolRenderingMode(.hierarchical)
                             .frame(width: 24)
                     }
@@ -151,18 +151,14 @@ struct AdvancedSettingsView: View {
 
     private func performDatabaseRecovery() {
         isRecoveringDatabase = true
-        Task {
-            await MainActor.run {
-                DatabaseRecoveryService.shared.performRecovery(for: PersistenceController.shared.container) { result in
-                    DispatchQueue.main.async {
-                        self.isRecoveringDatabase = false
-                        switch result {
-                        case .success:
-                            self.isSettingsOpen = false   // 修复成功关整个 settings，让 App 重载
-                        case .failure(let error):
-                            Log.error("[AdvancedSettings] Database recovery failed: \(error)", category: .ui)
-                        }
-                    }
+        DatabaseRecoveryService.shared.performRecovery(for: PersistenceController.shared.container) { result in
+            Task { @MainActor in
+                self.isRecoveringDatabase = false
+                switch result {
+                case .success:
+                    self.isSettingsOpen = false   // 修复成功关整个 settings，让 App 重载
+                case .failure(let error):
+                    Log.error("[AdvancedSettings] Database recovery failed: \(error)", category: .ui)
                 }
             }
         }
@@ -173,7 +169,7 @@ struct AdvancedSettingsView: View {
     }
 
     private var syncStatusTint: Color {
-        syncMonitor.syncStatus == .synced ? Color.moodSpectrum(value: 0.85) : .orange
+        syncMonitor.syncStatus == .synced ? Color.semanticSuccess : Color.semanticWarning
     }
 
     private func performManualSync() {

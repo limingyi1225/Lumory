@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import WidgetKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -32,11 +33,27 @@ struct SettingsView: View {
     @State private var isDeletingAllEntries = false
 
     @EnvironmentObject var importService: CoreDataImportService
-    @EnvironmentObject var syncMonitor: CloudKitSyncMonitor
 
     @ObservedObject private var aliasResolver = ThemeAliasResolver.shared
     @ObservedObject private var reminderService = ReminderService.shared
+    @ObservedObject private var appLockService = AppLockService.shared
     @State private var showReminderDeniedAlert = false
+    @State private var appLockEnableFailureMessage: String?
+    /// 下次 reminder 实际 fire 的本地时间。**纯 SwiftUI computed**,直接根据 reminderService 的当前
+    /// frequency / hour / minute 算 — 不依赖 UN pending list,所以拨 picker 立刻看到对的值,
+    /// 没有 race。
+    private var nextFireDate: Date? {
+        reminderService.peekNextFireDate()
+    }
+
+    /// 显示"下次提醒"用的 formatter。`abbreviated` date + `shortened` time —— 中文 "10月12日 21:00",
+    /// 英文 "Oct 12, 9:00 PM"。
+    private static let nextFireFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
     /// 防止用户在权限弹窗(首次 enable 的 await requestAuthorization 期间)双击 toggle 进入
     /// race:enable() 暂停时若 disable() 跑完再 resume,isEnabled 会被反复来回写。
     @State private var reminderToggleInFlight = false
@@ -47,6 +64,7 @@ struct SettingsView: View {
                 appHeaderSection
                 aiIndexSection
                 reminderSection
+                privacySection
                 dataSection
                 languageSection
                 advancedSection
@@ -241,6 +259,27 @@ struct SettingsView: View {
                             .frame(width: 24)
                     }
                 }
+
+                // 下次触发预览 —— 让用户拨完时间 / 频率有"哦下次会在某天某点弹"的确认感。
+                // **纯函数 + computed property**:`peekNextFireDate()` 直接根据当前 frequency / hour /
+                // minute 算,不读 UN pending list(那条路径有异步 race,拨 picker 时显示 stale 值)。
+                // 任意 reminderService @Published 变化 SwiftUI 自动重 eval,不需要 .task / .onChange。
+                if let nextDate = nextFireDate {
+                    HStack(spacing: 12) {
+                        Image(systemName: "alarm")
+                            .foregroundStyle(.secondary)
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(NSLocalizedString("下次提醒", comment: "Reminder next fire row title"))
+                                .foregroundStyle(Color.primary)
+                            Text(Self.nextFireFormatter.string(from: nextDate))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
             }
         }
         .alert(
@@ -321,7 +360,66 @@ struct SettingsView: View {
         )
     }
 
-    // MARK: - Data
+    // MARK: - Privacy
+
+    /// 隐私 section — 目前只有 App 锁。Toggle on 走 Face ID / 设备密码确认 → 启用失败(取消 / 设备
+    /// 不支持)显示 alert。Toggle off 直接禁用,无需认证。
+    @ViewBuilder
+    private var privacySection: some View {
+        Section(header: Text(NSLocalizedString("隐私", comment: "Privacy section"))) {
+            Toggle(isOn: appLockBinding) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(NSLocalizedString("App 锁", comment: "App lock toggle"))
+                            .foregroundStyle(Color.primary)
+                        Text(NSLocalizedString("回到 App 时用 Face ID / 设备密码解锁",
+                                               comment: "App lock subtitle"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "faceid")
+                        .foregroundStyle(Color.accentColor)
+                        .symbolRenderingMode(.hierarchical)
+                        .frame(width: 24)
+                }
+            }
+        }
+        .alert(
+            NSLocalizedString("无法启用 App 锁", comment: "App lock enable failed alert title"),
+            isPresented: Binding(
+                get: { appLockEnableFailureMessage != nil },
+                set: { if !$0 { appLockEnableFailureMessage = nil } }
+            )
+        ) {
+            Button(NSLocalizedString("好", comment: "OK"), role: .cancel) { }
+        } message: {
+            Text(appLockEnableFailureMessage ?? "")
+        }
+    }
+
+    /// App lock toggle 的 binding。enable 走 async 认证(在 Face ID alert 弹出前先 set false 让
+    /// UI 不停在"启用中"假象,认证完拨真值)。disable 直接同步禁用。
+    private var appLockBinding: Binding<Bool> {
+        Binding(
+            get: { appLockService.isEnabled },
+            set: { wantOn in
+                if wantOn {
+                    Task {
+                        let ok = await appLockService.enable()
+                        if !ok {
+                            appLockEnableFailureMessage = NSLocalizedString(
+                                "需要在系统设置里先开启 Face ID 或设备密码,且认证通过后才能启用。",
+                                comment: "App lock enable failure message"
+                            )
+                        }
+                    }
+                } else {
+                    appLockService.disable()
+                }
+            }
+        )
+    }
 
     @ViewBuilder
     private var dataSection: some View {
@@ -342,7 +440,7 @@ struct SettingsView: View {
                 showDeleteAllAlert = true
             } label: {
                 HStack {
-                    settingsLabel(NSLocalizedString("删除所有日记", comment: "Delete all"), icon: "trash", tint: .red)
+                    settingsLabel(NSLocalizedString("删除所有日记", comment: "Delete all"), icon: "trash", tint: .semanticDestructive)
                     if isDeletingAllEntries {
                         Spacer()
                         ProgressView()
@@ -377,6 +475,11 @@ struct SettingsView: View {
             }
             .pickerStyle(.inline)
             .labelsHidden()
+            // 切语言后,主屏 widget 还停在旧 locale 上 —— 主动 reload timeline 让 widget 走新 locale。
+            // 不会立刻刷,WidgetKit 自己排时间,但下一次系统调度会用新 locale。
+            .onChange(of: appLanguage) { _, _ in
+                WidgetCenter.shared.reloadAllTimelines()
+            }
         }
     }
 

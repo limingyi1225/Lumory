@@ -4,7 +4,7 @@ struct BreathingDots: View {
     @State private var isAnimating = false
     let dotCount: Int = 3
     let dotSize: CGFloat = 4
-    let color: Color = .blue
+    let color: Color = .accentColor
     
     var body: some View {
         HStack(spacing: dotSize) {

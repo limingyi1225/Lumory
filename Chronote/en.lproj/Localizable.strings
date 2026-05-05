@@ -5,89 +5,49 @@
 "简体中文" = "简体中文";
 "数据" = "Data";
 "关于" = "About";
-"粘贴导入日记…" = "Import Diary from Clipboard...";
 "删除所有日记" = "Delete All Entries";
 "联系开发者" = "Contact Developer";
 "确认删除所有日记？" = "Confirm deletion of all entries?";
 "删除" = "Delete";
 "取消" = "Cancel";
-"此操作无法撤销，是否确认？" = "This action cannot be undone. Are you sure?";
 "删除完成" = "Deletion Complete";
 "好" = "OK";
 "已删除所有日记" = "All entries have been deleted";
 "完成" = "Done";
 
 "今天是怎样的一天呢？" = "How was your day?";
-"全部日记" = "All Entries";
 "暂无日记，快去记录吧～" = "No entries yet, start journaling!";
 "导入中" = "Importing";
 
 "摘要" = "Summary";
-"我的记录" = "My Entry";
 "录音" = "Recording";
 "日记详情" = "Diary Details";
 "确认删除此日记？" = "Confirm deletion of this entry?";
 "此操作无法撤销，是否确定？" = "This action cannot be undone. Are you sure?";
 
-"选择时间范围" = "Select Time Range";
-"开始日期" = "Start Date";
-"结束日期" = "End Date";
-"AI 分析总结" = "AI Analysis Summary";
-"生成" = "Generate";
 "关闭" = "Close";
-"该时间段内没有日记数据。" = "No diary data for this time period.";
-"生成报告失败，请稍后再试。" = "Failed to generate report. Please try again later.";
-
-"%@ 的日记" = "Journal for %@";
-"当日暂无日记" = "No entries for this day";
-"情绪报告" = "Emotional Report";
-"至" = "to";
-"生成报告" = "Generate Report";
 "删除录音？" = "Delete Recording?";
 
-"日历视图" = "Calendar View";
 "导入日记" = "Import Diaries";
 "导入" = "Import";
-"将你的日记粘贴到下面的文本框，支持多篇日记连贴。" = "Paste your diary entries below. Multiple entries supported.";
-
-"iCloud 同步" = "iCloud Sync";
-"同步数据" = "Sync Data";
 "已同步" = "Synced";
 "同步失败" = "Sync Failed";
-"至少需要3篇日记才能生成报告（当前：%d篇）" = "At least 3 entries are required to generate a report (current: %d entries)";
-"至少需要3篇日记才能生成报告。" = "At least 3 entries are required to generate a report.";
-
 /* Additional localizations */
 "编辑" = "Edit";
 "保存" = "Save";
-"(未设置)" = "(Not Set)";
-"添加摘要..." = "Add summary...";
 "正在返回..." = "Returning...";
 "放弃更改？" = "Discard Changes?";
 "放弃" = "Discard";
 "继续编辑" = "Continue Editing";
 "您有未保存的更改，确定要放弃吗？" = "You have unsaved changes. Are you sure you want to discard them?";
-"松开结束" = "Release to Stop";
-"按住说话" = "Hold to Speak";
-"日记已删除" = "Entry Deleted";
-"调整心情" = "Adjust Mood";
 "English (US)" = "English (US)";
-"Tap to Stop" = "Tap to Stop";
-"Hold to Speak" = "Hold to Speak";
-"返回" = "Back";
 "在此粘贴日记内容…" = "Paste diaries here...";
-"粘贴" = "Paste";
 "将你的日记粘贴到下面，支持多篇日记连贴。" = "Paste your diary entries below. Multiple entries supported.";
 "删除日记" = "Delete Entry";
 "确定要删除这篇日记吗？此操作无法撤销。" = "Are you sure you want to delete this entry? This action cannot be undone.";
-"生成报告时遇到网络问题，请稍后再试。" = "Network error while generating report. Please try again later.";
-"内容" = "Content";
-
 /* Mood descriptions */
 "非常低落" = "Very Low";
 "有些低落" = "Somewhat Low";
-"一般般" = "Neutral";
-"还不错" = "Pretty Good";
 "非常开心" = "Very Happy";
 
 /* Mood short descriptions */
@@ -100,25 +60,11 @@
 /* Settings UI */
 "同步诊断" = "Sync Diagnostics";
 "数据库修复" = "Database Repair";
-"如果您遇到数据库错误，可以尝试执行修复。这将重建本地数据库并从iCloud重新同步数据。" = "If you encounter database errors, you can try to repair. This will rebuild the local database and resync data from iCloud.";
-"修复数据库" = "Repair Database";
-"确认修复数据库？" = "Confirm database repair?";
 "修复" = "Repair";
-"此操作将重建本地数据库并从iCloud重新同步数据。" = "This operation will rebuild the local database and resync data from iCloud.";
-
 /* Photo count */
 "%d张照片" = "%d photos";
 "1张照片" = "1 photo";
-"图片加载失败" = "Failed to load image";
-
 /* Backend status */
-"AI后端状态" = "AI Backend Status";
-"后端URL:" = "Backend URL:";
-"测试后端连接" = "Test Backend Connection";
-"测试成功" = "Test Successful";
-"测试失败" = "Test Failed";
-"测试中..." = "Testing...";
-
 /* Import/Export */
 "导出日记" = "Export Diary";
 "导出" = "Export";
@@ -126,140 +72,37 @@
 "日记数量" = "Entry Count";
 "日期范围" = "Date Range";
 "无日记" = "No Entries";
-"分享" = "Share";
-
 /* General UI */
 "Settings" = "Settings";
-"General" = "General";
-"Data Management" = "Data Management";
-"Follows system appearance" = "Follows system appearance";
-"Total Entries:" = "Total Entries:";
-"Delete all diary entries" = "Delete all diary entries";
-"Export All Entries" = "Export All Entries";
-"Import from Clipboard" = "Import from Clipboard";
-
 /* Mac-specific UI strings */
-"主页" = "Home";
-"日历" = "Calendar";
-"心情分析" = "Mood Analysis";
-"搜索日记..." = "Search entries...";
-"导航" = "Navigation";
 "今天" = "Today";
 "昨天" = "Yesterday";
-"新建" = "New";
-
 /* Mac Home View */
-"保存日记" = "Save Entry";
-"心情记录" = "Mood Recording";
 "照片" = "Photos";
-"拖拽图片到此处" = "Drag images here";
 "开始录音" = "Start Recording";
 "停止录音" = "Stop Recording";
-"已暂停" = "Paused";
 "清空" = "Clear";
-"记录今天发生的事情..." = "Record what happened today...";
-
 /* Mac Settings View */
-"Appearance" = "Appearance";
 "Language" = "Language";
-"Import Entries..." = "Import Entries...";
-"Force Sync" = "Force Sync";
-"Run Diagnostic" = "Run Diagnostic";
 "About" = "About";
-"调试报告生成" = "Debug Report Generation";
-"完整诊断" = "Full Diagnostic";
-"UI测试" = "UI Testing";
-
 /* Mac Mood Report */
-"Mood Report" = "Mood Report";
-"Total Entries" = "Total Entries";
-"Average Mood" = "Average Mood";
-"Most Common" = "Most Common";
-"Streak" = "Streak";
-"Mood Trend" = "Mood Trend";
-"Mood Distribution" = "Mood Distribution";
-"AI Analysis" = "AI Analysis";
-"Generate Report" = "Generate Report";
-
 /* Mood values for Mac */
 "平静" = "Calm";
 "愉快" = "Pleasant";
 
 /* Additional Mac strings */
-"All Entries" = "All Entries";
-"Language:" = "Language:";
-"Data Storage" = "Data Storage";
-"Storage Location" = "Storage Location";
-"iCloud Documents" = "iCloud Documents";
-"Local Only" = "Local Only";
-
 /* Inspirational prompts */
-"今天有什么特别的事情发生吗？" = "Did anything special happen today?";
-"此刻你的心情是怎样的？" = "How are you feeling right now?";
-"有什么想要记录的瞬间吗？" = "Any moments you'd like to record?";
-"今天最让你开心的是什么？" = "What made you happiest today?";
-"现在最想和谁分享你的感受？" = "Who would you most like to share your feelings with right now?";
-
 /* Mood Report Period Types */
-"Week" = "Week";
-"Month" = "Month";
-"Year" = "Year";
-"All Time" = "All Time";
-"Past Week" = "Past Week";
-"Past Month" = "Past Month";
-"Past 3 Months" = "Past 3 Months";
-"Past Year" = "Past Year";
-
 /* Mood Report UI */
-"Period" = "Period";
-"days" = "days";
-"No data available for the selected period" = "No data available for the selected period";
-"Entries with Mood %d" = "Entries with Mood %d";
-"Generating..." = "Generating...";
-"Analyzing your mood patterns..." = "Analyzing your mood patterns...";
-"Mood %d" = "Mood %d";
 "N/A" = "N/A";
 
 /* Mood Analysis UI */
-"Mood Analysis" = "Mood Analysis";
-"Track your emotional journey over time" = "Track your emotional journey over time";
-"entries" = "entries";
-"Consistency" = "Consistency";
-"Improving" = "Improving";
-"Declining" = "Declining";
-"Stable" = "Stable";
-"Mood Patterns" = "Mood Patterns";
-"Recent entries with %@" = "Recent entries with %@";
-"Clear Filter" = "Clear Filter";
-"Mood Analysis Report" = "Mood Analysis Report";
 "Regenerate" = "Regenerate";
-"Generate an AI-powered analysis of your mood patterns" = "Generate an AI-powered analysis of your mood patterns";
-
 /* Mood Level Names */
-"Very Low" = "Very Low";
-"Low" = "Low";
-"Neutral" = "Neutral";
-"Good" = "Good";
-"Excellent" = "Excellent";
 "Unknown" = "Unknown";
 
 /* Empty State Messages */
-"No diary entries found" = "No diary entries found";
-"Start writing diary entries to see your mood analysis" = "Start writing diary entries to see your mood analysis";
-"No entries in %@" = "No entries in %@";
-"You have %d total entries, but none in the selected time period." = "You have %d total entries, but none in the selected time period.";
-"Try selecting a longer time period or write new entries." = "Try selecting a longer time period or write new entries.";
-
 /* Error Messages */
-"No diary entries available for analysis." = "No diary entries available for analysis.";
-"API configuration error. Please check your API key settings." = "API configuration error. Please check your API key settings.";
-"API configuration error. Please check your settings." = "API configuration error. Please check your settings.";
-"Unable to generate analysis at this time. Please try again." = "Unable to generate analysis at this time. Please try again.";
-"分析完成但没有生成洞察报告。这可能是由于内容不足或暂时的服务问题。请尝试重新生成或检查网络连接。" = "Analysis completed but no insights report was generated. This may be due to insufficient content or temporary service issues. Please try regenerating or check your network connection.";
-"Authentication failed. Please check your API key and account balance." = "Authentication failed. Please check your API key and account balance.";
-"Report generation was cancelled. Please try again." = "Report generation was cancelled. Please try again.";
-"Unable to generate report: %@. Please try again later." = "Unable to generate report: %@. Please try again later."; 
-
 /* New keys (post-launch review) */
 "mood.veryBad" = "Very Bad";
 "mood.bad" = "Bad";
@@ -270,18 +113,12 @@
 "洞察" = "Insights";
 "诊断、修复与分项控制" = "Diagnostics, repair, and granular controls";
 "一键重建索引" = "Rebuild indexes";
-"一键开始" = "Start";
 "第 1 / 3 步：重抽主题…" = "Step 1 / 3: Re-extracting themes...";
-"第 2 / 3 步：重算摘要…" = "Step 2 / 3: Regenerating summaries...";
-"第 3 / 3 步：重建 embedding…" = "Step 3 / 3: Rebuilding embeddings...";
 "索引已是最新" = "Indexes are up to date";
 "生成语义索引" = "Generate semantic index";
 "刷新主题" = "Refresh themes";
 "进阶" = "Advanced";
 "如果你遇到了数据库错误，此操作将尝试修复。数据会从 iCloud 恢复。" = "If you're seeing database errors, this will attempt repair. Your data will be restored from iCloud.";
-"数据库加载失败" = "Database failed to load";
-"请尝试在设置中运行数据库修复，或联系开发者。" = "Please try Database Repair in Settings, or contact the developer.";
-
 /* Export Content */
 "Lumory 日记导出" = "Lumory Diary Export";
 "导出日期: %@" = "Export Date: %@";
@@ -305,28 +142,14 @@
 /* Streaming — truncation markers + fallback error text (reasoning-report and ask modes) */
 "stream.truncated.report" = "⚠️ Report incomplete (connection interrupted). Please regenerate.";
 "stream.truncated.answer" = "Response incomplete (connection interrupted). Please retry.";
-"stream.truncated.report.zh" = "⚠️ Report incomplete (connection interrupted). Please regenerate.";
-"stream.truncated.report.en" = "⚠️ Report incomplete (connection interrupted). Please regenerate.";
-"stream.truncated.answer.zh" = "Response incomplete (connection interrupted). Please retry.";
-"stream.truncated.answer.en" = "Response incomplete (connection interrupted). Please retry.";
-"error.stream.noConnection" = "Cannot connect to the AI service. Please check your network or try again later.%@";
-"error.stream.reportGeneric" = "Error generating report: %@";
 "error.stream.answerGeneric.zh" = "Error answering: %@";
 "error.stream.answerGeneric.en" = "Error answering: %@";
-"error.report.noValidEntries" = "No valid diary entries found for analysis.";
-
 /* Streaming banner shown above truncated AI output so users don't treat partial content as final */
 "stream.incomplete.banner" = "Content incomplete — you can regenerate.";
 "stream.incomplete.regenerate" = "Regenerate";
 "--- 导出结束 ---" = "--- End of Export ---";
 
 /* CloudKit sync status / errors (user-visible, CloudKitSyncMonitor.SyncStatus.displayName + errorMessage) */
-"sync.status.unknown" = "Unknown";
-"sync.status.syncing" = "Syncing…";
-"sync.status.synced" = "Synced";
-"sync.status.error" = "Sync Error";
-"sync.status.notSignedIn" = "Not Signed In to iCloud";
-"sync.status.networkUnavailable" = "Network Unavailable";
 "sync.error.accountError" = "iCloud account error: %@";
 "sync.error.noAccount" = "Please sign in to iCloud in System Settings";
 "sync.error.restricted" = "iCloud access is restricted";
@@ -400,7 +223,6 @@
 
 // MARK: - Theme alias system (banner / picker / management page / Insights merge)
 
-"主题别名" = "Theme Aliases";
 "合并主题" = "Merge Themes";
 "AI 与索引" = "AI & Indexing";
 "数据库需要修复" = "Database Recovery Required";
@@ -425,9 +247,7 @@
 "中置信" = "Medium";
 "「%@」=%@?" = "Is \"%@\" the same as %@?";
 "「%@」是不是 %@?" = "Is \"%@\" the same as %@?";
-"保存为 %@" = "Save as %@";
 "合并到 %@" = "Merge into %@";
-"把「%@」保存为其他主题" = "Save \"%@\" as another theme";
 "把「%@」合并到其他主题" = "Merge \"%@\" into another theme";
 "忽略" = "Ignore";
 "折叠" = "Collapse";
@@ -438,15 +258,11 @@
 "共 %d 条" = "%d total";
 "%d 次" = "%d times";
 "M月d日" = "MMM d";
-"保存为" = "Save as";
 "合并到" = "Merge into";
-"把这个标签保存为" = "Save this tag as";
 "把这个标签合并到" = "Merge this tag into";
 "搜索 / 输入新主题名" = "Search or type a new theme name";
-"用「%@」作为新主题名" = "Use \"%@\" as a new theme name";
 "合并到新主题「%@」" = "Merge into new theme \"%@\"";
 "还没在你的日记里出现过" = "Hasn't appeared in your diary yet";
-"已保存为「%@」" = "Saved as \"%@\"";
 "已合并到「%@」" = "Merged into \"%@\"";
 "没有匹配的主题" = "No matching themes";
 "没有找到可能合并的主题。" = "No themes found that could be merged.";
@@ -477,7 +293,6 @@
 "已把「%@」合并到「%@」" = "Merged \"%@\" into \"%@\"";
 "它们已经是同一组了" = "They're already in the same group";
 "『%@』已经是『%@』的别名" = "\"%@\" is already an alias of \"%@\"";
-"点这里直接保存为「%@」" = "Tap to save as \"%@\" directly";
 "点这里直接合并到「%@」" = "Tap to merge into \"%@\" directly";
 
 // MARK: - Settings rows: reminders + theme alias entry
@@ -506,8 +321,6 @@
 "没找到相关日记" = "No related entries";
 "(空)" = "(empty)";
 "用近期主题作文案" = "Use recent topics";
-"本周期已记" = "Cycle complete";
-"本周期未记" = "Cycle pending";
 "开始" = "Start";
 "主题" = "Themes";
 "情绪故事" = "Mood Story";
@@ -521,3 +334,169 @@
 "已删除主题「%@」" = "Theme \"%@\" deleted";
 "用最新的 AI 重新分析所有日记" = "Re-analyze all entries with the latest AI";
 "索引已是最新,无需重建" = "Index is up to date — no rebuild needed";
+
+/* Lumory megareview 20260504 — added missing keys */
+"%@ 和 %@ 之间有什么联系？" = "How are %@ and %@ connected?";
+"%@ 最近给你带来什么？" = "What has %@ brought you recently?";
+"%@ 那天我为什么情绪低？" = "Why was my mood low on %@?";
+"%@,情绪 %d 分" = "%@: mood %d";
+"%@回顾" = "%@ recap";
+"%@，情绪 %d 分，%d 字" = "%@: mood %d, %d words";
+"%d 条日记" = "%d entries";
+"%d 篇相关日记" = "%d relevant entries";
+"AI 为你读这段时间的日记，讲成一篇文章" = "AI reads your entries from this period and weaves them into a story";
+"AI 会从你的日记里检索相关片段，回答你的问题，并附上可跳转的参考。" = "AI searches your diary for relevant excerpts, answers your question, and includes tappable references.";
+"AI 写作中" = "AI is writing";
+"AI 正在整理主题，或暂无足够日记" = "AI is organizing themes, or there isn't enough data yet.";
+"AI 正在讲述" = "AI is narrating";
+"AI 自动提取" = "Auto-extracted by AI";
+"Lumory" = "Lumory";
+"import.alert.duplicates.message" = "%d entries detected, but all already exist; nothing imported.";
+"import.alert.duplicates.title" = "Duplicates skipped";
+"import.alert.importMixedWithSkipped.message" = "%d succeeded, %d failed, %d duplicates skipped.";
+"import.alert.importWithSkipped.message" = "Imported %d entries, %d duplicates skipped.";
+"一句话记下这天…" = "One line for this day…";
+"上个月" = "Previous month";
+"上升" = "Rising";
+"上周最值得记住的一件事是什么？" = "What's the most memorable thing from last week?";
+"上次处理 %d 条，失败 %d 条" = "Last run: %d processed, %d failed";
+"下个月" = "Next month";
+"下午状态如何？" = "How's your afternoon going?";
+"下降" = "Falling";
+"与过去对话" = "Chat with your past";
+"为历史日记生成语义向量，用于语义搜索和 Ask Your Past" = "Generate semantic vectors for past entries, used for semantic search and Ask Your Past";
+"主题 %d 失败" = "Theme %d failed";
+"书写热力" = "Writing heatmap";
+"今天发生了什么？" = "What happened today?";
+"今天想到 %@ 了吗？" = "Thinking about %@ today?";
+"今晚想记录什么？" = "What do you want to capture tonight?";
+"会调用一次 AI。如果只是想清理『情绪』这类标签，选『只修有问题的』更省。" = "This will call AI once. To only clean up tags like '情绪', choose 'Fix only issues' to save calls.";
+"低落" = "Low";
+"保存失败" = "Save failed";
+"保持书写的势头" = "Keep the writing momentum";
+"修改时间" = "Edit time";
+"偏低" = "Slightly low";
+"停止" = "Stop";
+"全部" = "All";
+"全部时间" = "All time";
+"全部重抽" = "Re-extract all";
+"关于 %@，我最近在想什么？" = "What have I been thinking about %@ lately?";
+"关联洞察" = "Correlation insights";
+"写几篇日记之后，这里会出现针对你的问题建议。" = "After writing a few entries, suggestions tailored to you will appear here.";
+"写到 %@ 时情绪最低" = "Lowest mood when writing about %@";
+"写到 %@ 时情绪最好" = "Best mood when writing about %@";
+"删除录音" = "Delete recording";
+"加载中" = "Loading";
+"午安，上午过得怎么样？" = "Afternoon — how was your morning?";
+"原日记已不可用" = "Original entry no longer available";
+"发送" = "Send";
+"只修有问题的" = "Fix only issues";
+"只有同步出问题 / 数据显示异常时才需要用到这一层。" = "Only needed when sync goes wrong or data display looks abnormal.";
+"向量 %d 失败" = "Vector %d failed";
+"哪些日子因为 %@ 特别开心？" = "Which days were especially happy because of %@?";
+"回到顶部" = "Back to top";
+"回顾" = "Recap";
+"图片 %1$d / %2$d" = "Image %1$d of %2$d";
+"夜深了，今天最触动你的一件事是？" = "Late night — what touched you most today?";
+"季" = "Quarter";
+"导入结果" = "Import result";
+"导出失败" = "Export failed";
+"展开参考" = "Show references";
+"已经 %d 天没提到 %@ 了，最近怎么样？" = "It's been %d days since you mentioned %@. How are things?";
+"已经连续 %d 天了，今天也写几笔吧" = "%d-day streak — keep it going";
+"年" = "Year";
+"当前连续 %d 天写作" = "Current %d-day streak";
+"情绪" = "Mood";
+"情绪 %d 分，点击查看当天日记" = "Mood %d — tap to view that day's entry";
+"情绪上升 %d 点" = "Mood up %d";
+"情绪下降 %d 点" = "Mood down %d";
+"情绪折线图，%d 个数据点，平均 %d 分" = "Mood chart, %d data points, average %d";
+"情绪折线图，%d 个数据点，平均 %d 分，整体%@ %d 点" = "Mood chart, %d points, average %d, overall %@ by %d";
+"情绪折线图，暂无数据" = "Mood line chart, no data yet";
+"成功 %d 条，失败 %d 条。" = "%d succeeded, %d failed.";
+"成功导入 %d 条日记。" = "Successfully imported %d entries.";
+"打开全屏故事阅读器" = "Open full-screen story reader";
+"按标题、正文或主题匹配" = "Match titles, content, or themes";
+"换一组" = "Refresh";
+"提示词未生成" = "Prompts not generated yet";
+"搜索日记" = "Search entries";
+"播放" = "Play";
+"收起参考" = "Hide references";
+"无法创建导出文件，请检查存储空间后重试。" = "Failed to create export file. Please check storage and retry.";
+"无法加载图片" = "Failed to load image";
+"日记时间" = "Entry time";
+"早上好，今天想做点什么？" = "Good morning — what's on your mind today?";
+"时间范围" = "Time range";
+"昨天你提到 %@，今天感觉如何？" = "You mentioned %@ yesterday — how do you feel today?";
+"暂停" = "Pause";
+"更多数据后，这里会浮现模式" = "Patterns will emerge as more data is collected";
+"最常出现的是 %@" = "Most common: %@";
+"最近 %@ 怎么样？" = "How has %@ been recently?";
+"最近 1 年" = "Last year";
+"最近 3 个月" = "Last 3 months";
+"最近 30 天" = "Last 30 days";
+"最近几天情绪有点起伏，现在的你怎么样？" = "Mood has been swinging lately — how are you now?";
+"最近反复出现的情绪是什么？" = "What emotions keep recurring lately?";
+"最近这段时间我变化了什么？" = "What's changed about me recently?";
+"月" = "Month";
+"有 %d 项索引待更新,建议运行一次" = "%d items pending — recommended to run once";
+"未来" = "Future";
+"正在导入…%.0f%%" = "Importing…%.0f%%";
+"正在检查待索引条目…" = "Checking pending items…";
+"正在读你的日记…" = "Reading your diary…";
+"没有匹配的日记" = "No matching entries";
+"没有情绪数据" = "No mood data";
+"添加照片" = "Add photo";
+"点击修改时间" = "Tap to edit time";
+"现在的我最担心什么？" = "What am I most worried about right now?";
+"生成%@故事" = "Generate %@ story";
+"用新的提取逻辑把存量日记的主题重新整理。" = "Apply the new extraction logic to all existing entries.";
+"确定" = "OK";
+"积极" = "Positive";
+"第 2 / 3 步：补全语义向量…" = "Step 2/3: Filling semantic vectors…";
+"第 3 / 3 步：生成个性化提示词…" = "Step 3/3: Generating personalized prompts…";
+"累计 %d 字" = "%d total words";
+"累计 %d 条日记" = "%d total entries";
+"累计字数" = "Total words";
+"累计条目" = "Total entries";
+"记录" = "Diary";
+"试试这些问题" = "Try these questions";
+"该时段没有日记" = "No entries in this period";
+"语音" = "Voice";
+"这段时间整体偏低落" = "Mood is generally low for this period";
+"这段时间整体偏积极" = "Mood is generally positive for this period";
+"这段时间还没有日记。" = "No entries for this time range yet.";
+"这段时间还没有日记数据" = "No entries for this time range";
+"进度 %d%%（失败 %d）" = "Progress %d%% (%d failed)";
+"连续天数" = "Streak";
+"重抽所有日记的主题？" = "Re-extract themes for all entries?";
+"重新生成" = "Regenerate";
+"问问过去的你" = "Ask Your Past";
+"问问过去的自己…" = "Ask your past self…";
+"高涨" = "Elevated";
+"清空当前对话？" = "Clear this conversation?";
+"清空后,本次问答和已展开的参考记录都会丢失,无法恢复。" = "After clearing, this conversation and the expanded references will be lost. This can't be undone.";
+"下次提醒" = "Next reminder";
+"点下方输入框写一句,或长按麦克风录一段语音。" = "Tap the input below to write a line, or long-press the mic to record a voice memo.";
+"正在导出 %d 条日记…" = "Exporting %d entries…";
+"有 %d 张图片处理失败" = "Failed to process %d photo(s)";
+"无法播放该录音,文件可能已损坏或丢失。" = "Can't play this recording — the file may be corrupt or missing.";
+"隐私" = "Privacy";
+"App 锁" = "App lock";
+"回到 App 时用 Face ID / 设备密码解锁" = "Use Face ID or device passcode when returning to the app";
+"无法启用 App 锁" = "Couldn't enable app lock";
+"需要在系统设置里先开启 Face ID 或设备密码,且认证通过后才能启用。" = "Set up Face ID or a device passcode first, then authenticate to enable.";
+"已锁定 — 请验证身份后继续" = "Locked — verify to continue";
+"解锁" = "Unlock";
+"解锁失败,请重试。" = "Unlock failed, please retry.";
+"启用 App 锁前请先验证身份。" = "Verify your identity to enable app lock.";
+"用 Face ID 解锁 Lumory。" = "Unlock Lumory with Face ID.";
+"此操作无法撤销。" = "This cannot be undone.";
+"milestone.subtitle.streak" = "Day Streak";
+"milestone.tagline.7" = "One week. A promise you've kept.";
+"milestone.tagline.14" = "Two weeks. The habit is forming.";
+"milestone.tagline.30" = "One month. This is a real habit now.";
+"milestone.tagline.60" = "Two months. You've come far.";
+"milestone.tagline.100" = "100 days — a rare kind of consistency.";
+"milestone.tagline.century_plus" = "%d days. Lumory has become part of you.";
+"milestone.accessibility" = "Streak milestone, %d days";

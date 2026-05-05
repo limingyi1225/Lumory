@@ -71,7 +71,9 @@ struct CorrelationChip: View {
             Text(fact.title)
                 .font(.footnote)
                 .foregroundColor(.primary)
-                .lineLimit(2)
+                // 主题词长(如"出版社编辑"5字)时"写到 X 时情绪最好"超 14 字,2 行不够 → 显示省略号。
+                // 升 lineLimit 到 3 让卡片高度自适应,长主题词也能完整显示。
+                .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
@@ -116,28 +118,30 @@ enum CorrelationFactGenerator {
         }
 
         // 2. 最显著的主题
+        // key 去空格(用户反馈"最常出现的是 女朋友"主题词周围多余空格,中文不需要)。
+        // en.strings 仍保留 "Most common: %@" 那种英文需要空格的写法,zh.strings 同步改为无空格。
         if let top = themes.first {
             facts.append(CorrelationFact(
                 kind: .topTheme,
-                title: String(format: NSLocalizedString("最常出现的是 %@", comment: "Top theme"), top.name),
+                title: String(format: NSLocalizedString("最常出现的是%@", comment: "Top theme"), top.name),
                 systemIcon: "tag.fill",
                 isPositive: top.avgMood >= 0.5
             ))
         }
 
-        // 3. 情绪最高/低的主题
+        // 3. 情绪最高/低的主题(同上,key 去空格)
         if themes.count >= 2 {
             let sortedByMood = themes.sorted { $0.avgMood > $1.avgMood }
             if let best = sortedByMood.first, let worst = sortedByMood.last, best.name != worst.name {
                 facts.append(CorrelationFact(
                     kind: .bestMoodTheme,
-                    title: String(format: NSLocalizedString("写到 %@ 时情绪最好", comment: "Best mood theme"), best.name),
+                    title: String(format: NSLocalizedString("写到%@时情绪最好", comment: "Best mood theme"), best.name),
                     systemIcon: "sun.max.fill",
                     isPositive: true
                 ))
                 facts.append(CorrelationFact(
                     kind: .worstMoodTheme,
-                    title: String(format: NSLocalizedString("写到 %@ 时情绪最低", comment: "Worst mood theme"), worst.name),
+                    title: String(format: NSLocalizedString("写到%@时情绪最低", comment: "Worst mood theme"), worst.name),
                     systemIcon: "cloud.fill",
                     isPositive: false
                 ))

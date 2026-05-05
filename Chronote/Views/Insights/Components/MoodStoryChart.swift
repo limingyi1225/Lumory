@@ -16,6 +16,8 @@ struct MoodStoryChart: View {
     @State private var selectedPointID: Date?
     @State private var rawSelectionDate: Date?
 
+    @Environment(\.colorScheme) private var colorScheme
+
     init(
         points: [InsightsEngine.MoodPoint],
         bucket: InsightsEngine.Bucket = .day,
@@ -87,6 +89,8 @@ struct MoodStoryChart: View {
     @ViewBuilder
     private var chart: some View {
         Chart {
+            // 用户决定:不要 AreaMark 填充(2026-05-05),保留纯线条 + 端点。
+            // 折线渐变色已经按 mood 走色,情绪强度通过 Y 值表达就够。
             ForEach(points) { point in
                 LineMark(
                     x: .value("date", point.date),
@@ -121,17 +125,22 @@ struct MoodStoryChart: View {
             }
         }
         .chartYScale(domain: 0...1)
+        // 第五轮(2026-05-05):整删后用户感觉缺中性参考,加回**单条** 0.5 横线作"中性锚"。
+        // 浅灰实线(不 dash) — secondary 系跟 chart 整体调性中性,不抢 mood color 主体。
+        // 0/1 两端不画(area gradient 已经在视觉两端表达极端 mood,加线冗余)。
         .chartYAxis {
-            AxisMarks(position: .leading, values: [0, 0.5, 1]) { _ in
-                AxisGridLine().foregroundStyle(.secondary.opacity(0.15))
+            AxisMarks(position: .leading, values: [0.5]) { _ in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+                    .foregroundStyle(Color.secondary.opacity(colorScheme == .dark ? 0.25 : 0.18))
             }
         }
         .chartXAxis {
+            // 用户决定:删 X 轴竖向 grid line,留时间 label。area gradient + line 已经传达
+            // 横向时间走势,竖线反而切碎视觉、让图面噪;月份 label 仍保留作时间锚。
             AxisMarks(values: .automatic(desiredCount: 4)) { _ in
                 AxisValueLabel()
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                AxisGridLine().foregroundStyle(.secondary.opacity(0.1))
             }
         }
         // 用 Charts 自己的选择 API —— 和外层 ScrollView 协作，不会吞掉垂直滚动

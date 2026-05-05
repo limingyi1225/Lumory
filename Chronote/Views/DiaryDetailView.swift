@@ -24,7 +24,7 @@ struct DiaryDetailView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.aiService) private var aiService
-    @State private var showDeleteAlert = false
+    // showDeleteAlert 已移除 — 删除走 4 秒撤销 toast,不再有 alert。
     @StateObject private var audioPlaybackController = AudioPlaybackController() // 新的控制器
     @State private var displayableAudioDuration: TimeInterval = 0.0 // State for fetched duration
     
@@ -70,8 +70,9 @@ struct DiaryDetailView: View {
     private func deleteEntry() {
         audioPlaybackController.stopPlayback(clearCurrentFile: true)
 
-        let imageFileNames = entry.imageFileNameArray
-        let audioFileName = entry.audioFileName
+        // P1-Home-6 撤销 — 跟 HomeView.deleteEntry 同 pattern。snapshot 在 delete 之前抓,
+        // attachment 文件不立刻删,4 秒后由 EntryDeletionUndoService.commitPendingNow 跑。
+        let snapshot = EntryDeletionSnapshot(entry: entry)
         viewContext.delete(entry)
 
         do {
@@ -79,9 +80,25 @@ struct DiaryDetailView: View {
             HapticManager.shared.impact(.medium)
             // 单删派生缓存清理统一走 EntryWipeOrchestrator。
             EntryWipeOrchestrator.performSingleDeleteCleanup()
-            Task.detached(priority: .utility) {
-                deleteDiaryDetailAttachmentFiles(imageFileNames: imageFileNames, audioFileName: audioFileName)
-            }
+
+            // 注册到 undo service + 弹带"撤销"按钮 toast。dismiss 后 root overlay / 父视图 overlay
+            // 接管 toast 渲染(InsightsView / Home 都已挂 lumoryToastOverlay)。
+            let viewContextRef = viewContext
+            EntryDeletionUndoService.shared.register(snapshot: snapshot)
+            LumoryToastCenter.shared.show(
+                NSLocalizedString("已删除", comment: "Toast after entry deletion"),
+                severity: .success,
+                duration: EntryDeletionUndoService.undoWindow,
+                action: LumoryToastCenter.Action(
+                    label: NSLocalizedString("撤销", comment: "Undo delete action")
+                ) {
+                    if EntryDeletionUndoService.shared.undo(into: viewContextRef) != nil {
+                        #if canImport(UIKit)
+                        HapticManager.shared.notification(.success)
+                        #endif
+                    }
+                }
+            )
             dismiss()
         } catch {
             viewContext.rollback()
@@ -160,6 +177,8 @@ struct DiaryDetailView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 18)
                 }
+                // iOS 26 顶部边缘软渐隐 — 详情滚动到顶时跟 navigation chrome 自然过渡。
+                .scrollEdgeEffectStyle(.soft, for: .top)
                 .scrollDismissesKeyboard(.interactively)
                 .background(detailBackground.ignoresSafeArea())
                 .navigationTitle(NSLocalizedString("日记详情", comment: "Diary details title"))
@@ -177,37 +196,37 @@ struct DiaryDetailView: View {
                         }
                     }
                 }
-                // 右侧按钮组：编辑/保存 + 删除
+                // P1-Home-9 右上误触防护 — 编辑态显示明确"保存";阅读态把"编辑+删除"塞进
+                // ellipsis Menu,把 destructive 删除从主按钮区移走,防误触红色按钮。
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    HStack(spacing: 16) {
-                        if isEditing {
-                            Button(NSLocalizedString("保存", comment: "Save button")) {
-                                saveChanges()
-                            }
-                            .fontWeight(.semibold)
-                        } else {
-                            Button(NSLocalizedString("编辑", comment: "Edit button")) {
+                    if isEditing {
+                        Button(NSLocalizedString("保存", comment: "Save button")) {
+                            saveChanges()
+                        }
+                        .fontWeight(.semibold)
+                    } else {
+                        Menu {
+                            Button {
                                 startEditing()
+                            } label: {
+                                Label(NSLocalizedString("编辑", comment: "Edit button"), systemImage: "pencil")
                             }
-                        }
-                        Button(role: .destructive) {
-                            showDeleteAlert = true
+                            Button(role: .destructive) {
+                                // 删除直接执行 — 4 秒撤销 toast 替代 confirmation。Detail 会 dismiss,
+                                // toast 在父视图(Home / Insights sheet)的 root overlay 渲染。
+                                deleteEntry()
+                            } label: {
+                                Label(NSLocalizedString("删除", comment: "Delete button"), systemImage: "trash")
+                            }
                         } label: {
-                            Image(systemName: "trash")
+                            Image(systemName: "ellipsis.circle")
                         }
-                        .foregroundColor(.red)
+                        .accessibilityLabel(NSLocalizedString("更多操作", comment: "More actions"))
                     }
                 }
 #endif
             }
-            .alert(NSLocalizedString("确认删除此日记？", comment: "Delete diary confirmation"), isPresented: $showDeleteAlert) {
-                Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
-                    deleteEntry()
-                }
-                Button(NSLocalizedString("取消", comment: "Cancel button"), role: .cancel) { }
-            } message: {
-                Text(NSLocalizedString("此操作无法撤销，是否确定？", comment: "Cannot undo confirmation"))
-            }
+            // 删除 confirmation 已移除 — 4 秒撤销 toast 替代。
             .alert(NSLocalizedString("放弃更改？", comment: "Discard changes confirmation"), isPresented: $showDiscardChangesAlert) {
                 Button(NSLocalizedString("放弃", comment: "Discard button"), role: .destructive) {
                     cancelEditing()
@@ -230,6 +249,9 @@ struct DiaryDetailView: View {
                 // 当视图消失时停止播放，避免音频在后台继续
                 audioPlaybackController.stopPlayback(clearCurrentFile: true)
             }
+            // P0-2 Detail 可被嵌套到 Insights→ThemeFilteredEntries→Detail 的 sheet 路径里,
+            // 那条路径上 root toast overlay 被压在 sheet 之下,保存 toast 看不见。在这层重挂兜底。
+            .lumoryToastOverlay()
             .navigationBarBackButtonHidden(isEditing)
             .interactiveDismissDisabled(isEditing && hasUnsavedChanges)
             #if os(iOS)
@@ -384,6 +406,7 @@ struct DiaryDetailView: View {
                 // medium detent 在 iPhone Pro 上不够,会把时间挡在底下。固定 560pt 兜底。
                 .presentationDetents([.height(560), .large])
                 .presentationDragIndicator(.visible)
+                .lumorySheetDecoration()
             }
             .accessibilityLabel(NSLocalizedString("日记时间", comment: "Entry date picker a11y"))
             .accessibilityHint(isEditing ? NSLocalizedString("点击修改时间", comment: "Tap to edit date") : "")
@@ -652,6 +675,11 @@ struct DiaryDetailView: View {
             #if canImport(UIKit)
             HapticManager.shared.notification(.success)
             #endif
+            // P0-2 全局 toast —— Detail 保存原本只 haptic,新加 visual feedback。
+            LumoryToastCenter.shared.show(
+                NSLocalizedString("已保存", comment: "Toast after diary entry edit saved"),
+                severity: .success
+            )
 
             if textChanged {
                 // 快照捕获：Task.detached 是 @Sendable，View struct 不能整个跨线程传。
@@ -812,7 +840,9 @@ private struct AsyncPhotoThumbnail: View {
         }
         .frame(width: 130, height: 130)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .shadow(color: Color.black.opacity(0.1), radius: 6, y: 2)
+        // P1-Dark-5 用 .primary.opacity 而不是 .black.opacity — 暗色下 .primary 是白色,
+        // 阴影成"白光"显示在暗背景上,符合 OLED 暗色 lift effect 直觉;.black.opacity 在暗背景零效果。
+        .shadow(color: Color.primary.opacity(0.15), radius: 6, y: 2)
         .onTapGesture { onTap(index) }
         .task(id: fileName) {
             if thumbnailImage == nil {

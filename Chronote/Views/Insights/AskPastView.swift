@@ -77,7 +77,9 @@ struct AskPastView: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(NSLocalizedString("关闭", comment: "Close")) {
+                    // P1-T9 dismiss 时**会取消进行中的 stream task**(语义=撤销正在进行的事),
+                    // 按 HIG 规则文案应该是"取消"而非"关闭"。规则见 CLAUDE.md sheet 按钮文案约定。
+                    Button(NSLocalizedString("取消", comment: "Cancel ongoing task and dismiss")) {
                         activeTask?.cancel()
                         activeTask = nil
                         activeTaskID = nil
@@ -568,11 +570,16 @@ private struct AskPastMessageRow: View, Equatable {
             Spacer(minLength: 40)
             Text(message.text)
                 .font(.body)
-                .foregroundStyle(.white)
+                // P1-Ins-13 玻璃化 — 之前是 .tint 实色蓝填充,跟整 App 中性玻璃语言脱节。
+                // 改 liquidGlassCard + accent tint 0.18,文字回 primary,跟 ThemeAliasBanner /
+                // pendingCard 同语言。
+                .foregroundStyle(Color.primary)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 18).fill(.tint)
+                .liquidGlassCard(
+                    cornerRadius: 18,
+                    tint: Color.accentColor,
+                    tintStrength: 0.18
                 )
         }
     }
@@ -587,9 +594,13 @@ private struct AskPastMessageRow: View, Equatable {
                 VStack(alignment: .leading, spacing: 6) {
                     aiText
                     if message.isStreaming && !message.text.isEmpty {
-                        Circle()
-                            .fill(Color.primary.opacity(0.5))
-                            .frame(width: 6, height: 6)
+                        // P1-Ins-12 打字中 indicator — 之前是静态圆点,现在用 SF Symbols ellipsis
+                        // + symbolEffect(.pulse) 做苹果原生"打字中"动画。
+                        // outer if 已 gate 住 isStreaming=true,内层 isActive 永远 true → 移除冗余参数。
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Color.primary.opacity(0.5))
+                            .symbolEffect(.pulse)
                     }
                     if message.isIncomplete {
                         incompleteBanner

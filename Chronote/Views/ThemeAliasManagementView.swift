@@ -16,6 +16,8 @@ struct ThemeAliasManagementView: View {
     @State private var customEditorTarget: PendingSuggestion?
     /// 弹"是否真的从所有日记删除这个主题"alert 的目标。
     @State private var groupPendingDeletion: String?
+    /// P1-Theme-5 弹"是否拆开"confirmationDialog 的目标。拆开 = 别名变独立主题(可逆,但用户多半再合并)。
+    @State private var groupPendingUnmerge: String?
     @State private var showResetNegativeAlert = false
     @State private var deleteFailureMessage: String?
 
@@ -44,15 +46,21 @@ struct ThemeAliasManagementView: View {
         .listStyle(.insetGrouped)
         #endif
         .scrollContentBackground(.hidden)
-        .background(backgroundGradient.ignoresSafeArea())
+        // 删了原本的 .background(backgroundGradient.ignoresSafeArea()) — 它跟 SettingsView 自己的
+        // backgroundGradient 在 NavigationStack push/pop transition 中间帧叠加,造成"暗一闪"。
+        // 让此页直接透出 sheet 的纯白底(lumorySheetDecoration 已改纯白),无 overlay = 无 fade-in 闪。
         .navigationTitle(NSLocalizedString("合并主题", comment: "Merge themes title"))
         #if !os(macOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        // P0-2 此页是 Settings 嵌套 sheet,2 层深 — root toast overlay 被 sheet 压住看不见,
+        // 必须在这一层重挂,confirm 成功 toast 在用户当前可见层渲染。
+        .lumoryToastOverlay()
         .sheet(item: $customEditorTarget) { suggestion in
             SuggestionTargetPickerSheet(suggestion: suggestion) { chosen in
                 confirm(suggestion, canonical: chosen)
             }
+            .lumorySheetDecoration()
         }
         .alert(
             groupPendingDeletion.map {
@@ -81,6 +89,28 @@ struct ThemeAliasManagementView: View {
             }
         } message: {
             Text(NSLocalizedString("将从所有日记里抹掉这个主题(包括它的所有别名)。原日记内容不变。此操作不可撤销。", comment: "Delete theme message"))
+        }
+        // P1-Theme-5 拆开 group 加确认 — 跟"删除"等 destructive 操作对齐,防误触。
+        .confirmationDialog(
+            groupPendingUnmerge.map {
+                String(format: NSLocalizedString("拆开「%@」分组?", comment: "Unmerge group confirm"), $0)
+            } ?? "",
+            isPresented: Binding(
+                get: { groupPendingUnmerge != nil },
+                set: { if !$0 { groupPendingUnmerge = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(NSLocalizedString("拆开", comment: "Unmerge confirm action"), role: .destructive) {
+                guard let canonical = groupPendingUnmerge else { return }
+                groupPendingUnmerge = nil
+                resolver.deleteGroup(canonical: canonical)
+            }
+            Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {
+                groupPendingUnmerge = nil
+            }
+        } message: {
+            Text(NSLocalizedString("所有别名会拆回独立主题,原日记内容不变。可以在新待审里重新合并。", comment: "Unmerge group message"))
         }
         .alert(
             NSLocalizedString("删除失败", comment: "Delete failed alert"),
@@ -172,9 +202,13 @@ struct ThemeAliasManagementView: View {
                         Text(scanButtonTitle)
                             .foregroundStyle(Color.primary)
                         if let phaseText = scanPhaseText {
+                            // P1-Theme-6 phase 切换加 transition,scan 是 30-90s 长任务,
+                            // 文字静态切换让用户以为卡死。
                             Text(phaseText)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .transition(.opacity)
+                                .id(phaseText)
                         }
                     }
                     Spacer()
@@ -182,6 +216,7 @@ struct ThemeAliasManagementView: View {
                         ProgressView()
                     }
                 }
+                .animation(AnimationConfig.smoothTransition, value: scanPhaseText)
             }
             .disabled(judgeService.scanProgress.isRunning)
         }
@@ -247,22 +282,17 @@ struct ThemeAliasManagementView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     if resolver.pending.count >= 3 {
-                        // 待审超 3 条时给一个"全部清空"按钮 —— 不写 negativePairs,
-                        // 用户下次 scan 还能重新看到。Menu 风格让它不那么显眼。
-                        Menu {
-                            Button(role: .destructive) {
-                                resolver.clearAllPending()
-                            } label: {
-                                Label(
-                                    NSLocalizedString("全部清空", comment: "Clear all pending"),
-                                    systemImage: "trash.slash"
-                                )
-                            }
+                        // P1-Theme-1 显式 "全部忽略" 文字按钮 — 替原 ellipsis.circle Menu(触发区小、
+                        // 字号 caption 灰色,用户找不到批量操作)。.glass small button 跟周围 row 节奏一致。
+                        Button(role: .destructive) {
+                            resolver.clearAllPending()
                         } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .foregroundStyle(.secondary)
+                            Text(NSLocalizedString("全部忽略", comment: "Dismiss all pending alias suggestions"))
+                                .font(.caption.weight(.semibold))
                         }
-                        .accessibilityLabel(NSLocalizedString("更多操作", comment: "More actions"))
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                        .accessibilityLabel(NSLocalizedString("全部忽略待审主题", comment: "Dismiss all pending"))
                     }
                 }
             }
@@ -273,11 +303,17 @@ struct ThemeAliasManagementView: View {
     private func pendingCard(for suggestion: PendingSuggestion) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             // 标题 + 置信度
-            HStack(alignment: .firstTextBaseline) {
-                Text(String(format: NSLocalizedString("「%@」=%@?", comment: "Pending card headline"),
-                            suggestion.newTag, suggestion.canonicalGuess))
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(Color.primary)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                // P1-Theme-2 两行结构 — 大字主题名 + 小字解释问题,比"「宝贝」=Abby?"等号问号更自然。
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(suggestion.newTag)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(Color.primary)
+                    Text(String(format: NSLocalizedString("这可能是「%@」的别称?", comment: "Pending card subtitle"),
+                                suggestion.canonicalGuess))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 // confidence pill —— high 用中性灰(banner 已弹过,卡片只是 reference);
                 // medium 用 orange 提示"AI 不太确定,慎重判断"。降低色彩噪声。
@@ -306,10 +342,9 @@ struct ThemeAliasManagementView: View {
 
                 HStack(spacing: 8) {
                     chip(
-                        title: String(
-                            format: NSLocalizedString("把「%@」合并到其他主题", comment: "Pick another canonical for newTag"),
-                            suggestion.newTag
-                        ),
+                        // P1-Theme-3 文案修正 — "把「X」合并到其他主题" 太长会 .lineLimit(1) 截断,
+                        // 缩成"选择合并目标" / "Choose target..." 简洁不丢语义。
+                        title: NSLocalizedString("选择合并目标…", comment: "Pick a merge target manually"),
                         style: .secondary,
                         fullWidth: true
                     ) {
@@ -380,7 +415,9 @@ struct ThemeAliasManagementView: View {
                 mergedGroupsPanel
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    // P1-Theme-4 跟 pendingSection (16/16 horizontal) 对齐 — 0/0 让 liquidGlass
+                    // 卡跟 Form .insetGrouped 系统 chrome 边缘重合产生双圆角阴影,违反 CLAUDE.md 约定。
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
             }
         }
     }
@@ -453,7 +490,9 @@ struct ThemeAliasManagementView: View {
                     .foregroundStyle(.secondary)
                 Menu {
                     Button {
-                        resolver.deleteGroup(canonical: canonical)
+                        // P1-Theme-5 加 confirmationDialog — "拆开"会让别名重新成独立主题,跟"删除"
+                        // 一样有不可逆影响(用户大概率重新合并),之前无确认直接执行。
+                        groupPendingUnmerge = canonical
                     } label: {
                         Label(NSLocalizedString("拆开", comment: "Unmerge group"), systemImage: "arrow.up.and.down.and.arrow.left.and.right")
                     }
@@ -505,6 +544,11 @@ struct ThemeAliasManagementView: View {
         HapticManager.shared.notification(.success)
         #endif
         resolver.confirm(suggestion, canonical: canonical)
+        // P0-2 全局 toast — 跟 banner confirm 统一文案,在 Settings 深层也能看到。
+        LumoryToastCenter.shared.show(
+            String(format: NSLocalizedString("已合并到「%@」", comment: "Toast after merging theme alias"), canonical),
+            severity: .success
+        )
     }
 
     private func reject(_ suggestion: PendingSuggestion) {

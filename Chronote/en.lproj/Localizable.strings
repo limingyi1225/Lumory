@@ -142,8 +142,7 @@
 /* Streaming — truncation markers + fallback error text (reasoning-report and ask modes) */
 "stream.truncated.report" = "⚠️ Report incomplete (connection interrupted). Please regenerate.";
 "stream.truncated.answer" = "Response incomplete (connection interrupted). Please retry.";
-"error.stream.answerGeneric.zh" = "Error answering: %@";
-"error.stream.answerGeneric.en" = "Error answering: %@";
+"error.stream.answerGeneric" = "Error answering: %@";
 /* Streaming banner shown above truncated AI output so users don't treat partial content as final */
 "stream.incomplete.banner" = "Content incomplete — you can regenerate.";
 "stream.incomplete.regenerate" = "Regenerate";
@@ -383,8 +382,8 @@
 "关于 %@，我最近在想什么？" = "What have I been thinking about %@ lately?";
 "关联洞察" = "Correlation insights";
 "写几篇日记之后，这里会出现针对你的问题建议。" = "After writing a few entries, suggestions tailored to you will appear here.";
-"写到 %@ 时情绪最低" = "Lowest mood when writing about %@";
-"写到 %@ 时情绪最好" = "Best mood when writing about %@";
+"写到%@时情绪最低" = "Lowest mood when writing about %@";
+"写到%@时情绪最好" = "Best mood when writing about %@";
 "删除录音" = "Delete recording";
 "加载中" = "Loading";
 "午安，上午过得怎么样？" = "Afternoon — how was your morning?";
@@ -430,7 +429,7 @@
 "昨天你提到 %@，今天感觉如何？" = "You mentioned %@ yesterday — how do you feel today?";
 "暂停" = "Pause";
 "更多数据后，这里会浮现模式" = "Patterns will emerge as more data is collected";
-"最常出现的是 %@" = "Most common: %@";
+"最常出现的是%@" = "Most common: %@";
 "最近 %@ 怎么样？" = "How has %@ been recently?";
 "最近 1 年" = "Last year";
 "最近 3 个月" = "Last 3 months";
@@ -500,3 +499,26 @@
 "milestone.tagline.100" = "100 days — a rare kind of consistency.";
 "milestone.tagline.century_plus" = "%d days. Lumory has become part of you.";
 "milestone.accessibility" = "Streak milestone, %d days";
+
+// MARK: - P0/P1 UI/UX megareview additions (2026-05-04)
+// reviewer 抓出 19 个新 NSLocalizedString key 双 locale 全缺。
+// 否则英文用户碰到这些 key 会直接看到中文 key 字符串(NSLocalizedString 找不到 fallback 到 key 本身)。
+"全部忽略" = "Dismiss all";
+"全部忽略待审主题" = "Dismiss all pending suggestions";
+"去系统设置" = "Open Settings";
+"将永久删除 %d 条日记,无法撤销。已合并的主题分组也会一并清除。" = "Permanently delete %d entries. This cannot be undone. Merged theme groups will also be cleared.";
+"已保存" = "Saved";
+"已删除" = "Deleted";
+"已有录音,删除当前录音才能重录" = "A recording already exists. Delete it before recording again.";
+"已记录" = "Saved to journal";
+"应用语言" = "App language";
+"录音电平" = "Audio level";
+"所有别名会拆回独立主题,原日记内容不变。可以在新待审里重新合并。" = "All aliases will be split back into separate themes. Your entries are unchanged. You can merge them again from new suggestions.";
+"拆开「%@」分组?" = "Split the “%@” group?";
+"撤销" = "Undo";
+"收起键盘" = "Hide keyboard";
+"整体进度" = "Overall progress";
+"点下方输入框写一句,或点下麦克风录一段语音。" = "Tap the field below to write a line, or tap the mic to record a voice note.";
+"这可能是「%@」的别称?" = "Could “%@” be another name?";
+"选择合并目标…" = "Choose a merge target…";
+"重试" = "Retry";

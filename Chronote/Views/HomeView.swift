@@ -17,19 +17,6 @@ struct Recording: Identifiable {
     let duration: TimeInterval
 }
 
-private func deleteHomeEntryAttachmentFiles(imageFileNames: [String], audioFileName: String?) {
-    for fileName in imageFileNames {
-        do {
-            try DiaryEntry.deleteImageFromDocuments(fileName)
-        } catch {
-            Log.error("[HomeView] 删除图片附件失败 \(fileName): \(error)", category: .ui)
-        }
-    }
-    if let audioFileName, !audioFileName.isEmpty {
-        DiaryEntry.deleteAudioFromDocuments(audioFileName)
-    }
-}
-
 struct HomeView: View {
     // Core Data 相关
     @Environment(\.managedObjectContext) private var viewContext
@@ -94,8 +81,8 @@ struct HomeView: View {
     @State private var isSettingsOpen: Bool = false
     @State private var isInsightsPresented: Bool = false
     @State private var shouldStartEditing: Bool = false
-    @State private var entryToDelete: DiaryEntry?
-    @State private var showDeleteConfirmation: Bool = false
+    // entryToDelete / showDeleteConfirmation 已移除 — 删除走 4 秒撤销 toast,不再有 alert。
+    // 旧 contextMenu / swipeAction 直接调 deleteEntry(entry)。
     /// 冷启动首帧 @FetchRequest 尚未完成时为 false——避免 emptyState 闪一帧。
     @State private var hasLoadedOnce: Bool = false
 
@@ -124,6 +111,7 @@ struct HomeView: View {
                 SettingsView(isSettingsOpen: $isSettingsOpen)
                     .environmentObject(importService)
                     .environment(\.managedObjectContext, viewContext)
+                    .lumorySheetDecoration()
             }
             .onChange(of: importService.isImporting) { _, isImporting in
                 if isImporting {
@@ -138,6 +126,13 @@ struct HomeView: View {
                 // AI 池可能已就绪（另一视图暖过）——进入首页立即尝试拿一条稳定值
                 rollPlaceholderIfNeeded()
                 handleReminderComposeFocusIfNeeded()
+                // P1-Home-13 草稿 hydrate — 用户切微信回来 OK,但 App 被 OOM 杀掉就丢。
+                // hydrate 时只在输入框为空才填(防止 onChange 触发后被反填)。
+                if inputVM.inputText.isEmpty,
+                   let draft = AppGroup.userDefaults.string(forKey: "lumory.home.draft.text"),
+                   !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    inputVM.inputText = draft
+                }
             }
             .task {
                 // 防御:cold-launch 路径上 ReminderNotificationRouter 在 background queue
@@ -167,18 +162,7 @@ struct HomeView: View {
                 Log.info("[HomeView] Database recreated notification received", category: .ui)
                 handleDatabaseRecreation()
             }
-            .alert(NSLocalizedString("删除日记", comment: "Delete entry"), isPresented: $showDeleteConfirmation) {
-                Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
-                    if let entry = entryToDelete {
-                        deleteEntry(entry)
-                    }
-                }
-                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {
-                    entryToDelete = nil
-                }
-            } message: {
-                Text(NSLocalizedString("确定要删除这篇日记吗？此操作无法撤销。", comment: "Delete confirmation"))
-            }
+            // 删除 confirmation 已移除 — 4 秒撤销 toast 替代。swipe / contextMenu 直接 deleteEntry。
     }
     
     @ViewBuilder
@@ -303,6 +287,8 @@ struct HomeView: View {
                 diaryContentSections
             }
             .optimizedList()
+            // iOS 26 顶部边缘软渐隐 — 内容滚到顶下时贴玻璃感更自然,不再硬切到 navigation chrome。
+            .scrollEdgeEffectStyle(.soft, for: .top)
             .scrollDismissesKeyboard(.interactively)
             .refreshable {
                 await triggerManualSync()
@@ -356,8 +342,6 @@ struct HomeView: View {
         isSettingsOpen = false
         isInsightsPresented = false
         selectedEntry = nil
-        showDeleteConfirmation = false
-        entryToDelete = nil
         searchQuery = ""
         composerFocusRequestID = nil
         Task { @MainActor in
@@ -410,8 +394,10 @@ struct HomeView: View {
                 if !photoVM.selectedImageItems.isEmpty { photosSection }
                 if photoVM.compressionFailureCount > 0 { compressionFailureBanner }
                 // 卡内分隔线:把"内容区"和"动作区(工具栏)"隔开。
+                // P1-Dark-3 用 .separator system color — 暗色下系统自动算到约 0.20 alpha,
+                // 之前 primary.opacity(0.06) 在 OLED 暗色基本不可见,分隔线消失。
                 Capsule()
-                    .fill(Color.primary.opacity(0.06))
+                    .fill(Color(.separator))
                     .frame(height: 1)
                     .padding(.horizontal, 4)
                 // 工具栏:photo / mic / 计时 / 发送。
@@ -453,8 +439,30 @@ struct HomeView: View {
         .background(Color.clear)
         .font(.system(size: 17))
         .focused($isInputFocused)
+        // P1-Home-12 键盘 toolbar 加"完成"按钮 — 中文拼音输入法 candidate bar 占额外 36pt,
+        // 用户要看下方滚动区必须先关键盘。"keyboard.chevron.compact.down" 是系统标准 dismiss 图标。
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button {
+                    isInputFocused = false
+                } label: {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                }
+                .accessibilityLabel(NSLocalizedString("收起键盘", comment: "Dismiss keyboard"))
+            }
+        }
         .onChange(of: inputVM.inputText) { _, newValue in
-            let hasContent = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            // P1-Home-13 草稿持久化 — 用户切微信回来 OK,但 App 被 OOM 杀掉就丢了。
+            // 写到 AppGroup defaults 防进程被杀;过滤纯空白避免 storage 抖动。
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                AppGroup.userDefaults.removeObject(forKey: "lumory.home.draft.text")
+            } else {
+                AppGroup.userDefaults.set(newValue, forKey: "lumory.home.draft.text")
+            }
+
+            let hasContent = !trimmed.isEmpty
             if hasContent && inputVM.spectrumDisplayState == .idle {
                 withAnimation(.easeInOut(duration: 1.0)) {
                     inputVM.spectrumDisplayState = .analyzing
@@ -733,9 +741,9 @@ struct HomeView: View {
         // 内，第二次 tap 照样能过上面的 guard —— 两条日记双发落库。
         // handleSendAction 由 Button action 触发，天然在主线程，VM 字段同步写合法。
         inputVM.isSending = true
-#if canImport(UIKit)
-        HapticManager.shared.click()
-#endif
+        // 之前发送有三次 haptic:button click + mood reveal + save success → 用户感觉太抖。
+        // 只保留**保存完成**那一次(行末 .completed 状态时发,跟"已记录"toast 一起),
+        // 把 click 删掉(.glassProminent 视觉高亮已经够) + mood reveal 也删(在 MoodSpectrumBar)。
         Task {
             // 1. 发送开始：snapshot 输入 + 立即清空 UI，避免 2 秒动画窗口内继续打字造成
             //    情绪分析文本与落库文本错位，或新输入被后续清空吞掉。
@@ -836,6 +844,14 @@ struct HomeView: View {
                     inputVM.sendButtonState = .completed
                     inputVM.isSending = false
                 }
+                // P0-2 send 完成成功反馈 — 之前完全没 haptic,跟"删 / 存"高频动作统一。
+                #if canImport(UIKit)
+                HapticManager.shared.notification(.success)
+                #endif
+                LumoryToastCenter.shared.show(
+                    NSLocalizedString("已记录", comment: "Toast after diary entry saved"),
+                    severity: .success
+                )
             }
 
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -1099,7 +1115,9 @@ struct HomeView: View {
             EmptyStateView(
                 systemImage: "book.closed",
                 title: NSLocalizedString("暂无日记，快去记录吧～", comment: "Empty timeline title"),
-                message: NSLocalizedString("点下方输入框写一句,或长按麦克风录一段语音。",
+                // P1-Home-7 修正"长按麦克风"→"或点下麦克风" — 当前实际交互是 tap toggle 不是
+                // hold-to-talk(P1-Home-2 落地后再改回长按文案)。让首次用户跟着提示能真触发录音。
+                message: NSLocalizedString("点下方输入框写一句,或点下麦克风录一段语音。",
                                             comment: "Empty timeline subtitle")
             )
             .frame(minHeight: 320)
@@ -1130,6 +1148,11 @@ struct HomeView: View {
     @ViewBuilder
     private func timelineRow(entry: DiaryEntry, isFirst: Bool, isLast: Bool) -> some View {
         Button {
+            // P1-T5 主入口 haptic — 日记卡 tap 是高频主入口,之前完全没反馈 vs 二级主题卡 tap
+            // 反而有,主次颠倒。规则见 CLAUDE.md:自定义 Button-shape 进 detail 卡 = .light impact。
+            #if canImport(UIKit)
+            HapticManager.shared.impact(.light)
+            #endif
             // 原先只设 selectedEntry，若上次长按"编辑"后 onDisappear 还没跑完就再次点击，
             // `shouldStartEditing` 残留 true，这次普通点击也会进编辑模式。显式清掉。
             shouldStartEditing = false
@@ -1143,7 +1166,9 @@ struct HomeView: View {
                 .padding(.bottom, 10)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(PlainButtonStyle())
+        // P1-T6 PressableScaleButtonStyle — 主时间线日记卡之前 plain,无任何按下反馈。
+        // 规则见 CLAUDE.md:自定义 Button-shape 卡片(日记 / 主题 / Settings 自定义 row)统一套这个。
+        .buttonStyle(PressableScaleButtonStyle())
         .contextMenu {
             Button {
                 shouldStartEditing = true
@@ -1151,9 +1176,9 @@ struct HomeView: View {
             } label: {
                 Label(NSLocalizedString("编辑", comment: "Edit"), systemImage: "pencil")
             }
+            // 删除直接执行 — 4 秒撤销 toast 替代了 confirmation alert。
             Button(role: .destructive) {
-                entryToDelete = entry
-                showDeleteConfirmation = true
+                deleteEntry(entry)
             } label: {
                 Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
             }
@@ -1164,9 +1189,9 @@ struct HomeView: View {
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            // 删除直接执行 — 4 秒撤销 toast 替代了 confirmation alert。
             Button(role: .destructive) {
-                entryToDelete = entry
-                showDeleteConfirmation = true
+                deleteEntry(entry)
             } label: {
                 Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
             }
@@ -1495,22 +1520,23 @@ struct HomeView: View {
         if self.audioPlaybackController.currentPlayingFileName == entry.audioFileName {
             self.audioPlaybackController.stopPlayback(clearCurrentFile: true)
         }
-        
-        let imageFileNames = entry.imageFileNameArray
-        let audioFileName = entry.audioFileName
 
-        // Perform deletion within a withAnimation block for smoother UI updates
+        // P1-Home-6 抓快照 — 必须在 viewContext.delete 之前(@NSManaged 访问 deleted entry 会 crash)。
+        // attachment 文件**不**在这里删,延迟到 commitPendingNow 跑(让撤销窗口里 restore 时文件还在)。
+        let snapshot = EntryDeletionSnapshot(entry: entry)
+
+        // Perform deletion within a withAnimation block for smoother UI updates.
+        // **register / show 故意挪出 withAnimation**(reviewer P1):toast `show()` mutate `@Observable`
+        // 字段时如果在 withAnimation 里,会跟 LumoryToastOverlay 自带的 `AnimationConfig.toast` 叠成
+        // 两层动画,节奏跑偏。其他 3 个删除 callsite(DiaryDetail / ThemeFiltered / PointDetail)都
+        // 在 withAnimation 之外做,这里改成同一 idiom 保持一致。
+        var didSucceed = false
         withAnimation {
             viewContext.delete(entry)
-            
+
             do {
                 try viewContext.save()
-                HapticManager.shared.impact(.medium)
-                // 单删派生缓存清理统一走 EntryWipeOrchestrator(Reminder + Prompt + Insights + alias 孤儿清理)。
-                EntryWipeOrchestrator.performSingleDeleteCleanup()
-                Task.detached(priority: .utility) {
-                    deleteHomeEntryAttachmentFiles(imageFileNames: imageFileNames, audioFileName: audioFileName)
-                }
+                didSucceed = true
             } catch {
                 // Log the error appropriately
                 Log.error("[HomeView] 删除日记失败: \(error.localizedDescription)", category: .ui)
@@ -1518,17 +1544,35 @@ struct HomeView: View {
             }
         }
 
-        // Ensure entryToDelete is cleared AFTER the operation.
-        // If this closure is part of an alert, ensure it's cleared
-        // whether the operation succeeded or failed, to reset state.
-        entryToDelete = nil
+        guard didSucceed else { return }
+        HapticManager.shared.impact(.medium)
+        // 单删派生缓存清理统一走 EntryWipeOrchestrator(Reminder + Prompt + Insights + alias 孤儿清理)。
+        // 注意:这层是聚合刷新,不删 attachment 文件 — attachment 由 EntryDeletionUndoService 4s 后清。
+        EntryWipeOrchestrator.performSingleDeleteCleanup()
+
+        // P1-Home-6 注册到 undo service + 弹带"撤销"按钮的 toast。4 秒内点撤销 → entry 复活。
+        let viewContextRef = viewContext
+        EntryDeletionUndoService.shared.register(snapshot: snapshot)
+        LumoryToastCenter.shared.show(
+            NSLocalizedString("已删除", comment: "Toast after entry deletion"),
+            severity: .success,
+            duration: EntryDeletionUndoService.undoWindow,
+            action: LumoryToastCenter.Action(
+                label: NSLocalizedString("撤销", comment: "Undo delete action")
+            ) {
+                if EntryDeletionUndoService.shared.undo(into: viewContextRef) != nil {
+                    #if canImport(UIKit)
+                    HapticManager.shared.notification(.success)
+                    #endif
+                }
+            }
+        )
     }
-    
+
     private func handleDatabaseRecreation() {
         // Clear any local state that might reference deleted objects
         selectedEntry = nil
-        entryToDelete = nil
-        
+
         // Stop any ongoing audio playback
         audioPlaybackController.stopPlayback(clearCurrentFile: true)
         
@@ -1671,15 +1715,34 @@ extension HomeView {
                 }
             }
         } label: {
+            // .buttonStyle(.plain) 不应用系统默认的 disabled dim,所以同色 mic 在 disabled 时
+            // 视觉上跟 enabled 完全一样,用户每次都得点一下才知道(reviewer Wave-C BUG-P2)。
+            // 显式 opacity 让"已有录音"态可见。
+            let isMicDisabled = recordingVM.audioRecordings.count >= 1 && !recorder.isRecording
             Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic")
                 .font(.system(size: 18, weight: .medium))
                 .foregroundStyle(recorder.isRecording ? .red : Color.primary.opacity(0.85))
+                .opacity(isMicDisabled ? 0.4 : 1.0)
                 .symbolEffect(.bounce, value: recorder.isRecording)
                 .frame(width: 44, height: 36)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(recordingVM.audioRecordings.count >= 1 && !recorder.isRecording)
+        // P1-Home-14 disabled tap 教育 — 录音卡只能存一条,用户不知道为什么 mic 灰着。
+        // overlay tap 在 disabled 时仍接收事件,弹 toast 解释。
+        .overlay {
+            if recordingVM.audioRecordings.count >= 1 && !recorder.isRecording {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        LumoryToastCenter.shared.show(
+                            NSLocalizedString("已有录音,删除当前录音才能重录", comment: "Recording slot occupied"),
+                            severity: .info
+                        )
+                    }
+            }
+        }
         .accessibilityLabel(recorder.isRecording
             ? NSLocalizedString("停止录音", comment: "Stop recording")
             : NSLocalizedString("开始录音", comment: "Start recording"))
@@ -1694,6 +1757,11 @@ extension HomeView {
         // 在 GlassEffectContainer 里 + 外层 liquidGlassCard 提供 surface 上下文。
         // 渲染成什么样交给 SwiftUI,不手绘装饰。
         Button {
+            // 用户反馈:点的瞬间没触觉 = 不知道按到了 — 之前为了消三连 haptic 把入口的 click() 删了,
+            // 现在补回 .light impact(只这一处,不再加 reveal milestone 那条)。完成时仍走 success。
+            #if canImport(UIKit)
+            HapticManager.shared.impact(.light)
+            #endif
             handleSendAction()
         } label: {
             if inputVM.sendButtonState == .sending {
@@ -1714,10 +1782,15 @@ extension HomeView {
     @ViewBuilder
     private var recordingTimerInline: some View {
         if recorder.isRecording {
-            Text(formattedDuration(currentTime: recorder.duration, totalDuration: 0))
-                .font(.footnote.weight(.medium).monospacedDigit())
-                .foregroundColor(.red)
-                .transition(.opacity)
+            HStack(spacing: 8) {
+                // P1-Home-1 实时电平条 — 用户在沙发 / 走路录音时能立刻看到"麦在拾音",
+                // 不再 30s 录完转写失败才发现没拾到。
+                AudioMeterBar(amplitude: recorder.amplitude, isActive: recorder.isRecording)
+                Text(formattedDuration(currentTime: recorder.duration, totalDuration: 0))
+                    .font(.footnote.weight(.medium).monospacedDigit())
+                    .foregroundColor(.red)
+            }
+            .transition(.opacity)
         }
     }
 

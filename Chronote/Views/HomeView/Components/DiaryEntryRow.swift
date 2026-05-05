@@ -80,20 +80,19 @@ struct DiaryEntryRow: View {
 
                     // Thumbnail
                     if let thumbnailImage {
+                        // P0-3 替 deprecated `.cornerRadius` → `.clipShape(... continuous)`,跟 iOS 26 大圆角统一。
                         #if canImport(UIKit)
                         Image(uiImage: thumbnailImage)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                             .frame(width: 40, height: 40)
-                            .clipped()
-                            .cornerRadius(8)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         #elseif canImport(AppKit)
                         Image(nsImage: thumbnailImage)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                             .frame(width: 40, height: 40)
-                            .clipped()
-                            .cornerRadius(8)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         #endif
                     } else if !entry.imageFileNameArray.isEmpty {
                         // 只有"这条日记确实有图片、但还在加载"的时候才显示占位；
@@ -101,14 +100,23 @@ struct DiaryEntryRow: View {
                         Image(systemName: "photo")
                             .foregroundColor(.secondary)
                             .frame(width: 40, height: 40)
-                            .background(Color.secondary.opacity(0.1))
-                            .cornerRadius(8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Color.secondary.opacity(0.1))
+                            )
                     }
                 }
             }
         }
         .padding()
-        .liquidGlassCard(cornerRadius: 16, interactive: true)
+        // P1-Home-8 整张 row 给 mood gradient 极淡背景 — entry.moodColor tint 0.06,
+        // 让"心情色"从只在 thumbnail 旁的小色块,提升为整 row 的氛围。强度低,不抢内容主体。
+        .liquidGlassCard(
+            cornerRadius: LumoryCornerRadius.card,
+            tint: Color.moodSpectrum(value: entry.moodValue),
+            tintStrength: 0.06,
+            interactive: true
+        )
         .onAppear {
             if isSummaryLoading {
                 startShimmerAnimation()

@@ -11,7 +11,7 @@ struct PointDetailSheet: View {
     let onEntryDeleted: (() -> Void)?
 
     @State private var entries: [DiaryEntry] = []
-    @State private var entryToDelete: DiaryEntry?
+    // entryToDelete 已移除 — 删除走 4 秒撤销 toast。
     @State private var deleteFailureMessage: String?
 
     var body: some View {
@@ -24,16 +24,17 @@ struct PointDetailSheet: View {
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    // 删除直接执行 — 4 秒撤销 toast 替代 confirmation alert。
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button(role: .destructive) {
-                            entryToDelete = entry
+                            deleteEntry(entry)
                         } label: {
                             Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
                         }
                     }
                     .contextMenu {
                         Button(role: .destructive) {
-                            entryToDelete = entry
+                            deleteEntry(entry)
                         } label: {
                             Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
                         }
@@ -50,6 +51,8 @@ struct PointDetailSheet: View {
                 }
             }
             .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.listContentMaxWidth)
+            // 嵌套 sheet,root / parent overlay 看不见,在这层兜一份给删除 toast。
+            .lumoryToastOverlay()
             .navigationTitle(dateLabel)
             .navigationDestination(for: DiaryEntry.self) { entry in
                 DiaryDetailView(entry: entry, startInEditMode: false)
@@ -60,25 +63,7 @@ struct PointDetailSheet: View {
                 }
             }
             .task { await fetch() }
-            .alert(
-                NSLocalizedString("删除日记", comment: "Delete entry"),
-                isPresented: Binding(
-                    get: { entryToDelete != nil },
-                    set: { if !$0 { entryToDelete = nil } }
-                )
-            ) {
-                Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
-                    if let entry = entryToDelete {
-                        deleteEntry(entry)
-                    }
-                    entryToDelete = nil
-                }
-                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {
-                    entryToDelete = nil
-                }
-            } message: {
-                Text(NSLocalizedString("此操作无法撤销。", comment: "Delete confirmation message"))
-            }
+            // 删除 confirmation 已移除 — 4 秒撤销 toast 替代。
             .alert(
                 NSLocalizedString("删除失败", comment: "Delete failed alert title"),
                 isPresented: Binding(
@@ -95,26 +80,45 @@ struct PointDetailSheet: View {
         }
     }
 
-    /// 跟 ThemeFilteredEntriesView / HomeView 同 pattern。
+    /// 跟 HomeView / DiaryDetailView / ThemeFilteredEntriesView 同 pattern — 4 秒撤销窗口。
+    /// attachment 文件清理由 EntryDeletionUndoService 在窗口结束时跑,撤销期内还在原位。
     private func deleteEntry(_ entry: DiaryEntry) {
-        let imageFileNames = entry.imageFileNameArray
-        let audioFileName = entry.audioFileName
+        let snapshot = EntryDeletionSnapshot(entry: entry)
+        let entryObjectID = entry.objectID
 
         viewContext.delete(entry)
         do {
             try viewContext.save()
             HapticManager.shared.impact(.medium)
             EntryWipeOrchestrator.performSingleDeleteCleanup()
-            withAnimation { entries.removeAll { $0.objectID == entry.objectID } }
+            withAnimation { entries.removeAll { $0.objectID == entryObjectID } }
             onEntryDeleted?()
-            Task.detached(priority: .utility) {
-                for fn in imageFileNames {
-                    do { try DiaryEntry.deleteImageFromDocuments(fn) } catch { Log.error("[PointDetail] image cleanup: \(error)", category: .ui) }
+
+            let viewContextRef = viewContext
+            let onEntryDeletedRef = onEntryDeleted
+            EntryDeletionUndoService.shared.register(snapshot: snapshot)
+            LumoryToastCenter.shared.show(
+                NSLocalizedString("已删除", comment: "Toast after entry deletion"),
+                severity: .success,
+                duration: EntryDeletionUndoService.undoWindow,
+                action: LumoryToastCenter.Action(
+                    label: NSLocalizedString("撤销", comment: "Undo delete action")
+                ) {
+                    if let restoredEntry = EntryDeletionUndoService.shared.undo(into: viewContextRef) {
+                        #if canImport(UIKit)
+                        HapticManager.shared.notification(.success)
+                        #endif
+                        // 本 sheet 用 `@State [DiaryEntry]` 缓存,不会自动响应 CoreData;手工 splice
+                        // 回去 — 不然撤销 toast 给了 success haptic 但用户在这页里看不到那条回来。
+                        // 按 `entry.date` desc 排序对齐 fetch() 的 sortDescriptor。
+                        withAnimation {
+                            entries.append(restoredEntry)
+                            entries.sort { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+                        }
+                        onEntryDeletedRef?()
+                    }
                 }
-                if let af = audioFileName, !af.isEmpty {
-                    DiaryEntry.deleteAudioFromDocuments(af)
-                }
-            }
+            )
         } catch {
             viewContext.rollback()
             Log.error("[PointDetailSheet] 删除日记失败: \(error)", category: .ui)

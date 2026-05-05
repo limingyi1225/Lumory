@@ -49,9 +49,9 @@ struct DiaryExportView: View {
                         Text("\(entries.count)")
                             .fontWeight(.semibold)
                     }
-                    
+
                     Divider()
-                    
+
                     HStack {
                         Image(systemName: "calendar")
                             .foregroundColor(.accentColor)
@@ -64,10 +64,8 @@ struct DiaryExportView: View {
                     }
                 }
                 .padding()
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color(.secondarySystemBackground))
-                )
+                // P0-3 玻璃化 — 替 secondarySystemBackground 实色,跟主页玻璃语言一致。
+                .liquidGlassCard(cornerRadius: 12)
                 
                 // Description
                 Text(NSLocalizedString("导出后将生成一个文本文件，包含所有日记的日期、心情和内容。", comment: "Export description"))
@@ -85,10 +83,8 @@ struct DiaryExportView: View {
                     }
                     .padding()
                     .frame(maxWidth: .infinity, alignment: .center)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color(.secondarySystemBackground))
-                    )
+                    // P0-3 玻璃化 — 跟上方 info card 同语言。
+                    .liquidGlassCard(cornerRadius: 12)
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 

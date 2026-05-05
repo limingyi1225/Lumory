@@ -21,6 +21,8 @@ struct CalendarMonthModule: View {
     @State private var daysByMonthKey: [Date: [Date?]] = [:]
     @State private var lastCellsIdentity: Int = 0
 
+    @Environment(\.colorScheme) private var colorScheme
+
     private let calendar = Calendar.current
 
     // 固定 6 行 —— 覆盖所有可能的月份布局；差的月份底部留白即可，比跳动好看。
@@ -175,10 +177,28 @@ struct CalendarMonthModule: View {
             .foregroundColor(isFuture ? .secondary.opacity(0.4) : .primary)
             .frame(width: Self.diskSize, height: Self.diskSize)
 
-        if hasEntry || isToday {
-            text.liquidGlassCircle(
-                tint: mood.map { Color.moodSpectrum(value: $0) },
-                tintStrength: 0.20
+        if hasEntry, let mood {
+            // **2026-05-05 第三轮**:之前用 liquidGlassCircle + tintStrength 0.20-0.30,玻璃材质压
+            // mood 色饱和度,看着偏白偏灰,跟 MoodStoryChart 实色 area gradient 风格完全不同。
+            // 改成 Circle.fill(moodColor.opacity(...))**直接实色** — 跟 chart 用同一种 mood 色彩语言,
+            // 跨视图 mood 表达统一。亮色 0.40 / 暗色 0.55(暗色 OLED 吃透明度,保 1.4x)。
+            text.background(
+                Circle()
+                    .fill(Color.moodSpectrum(value: mood)
+                        .opacity(colorScheme == .dark ? 0.55 : 0.40))
+                    .frame(width: Self.diskSize, height: Self.diskSize)
+            )
+        } else if isToday {
+            // 今天没写日记 — disc 留空,外层 .overlay 的 strokeBorder 单独画"今天"圆环。
+            text
+        } else if !isFuture {
+            // P1-Ins-5 无日记天数加极淡 disc — 之前完全空白让网格肌理消失,只剩数字浮在背景上。
+            // 极淡 disc(0.04 secondary)给一层底子,网格规整感保留,但又不抢"有日记 disc"的视觉权重。
+            // 未来日期保留纯文本 + secondary 灰,跟"有日记 / 今天"层级清晰区分。
+            text.background(
+                Circle()
+                    .fill(Color.secondary.opacity(0.04))
+                    .frame(width: Self.diskSize, height: Self.diskSize)
             )
         } else {
             text

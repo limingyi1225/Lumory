@@ -55,12 +55,15 @@ struct LockScreenView: View {
                         Text(NSLocalizedString("解锁", comment: "App lock unlock button"))
                             .fontWeight(.medium)
                     }
+                    .foregroundStyle(.white)
                     .padding(.horizontal, 24)
                     .padding(.vertical, 12)
                     .frame(minWidth: 140)
+                    // P0-3 锁屏按钮:替 .borderedProminent → liquidGlassCapsule + interactive,
+                    // 跟 iOS 26 控件玻璃语言一致(.borderedProminent 在黑底上是实色 chip,跟整页克制感冲突)。
+                    .liquidGlassCapsule(interactive: true)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .buttonStyle(PressableScaleButtonStyle())
                 .disabled(isAuthenticating)
 
                 if let lastFailureMessage {

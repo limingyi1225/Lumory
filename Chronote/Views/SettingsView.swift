@@ -17,6 +17,7 @@ import UIKit
 struct SettingsView: View {
     @Binding var isSettingsOpen: Bool
     @Environment(\.managedObjectContext) private var viewContext
+    @Environment(\.colorScheme) private var colorScheme
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
     ) private var entries: FetchedResults<DiaryEntry>
@@ -76,10 +77,16 @@ struct SettingsView: View {
             .listStyle(.insetGrouped)
             #endif
             .scrollContentBackground(.hidden)
-            .background(backgroundGradient.ignoresSafeArea())
+            // backgroundGradient 不能挂 Form 上 — 用户反馈从子页面 pop 回 Settings 时背景"暗一闪"。
+            // 原因:NavigationStack pop 转场时 Form view tree 短暂重建,挂 Form 的 .background()
+            // 那一帧未应用 → 露出 sheet 的 .regularMaterial 背景 → material 透出后面被 dim 的 Home。
+            // 把 backgroundGradient 挪到 NavigationStack 外(下方 .background 调用),让它永远 in-place
+            // 不受 push/pop 影响。
             .navigationTitle(NSLocalizedString("设置", comment: "Settings"))
             #if !os(macOS)
-            .navigationBarTitleDisplayMode(.inline)
+            // P1-Set-10 .inline → .automatic — iOS 26 large title 在滚顶时动态收缩,
+            // .inline 强制小标题丢失这层动态。Settings 是单 sheet 入口,large 不显得头重。
+            .navigationBarTitleDisplayMode(.automatic)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(NSLocalizedString("完成", comment: "Done")) {
@@ -93,10 +100,12 @@ struct SettingsView: View {
                 DiaryImportView()
                     .environmentObject(importService)
                     .environment(\.managedObjectContext, viewContext)
+                    .lumorySheetDecoration()
             }
             .sheet(isPresented: $showExportSheet) {
                 DiaryExportView()
                     .environment(\.managedObjectContext, viewContext)
+                    .lumorySheetDecoration()
             }
             .alert(NSLocalizedString("删除完成", comment: "Deletion complete"), isPresented: $showDeleteCompleteAlert) {
                 Button(NSLocalizedString("好", comment: "OK")) { isSettingsOpen = false }
@@ -108,6 +117,8 @@ struct SettingsView: View {
                 await reminderService.refreshAuthorizationStatus()
             }
         }
+        // backgroundGradient 挂在 NavigationStack 外 — 不受 push/pop 影响,消除子页面回来"暗一闪"。
+        .background(backgroundGradient.ignoresSafeArea())
     }
 
     // MARK: - Header
@@ -209,7 +220,8 @@ struct SettingsView: View {
             }
 
             if reminderService.isEnabled {
-                // 频率 —— 段控件,iOS 26 自动液态玻璃
+                // 频率 — P1-Set-4:.segmented 在 Form .insetGrouped 内突兀,改 navigationLink
+                // 跟下方 DatePicker 节奏一致(都是单行 row + 推 detail)。
                 Picker(selection: frequencyBinding) {
                     ForEach(ReminderFrequency.allCases, id: \.self) { freq in
                         Text(freq.localizedLabel).tag(freq)
@@ -225,7 +237,7 @@ struct SettingsView: View {
                             .frame(width: 24)
                     }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.navigationLink)
 
                 DatePicker(
                     selection: reminderTimeBinding,
@@ -392,6 +404,14 @@ struct SettingsView: View {
                 set: { if !$0 { appLockEnableFailureMessage = nil } }
             )
         ) {
+            // P1-Set-8 加"去系统设置"快捷入口 — Face ID 拒绝 / 未授权时引导用户开权限,而不是只关 alert。
+            #if canImport(UIKit)
+            Button(NSLocalizedString("去系统设置", comment: "Open system Settings")) {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            #endif
             Button(NSLocalizedString("好", comment: "OK"), role: .cancel) { }
         } message: {
             Text(appLockEnableFailureMessage ?? "")
@@ -448,8 +468,13 @@ struct SettingsView: View {
                 }
             }
             .disabled(isDeletingAllEntries)
+            // 用户决定:不要红底(2026-05-05),保留 alert 内的数量 + warning haptic 已足够强警示。
             .alert(NSLocalizedString("确认删除所有日记？", comment: "Confirm delete all"), isPresented: $showDeleteAllAlert) {
                 Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
+                    // P1-Set-2 destructive 确认即时 warning haptic — 区别于普通 .medium impact。
+                    #if canImport(UIKit)
+                    HapticManager.shared.notification(.warning)
+                    #endif
                     Task {
                         let didDelete = await deleteAllEntries()
                         if didDelete {
@@ -459,7 +484,11 @@ struct SettingsView: View {
                 }
                 Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
             } message: {
-                Text(NSLocalizedString("此操作无法撤销。已合并的主题分组也会一并清除。", comment: "Delete all undo + alias warning"))
+                // P1-Set-2 inject 数量,让用户在确认前看到具体数字防误删。
+                Text(String(
+                    format: NSLocalizedString("将永久删除 %d 条日记,无法撤销。已合并的主题分组也会一并清除。", comment: "Delete all undo with entry count"),
+                    entries.count
+                ))
             }
         }
     }
@@ -469,12 +498,12 @@ struct SettingsView: View {
     @ViewBuilder
     private var languageSection: some View {
         Section(header: Text(NSLocalizedString("语言", comment: "Language"))) {
-            Picker("", selection: $appLanguage) {
+            Picker(NSLocalizedString("应用语言", comment: "App language picker"), selection: $appLanguage) {
                 Text("简体中文").tag("zh-Hans")
                 Text("English (US)").tag("en")
             }
-            .pickerStyle(.inline)
-            .labelsHidden()
+            // P1-Set-3 .inline 占两行无 label → .navigationLink 单行 + 推 detail 选,跟下方 row 节奏一致。
+            .pickerStyle(.navigationLink)
             // 切语言后,主屏 widget 还停在旧 locale 上 —— 主动 reload timeline 让 widget 走新 locale。
             // 不会立刻刷,WidgetKit 自己排时间,但下一次系统调度会用新 locale。
             .onChange(of: appLanguage) { _, _ in
@@ -539,10 +568,12 @@ struct SettingsView: View {
     }
 
     /// 很淡的顶部 mood-tinted 渐变，让 Settings 和首页保持同一种空气感。
+    /// **P1-Dark-1**:亮色 0.08 蓝色叠白底是浅蓝空灵感成立;暗色 0.08 蓝色叠近黑底=深蓝紫色脏污。
+    /// 暗色调到 0.04 让渐变只是若隐若现的暖意,不抢内容。
     private var backgroundGradient: some View {
         LinearGradient(
             colors: [
-                Color.accentColor.opacity(0.08),
+                Color.accentColor.opacity(colorScheme == .dark ? 0.04 : 0.08),
                 Color.clear
             ],
             startPoint: .top,

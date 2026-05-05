@@ -30,10 +30,9 @@ struct ThemeMergeIntoSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var searchText: String = ""
-    /// 选中后的过渡状态。真实 merge 已完成后,展示结果 animation,~0.6s 后 dismiss。
-    @State private var confirmingTarget: InsightsEngine.Theme?
-    @State private var confirmationTitle: String = ""
-    @State private var confirmationSucceeded = true
+    // P1-Ins-16 改全局 toast 后,650ms 庆祝 overlay 整段被删 — 三个相关 @State(confirmingTarget /
+    // confirmationTitle / confirmationSucceeded)以及配套 confirmingOverlay 方法 + 6 处条件 modifier
+    // 清理(reviewer Wave-D BUG-P1)。`select` guard 因此简化为只看 pendingMergeTarget。
     /// 用户点了 target,但 source 是某个组的成员 → 合并会把组内其他 alias 也搬过去。
     /// 弹 alert 显式列出附带搬移的标签,让用户确认。空 = 无需弹。
     @State private var pendingMergeTarget: InsightsEngine.Theme?
@@ -76,12 +75,6 @@ struct ThemeMergeIntoSheet: View {
                     .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.formContentMaxWidth)
                 }
                 .accessibilityIdentifier("themeMergeScrollView")
-
-                // 合并 in-flight 时全屏 dim + 中央 success animation,~0.6s 后 dismiss
-                if let target = confirmingTarget {
-                    confirmingOverlay(target: target)
-                        .transition(.opacity)
-                }
             }
             .searchable(text: $searchText, prompt: NSLocalizedString("搜索主题", comment: "Search theme prompt"))
             .navigationTitle(NSLocalizedString("合并主题", comment: "Merge themes title"))
@@ -91,11 +84,8 @@ struct ThemeMergeIntoSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(NSLocalizedString("取消", comment: "Cancel")) { dismiss() }
-                        .disabled(confirmingTarget != nil)
                 }
             }
-            .interactiveDismissDisabled(confirmingTarget != nil)
-            .animation(.spring(response: 0.32, dampingFraction: 0.85), value: confirmingTarget)
             .alert(
                 String(
                     format: NSLocalizedString("合并主题「%@」到「%@」?", comment: "Merge collateral alert title"),
@@ -183,7 +173,6 @@ struct ThemeMergeIntoSheet: View {
             .liquidGlassCard(cornerRadius: 14, tint: Color.moodSpectrum(value: target.avgMood), tintStrength: 0.10, interactive: true)
         }
         .buttonStyle(PressableScaleButtonStyle())
-        .disabled(confirmingTarget != nil)
     }
 
     private var emptyState: some View {
@@ -196,27 +185,6 @@ struct ThemeMergeIntoSheet: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder
-    private func confirmingOverlay(target: InsightsEngine.Theme) -> some View {
-        ZStack {
-            Color.black.opacity(0.18)
-                .ignoresSafeArea()
-
-            VStack(spacing: 14) {
-                Image(systemName: confirmationSucceeded ? "checkmark.circle.fill" : "info.circle.fill")
-                    .font(.system(size: 56))
-                    .foregroundStyle(confirmationSucceeded ? Color.moodSpectrum(value: target.avgMood) : Color.secondary)
-                    .symbolEffect(.bounce, value: confirmingTarget != nil)
-                Text(confirmationTitle)
-                    .font(.headline)
-                    .foregroundStyle(Color.primary)
-            }
-            .padding(28)
-            .liquidGlassCard(cornerRadius: 22)
-            .shadow(color: Color.primary.opacity(0.12), radius: 18, y: 6)
-        }
     }
 
     private var backgroundGradient: some View {
@@ -233,7 +201,7 @@ struct ThemeMergeIntoSheet: View {
     // MARK: Actions
 
     private func select(_ target: InsightsEngine.Theme) {
-        guard confirmingTarget == nil, pendingMergeTarget == nil else { return }
+        guard pendingMergeTarget == nil else { return }
         // mergeThemes 语义:source 若是某 group 的 alias / canonical,**整组**搬到 target。
         // 没被告知的话 long-press 合并感觉只搬一个名字。这里先 preview,有附带搬移就弹 alert。
         let collateral = ThemeAliasResolver.shared.collateralLabels(forMerging: source.name, into: target.name)
@@ -247,9 +215,6 @@ struct ThemeMergeIntoSheet: View {
 
     private func performConfirm(target: InsightsEngine.Theme) {
         let outcome = onConfirm(target)
-        confirmationTitle = outcome.title
-        confirmationSucceeded = outcome.isSuccess
-        confirmingTarget = target
         #if canImport(UIKit)
         if outcome.isSuccess {
             HapticManager.shared.notification(.success)
@@ -257,10 +222,10 @@ struct ThemeMergeIntoSheet: View {
             HapticManager.shared.click()
         }
         #endif
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(650))
-            dismiss()
-            onComplete(outcome)
-        }
+        // P1-Ins-16 移除 650ms confirmingOverlay 阻塞 — 批量合并 5 个等 5×650ms 体验差。
+        // 立即 dismiss + 经 onComplete 走全局 toast(InsightsView 已接 LumoryToastCenter),
+        // 用户感知"sheet 一关 toast 就出"很顺。
+        dismiss()
+        onComplete(outcome)
     }
 }

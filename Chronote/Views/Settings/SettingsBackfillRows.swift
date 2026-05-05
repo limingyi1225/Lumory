@@ -60,26 +60,58 @@ struct OneClickRebuildRow: View {
     }
 
     var body: some View {
-        HStack {
-            Label {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(NSLocalizedString("重建全部 AI 分析", comment: "Rebuild all AI analysis"))
-                        .foregroundStyle(Color.primary)
-                    Text(statusText)
-                        .font(.caption)
-                        .foregroundColor(statusColor)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(NSLocalizedString("重建全部 AI 分析", comment: "Rebuild all AI analysis"))
+                            .foregroundStyle(Color.primary)
+                        Text(statusText)
+                            .font(.caption)
+                            .foregroundColor(statusColor)
+                    }
+                } icon: {
+                    Image(systemName: stageIcon)
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundColor(stageIconColor)
+                        .frame(width: 24)
                 }
-            } icon: {
-                Image(systemName: stageIcon)
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundColor(stageIconColor)
-                    .frame(width: 24)
+                Spacer()
+                trailing
             }
-            Spacer()
-            trailing
+            // P1-Set-1 整体线性进度条 — 跑 3 阶段时看见"在哪一步、进展百分比",之前只 indeterminate spinner。
+            if let fraction = comprehensiveFraction {
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+                    .tint(.accentColor)
+                    .accessibilityLabel(NSLocalizedString("整体进度", comment: "Overall progress"))
+            }
         }
         .task {
             await refreshPendingCount()
+        }
+    }
+
+    /// 三阶段综合分数。
+    /// - themes:0 → 0.33(local progress)
+    /// - embeddings:0.33 → 0.67(local progress)
+    /// - suggestions:**固定 0.80 占位**(单次 LLM call 没分母,条停在 80% 直到 .done)
+    /// idle / done / failed 返 nil 让上方条隐藏。
+    private var comprehensiveFraction: Double? {
+        switch stage {
+        case .idle, .done, .failed:
+            return nil
+        case .themes:
+            let p = themeService.progress
+            let local = p.total > 0 ? Double(p.processed) / Double(p.total) : 0
+            return local * 0.33
+        case .embeddings:
+            let p = embeddingService.progress
+            let local = p.total > 0 ? Double(p.processed) / Double(p.total) : 0
+            return 0.33 + local * 0.34
+        case .suggestions:
+            // 这阶段没分母 —— suggestionEngine 是 1 次 LLM 调用没法分进度,展示 80% 占位让条往前推一点。
+            return 0.80
         }
     }
 
@@ -133,10 +165,21 @@ struct OneClickRebuildRow: View {
                 #endif
                 Task { await runAll() }
             } label: {
-                Text(NSLocalizedString("开始", comment: "Start"))
+                // P1-Set-7 .failed 态用"重试" + 旋转箭头(idle/done 仍是"开始")。
+                if case .failed = stage {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                        Text(NSLocalizedString("重试", comment: "Retry"))
+                    }
                     .font(.caption.weight(.semibold))
+                } else {
+                    Text(NSLocalizedString("开始", comment: "Start"))
+                        .font(.caption.weight(.semibold))
+                }
             }
-            .buttonStyle(.glassProminent)
+            // P1-Set-6 buttonStyle 统一 .glass(原来 OneClick 用 prominent / 单独 row 用 regular,
+            // 两者并列时层级跳)。视觉层级靠 Section 位置 + 文字传达。
+            .buttonStyle(.glass)
             // 另一条 rebuild 在跑(Advanced 的 per-service,或其他 OneClick 实例)→ 禁用,
             // 防撞 `.shared.runningTask` 非 actor-safe 的 race 窗口。
             .disabled(isExternalBackfillActive)
@@ -409,8 +452,12 @@ struct ThemeBackfillRow: View {
                         Label(NSLocalizedString("全部重抽", comment: "Backfill all"), systemImage: "arrow.clockwise")
                     }
                 } label: {
-                    Text(NSLocalizedString("开始", comment: "Start"))
-                        .font(.caption.weight(.semibold))
+                    // P1-Set-9 加 chevron.down 暗示这是 Menu(下拉两个选项),纯"开始"label 用户以为是单按钮。
+                    HStack(spacing: 4) {
+                        Text(NSLocalizedString("开始", comment: "Start"))
+                        Image(systemName: "chevron.down")
+                    }
+                    .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.glass)
                 .disabled(isOtherBackfillActive)

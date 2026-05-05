@@ -36,10 +36,10 @@ struct SyncDiagnosticView: View {
                                     Image(systemName: "checkmark.circle.fill")
                                         .font(.system(size: 32))
                                         .foregroundColor(.green)
-                                    
+
                                     Text(NSLocalizedString("sync.diagnostic.noIssues.title", comment: "No sync issues title"))
                                         .font(.headline)
-                                    
+
                                     Text(NSLocalizedString("sync.diagnostic.noIssues.message", comment: "No sync issues message"))
                                         .font(.subheadline)
                                         .foregroundColor(.secondary)
@@ -47,8 +47,8 @@ struct SyncDiagnosticView: View {
                                 }
                                 .frame(maxWidth: .infinity)
                                 .padding()
-                                .background(Color.green.opacity(0.1))
-                                .cornerRadius(12)
+                                // P0-3 漏勺页贴玻璃 — 整页之前 0 命中 liquidGlass,扁平绿/橙/红色块跟主页玻璃风脱节。
+                                .liquidGlassCard(cornerRadius: 12, tint: .green, tintStrength: 0.10)
                             } else {
                                 // Issues found
                                 VStack(alignment: .leading, spacing: 12) {
@@ -78,16 +78,16 @@ struct SyncDiagnosticView: View {
                                                         .foregroundColor(.red)
                                                         .padding(.horizontal, 8)
                                                         .padding(.vertical, 2)
-                                                        .background(Color.red.opacity(0.1))
-                                                        .cornerRadius(4)
+                                                        // P0-3 critical badge — 替 deprecated .cornerRadius;tintStrength 0.14 给徽章一点警示色温。
+                                                        .liquidGlassCard(cornerRadius: 4, tint: .red, tintStrength: 0.14)
                                                 }
                                             }
-                                            
+
                                             Spacer()
                                         }
                                         .padding()
-                                        .background(Color.red.opacity(0.05))
-                                        .cornerRadius(8)
+                                        // P0-3 issue card — 玻璃 + 红色微染,跟整页基调一致。
+                                        .liquidGlassCard(cornerRadius: 8, tint: .red, tintStrength: 0.06)
                                     }
                                 }
                                 
@@ -102,15 +102,15 @@ struct SyncDiagnosticView: View {
                                             HStack(alignment: .top, spacing: 12) {
                                                 Image(systemName: "lightbulb.fill")
                                                     .foregroundColor(.blue)
-                                                
+
                                                 Text(recommendation)
                                                     .font(.subheadline)
-                                                
+
                                                 Spacer()
                                             }
                                             .padding()
-                                            .background(Color.blue.opacity(0.05))
-                                            .cornerRadius(8)
+                                            // P0-3 recommendation card — 玻璃 + 蓝色微染。
+                                            .liquidGlassCard(cornerRadius: 8, tint: .blue, tintStrength: 0.06)
                                         }
                                     }
                                 }
@@ -171,6 +171,7 @@ struct SyncDiagnosticView: View {
         .sheet(isPresented: $showingFullReport) {
             if let result = result {
                 FullDiagnosticReportView(result: result)
+                    .lumorySheetDecoration()
             }
         }
     }
@@ -209,8 +210,8 @@ struct FullDiagnosticReportView: View {
                     Text(SyncDiagnosticService.generateDiagnosticReport(result))
                         .font(.system(.body, design: .monospaced))
                         .padding()
-                        .background(Color.secondary.opacity(0.1))
-                        .cornerRadius(8)
+                        // P0-3 monospaced report — 替 deprecated .cornerRadius,贴玻璃语言。
+                        .liquidGlassCard(cornerRadius: 8)
                 }
                 .padding()
             }

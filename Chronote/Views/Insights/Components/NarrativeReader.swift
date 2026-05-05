@@ -106,9 +106,12 @@ struct NarrativeReader: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill((hasContent ? Color.orange : Color.red).opacity(0.12))
+        // P1-Ins-17 玻璃化 — 替 RoundedRectangle.fill(.opacity 0.12) 实色块,跟其他 inline banner
+        // 视觉对齐。tint 保留 orange/red 表达 severity。
+        .liquidGlassCard(
+            cornerRadius: 10,
+            tint: hasContent ? Color.orange : Color.red,
+            tintStrength: 0.14
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(headline)
@@ -118,11 +121,15 @@ struct NarrativeReader: View {
 
     private var header: some View {
         HStack {
+            // P1-Ins-17 关闭按钮玻璃化 — 替平面 SF Symbol,glassCircle interactive 给清晰按下反馈。
             Button(action: closeTapped) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 24))
-                    .foregroundColor(.primary.opacity(0.7))
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.primary.opacity(0.85))
+                    .frame(width: 28, height: 28)
+                    .liquidGlassCircle(interactive: true)
             }
+            .buttonStyle(PressableScaleButtonStyle())
             Spacer()
             if isStreaming {
                 HStack(spacing: 6) {

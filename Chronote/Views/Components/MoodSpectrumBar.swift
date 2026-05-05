@@ -251,9 +251,9 @@ struct MoodSpectrumBar: View {
                 glowPulse = 1.0
             }
         }
-        #if canImport(UIKit)
-        HapticManager.shared.notification(.success)
-        #endif
+        // 之前 mood reveal 单独发 success haptic,但 send 流程已经在保存完成后再发一次,
+        // 用户连续感受到 click + reveal + save = 三连击。reveal 是动画 milestone,
+        // 用 visual + spring 表达就够,不要叠 haptic。
     }
 
     private func stopAllAnimations() {

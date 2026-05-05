@@ -42,6 +42,8 @@ struct ThemeCardList: View {
                 // 不像被夹在 section 之间的「凸起色块」。
                 ScrollView(.horizontal, showsIndicators: false) {
                     GlassEffectContainer(spacing: 12) {
+                        // P1-Ins-8 paging snap — scrollTargetBehavior(.viewAligned) + scrollTargetLayout()
+                        // 让横向滚动到每张卡时自然吸附,比惯性滑过感觉好。不影响 contextMenu 长按。
                         HStack(spacing: 12) {
                             ForEach(themes) { theme in
                                 // 关键:**Button + .plain** 而不是 onTapGesture。
@@ -92,10 +94,12 @@ struct ThemeCardList: View {
                                 })
                             }
                         }
+                        .scrollTargetLayout()
                         .padding(.horizontal, 16)
                         .padding(.vertical, 24)
                     }
                 }
+                .scrollTargetBehavior(.viewAligned)
             }
         }
     }

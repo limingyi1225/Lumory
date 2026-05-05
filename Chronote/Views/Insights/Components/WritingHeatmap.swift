@@ -104,17 +104,104 @@ struct WritingHeatmap: View {
                 Spacer()
             }
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHGrid(rows: rows, spacing: Self.cellSpacing) {
-                    ForEach(builtDays) { day in
-                        cell(for: day)
+                // P1-Ins-6 月份 label + 网格放同 ScrollView 里,横滑同步。每个 label 宽度
+                // = 该月覆盖的周数对应的格子总宽,左对齐让"几月"贴在那个月第一列上方。
+                VStack(alignment: .leading, spacing: 4) {
+                    monthLabelsRow
+                    LazyHGrid(rows: rows, spacing: Self.cellSpacing) {
+                        ForEach(builtDays) { day in
+                            cell(for: day)
+                        }
                     }
+                    .padding(.horizontal, 1)
                 }
-                .padding(.horizontal, 1)
             }
-            .frame(height: Self.gridHeight)
+            .frame(height: Self.gridHeight + 22)
             .scrollBounceBehavior(.basedOnSize)
             .defaultScrollAnchor(.trailing)  // 初次加载锚定到最新（最右）
         }
+    }
+
+    /// P1-Ins-6 月份 label 行 — 把连续同月的周聚合成一个 label,左对齐贴第一列。
+    /// 间距精确匹配 grid 的 cellSpacing,跟下方网格列对齐。
+    /// **2026-05-05 修复**:最右最后一 run 如果 weekSpan 小(≤2 周,即月初刚开始),frame width 不够
+    /// 容下"5月"两字 + 中文 caption2 → 显示为"..."。改用 `.fixedSize` 让 Text 撑开自然宽度,
+    /// frame 用 `minWidth` 保留跟列对齐的最低宽度,溢出允许(最后一 run 后没 sibling 不冲突)。
+    @ViewBuilder
+    private var monthLabelsRow: some View {
+        HStack(alignment: .bottom, spacing: Self.cellSpacing) {
+            ForEach(monthLabelRuns, id: \.startWeekIndex) { run in
+                Text(run.label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(
+                        minWidth: CGFloat(run.weekSpan) * Self.cellSide
+                            + CGFloat(max(0, run.weekSpan - 1)) * Self.cellSpacing,
+                        alignment: .leading
+                    )
+                    .accessibilityHidden(true) // 月份对每个 cell 已经在 dayA11yLabel 里写过完整日期,这层冗余。
+            }
+        }
+        .padding(.horizontal, 1)
+    }
+
+    /// 把 builtDays 按周扫描,生成"连续同月"的 run 列表。每 run 一个 label。
+    private var monthLabelRuns: [MonthRun] {
+        guard !builtDays.isEmpty else { return [] }
+        let calendar = Calendar.current
+        let weekCount = builtDays.count / Self.rowCount
+        guard weekCount > 0 else { return [] }
+
+        var runs: [MonthRun] = []
+        // run 切换条件用 (month, year) 二元组,不只 month。当 weeksToShow 涨到 ≥53 跨整年时,
+        // 仅看 month 会把 Jan 2025 和 Jan 2026 合并 → label 异常(reviewer Wave-D BUG-P2)。
+        // 当前默认 weeksToShow=22 (~5 个月) 不命中,但 init 暴露此参数,future caller 升级即踩。
+        var currentKey: (month: Int, year: Int)? = nil
+        var runStart: Int = 0
+
+        for w in 0..<weekCount {
+            // 取每周的第一天(grid 顶部那行)代表本周的"主月份";
+            // 即便周跨月,label 仍贴在这个月开始的列上方,视觉简单稳定。
+            let weekFirstIdx = w * Self.rowCount
+            guard weekFirstIdx < builtDays.count else { break }
+            let date = builtDays[weekFirstIdx].date
+            let month = calendar.component(.month, from: date)
+            let year = calendar.component(.year, from: date)
+            let key = (month: month, year: year)
+
+            if currentKey?.month != key.month || currentKey?.year != key.year {
+                if let prev = currentKey {
+                    let prevDate = builtDays[runStart * Self.rowCount].date
+                    runs.append(MonthRun(
+                        startWeekIndex: runStart,
+                        weekSpan: w - runStart,
+                        label: LumoryDateFormatters.monthShort.string(from: prevDate),
+                        month: prev.month
+                    ))
+                }
+                currentKey = key
+                runStart = w
+            }
+        }
+        if let prev = currentKey {
+            let prevDate = builtDays[runStart * Self.rowCount].date
+            runs.append(MonthRun(
+                startWeekIndex: runStart,
+                weekSpan: weekCount - runStart,
+                label: LumoryDateFormatters.monthShort.string(from: prevDate),
+                month: prev.month
+            ))
+        }
+        return runs
+    }
+
+    private struct MonthRun {
+        let startWeekIndex: Int
+        let weekSpan: Int
+        let label: String
+        let month: Int
     }
 
     @ViewBuilder

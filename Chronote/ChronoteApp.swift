@@ -290,6 +290,14 @@ struct ChronoteApp: App {
                         .transition(.opacity)
                         .zIndex(100)
                 }
+
+                // Global toast overlay(P0-2)— 高频成功反馈(删 / 存 / 发 / 合并主题)统一从这里冒,
+                // sheet / 全屏 cover / Settings 深层都能看到。zIndex 在 lock screen(100)之下,
+                // 因为锁屏时不应该泄漏 toast 内容到锁屏之上。milestone(50)之上,toast 优先。
+                LumoryToastOverlay()
+                    .ignoresSafeArea(.keyboard)
+                    .zIndex(60)
+                    .allowsHitTesting(true)
             }
             .animation(.easeInOut(duration: 0.8), value: showSplash)
             .animation(.easeInOut(duration: 0.25), value: appLockService.isLocked)
@@ -402,6 +410,10 @@ struct ChronoteApp: App {
                     Log.error("[ChronoteApp] scenePhase=background — save failed: \(error)", category: .ui)
                 }
             }
+            // P1-Home-6 撤销窗口兜底 — App 进 background 立即 commit pending 删除。iOS 给 ~5s
+            // 后台时间,撤销 task 可能跑不完;主动 commit 把 attachment 文件清理同步触发,避免被
+            // suspend 卡住留着孤儿 + 丢撤销窗口。User 重回前台时 toast 已经走完,行为一致。
+            EntryDeletionUndoService.shared.commitPendingNow()
             // App lock:进 background 锁。但 inactive 也得锁(见下方 .inactive 分支)。
             AppLockService.shared.lockOnBackground()
         case .active:

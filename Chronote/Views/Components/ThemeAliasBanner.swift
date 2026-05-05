@@ -64,6 +64,7 @@ struct ThemeAliasBanner: View {
             SuggestionTargetPickerSheet(suggestion: subject) { chosen in
                 confirm(suggestion: subject, canonical: chosen)
             }
+            .lumorySheetDecoration()
         }
         .onChange(of: pickerSubject != nil) { _, presented in
             // sheet 打开期间暂停自动折叠;关掉后再起 5 秒计时(若 banner 还在树里)。
@@ -143,7 +144,8 @@ struct ThemeAliasBanner: View {
         // 中性 liquid glass —— 跟 picker / pendingCard / 待审卡片设计统一(用户要求)。
         // sparkles icon 自身已是 accent 色,够提示"有 actionable 建议",卡片本体 tint 反而过载。
         .liquidGlassCard(cornerRadius: 18, interactive: false)
-        .shadow(color: Color.primary.opacity(0.06), radius: 10, y: 3)
+        // P1-Dark-3 阴影 0.06 在 OLED 暗色不可见,提到 0.18 让卡片有 depth。
+        .shadow(color: Color.primary.opacity(0.18), radius: 10, y: 3)
         // .sheet 已挪到 content(for:) 那一层 —— 这里不再挂,避免折叠时 sheet 被拆。
     }
 
@@ -260,6 +262,11 @@ struct ThemeAliasBanner: View {
         HapticManager.shared.notification(.success)
         #endif
         resolver.confirm(suggestion, canonical: canonical)
+        // P0-2 全局 toast — 跟 Detail 保存 / Home 删除统一语言。"已合并到 X"。
+        LumoryToastCenter.shared.show(
+            String(format: NSLocalizedString("已合并到「%@」", comment: "Toast after merging theme alias"), canonical),
+            severity: .success
+        )
         // 处理完一条 → banner 自动切到下一条 pending(如果有)。重置折叠 + 重启 5s 计时。
         advanceToNext()
     }

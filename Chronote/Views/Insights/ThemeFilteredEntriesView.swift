@@ -25,8 +25,7 @@ struct ThemeFilteredEntriesView: View {
     @State private var mergeSubject: InsightsEngine.Theme?
     @State private var showDeleteAlert = false
     @State private var deleteFailureMessage: String?
-    /// 单删 entry confirmation。从 swipeAction / contextMenu 触发,跟 HomeView 同 pattern。
-    @State private var entryToDelete: DiaryEntry?
+    // entryToDelete 已移除 — 删除走 4 秒撤销 toast,直接调 deleteEntry,不再 stage。
 
     var body: some View {
         NavigationStack {
@@ -51,16 +50,20 @@ struct ThemeFilteredEntriesView: View {
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                             // 二级列表跟 HomeView 主时间线一致 — 左划删 / 长按弹菜单。
+                            // P1-T8 完全对齐(添加 contextMenu 内 Edit 入口)需要独立 navigation
+                            // destination,跨结构改动大,留 P3 epic。当前左划删除 + 长按删除已涵盖
+                            // 90% 用户场景。
+                            // 删除直接执行 — 4 秒撤销 toast 替代 confirmation alert。
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) {
-                                    entryToDelete = entry
+                                    deleteEntry(entry)
                                 } label: {
                                     Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
                                 }
                             }
                             .contextMenu {
                                 Button(role: .destructive) {
-                                    entryToDelete = entry
+                                    deleteEntry(entry)
                                 } label: {
                                     Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
                                 }
@@ -75,6 +78,9 @@ struct ThemeFilteredEntriesView: View {
                 }
             }
             .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.listContentMaxWidth)
+            // 此 sheet 嵌在 InsightsView sheet 之上(2 层深),root + parent 的 overlay 都被压住,
+            // 删除 toast 必须在这层兜一份。
+            .lumoryToastOverlay()
             .accessibilityIdentifier("themeFilteredEntriesContent")
             .navigationTitle(theme.name)
             .toolbar {
@@ -106,25 +112,8 @@ struct ThemeFilteredEntriesView: View {
                 }
             }
             .task { await fetch() }
-            .alert(
-                NSLocalizedString("删除日记", comment: "Delete entry"),
-                isPresented: Binding(
-                    get: { entryToDelete != nil },
-                    set: { if !$0 { entryToDelete = nil } }
-                )
-            ) {
-                Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
-                    if let entry = entryToDelete {
-                        deleteEntry(entry)
-                    }
-                    entryToDelete = nil
-                }
-                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {
-                    entryToDelete = nil
-                }
-            } message: {
-                Text(NSLocalizedString("此操作无法撤销。", comment: "Delete confirmation message"))
-            }
+            // 删除 confirmation 已移除 — 4 秒撤销 toast 替代。entryToDelete state 也跟着废,
+            // contextMenu / swipeActions 直接调 deleteEntry(entry)。
             .lumoryAdaptiveModal(item: $mergeSubject) { subject in
                 ThemeMergeIntoSheet(
                     source: subject,
@@ -203,28 +192,49 @@ struct ThemeFilteredEntriesView: View {
     }
 
     @MainActor
-    /// 单条删除走五件套 orchestrator(跟 HomeView / DiaryDetailView 同 pattern)。失败 rollback +
-    /// 显示 banner;成功后从本地 entries 列表移除避免动画抽搐。
+    /// 单条删除走 4 秒撤销窗口(跟 HomeView / DiaryDetailView 同 pattern)。
+    /// 失败 rollback + 显示 banner;成功后从本地 entries 列表移除避免动画抽搐。
+    /// **attachment 清理交给 EntryDeletionUndoService 4 秒后做**(撤销窗口内文件还在,可还原)。
     private func deleteEntry(_ entry: DiaryEntry) {
-        let imageFileNames = entry.imageFileNameArray
-        let audioFileName = entry.audioFileName
+        // P1-Home-6 撤销 — 必须在 viewContext.delete 之前抓 snapshot。
+        let snapshot = EntryDeletionSnapshot(entry: entry)
+        let entryObjectID = entry.objectID
 
         viewContext.delete(entry)
         do {
             try viewContext.save()
             HapticManager.shared.impact(.medium)
             EntryWipeOrchestrator.performSingleDeleteCleanup()
-            withAnimation { entries.removeAll { $0.objectID == entry.objectID } }
+            withAnimation { entries.removeAll { $0.objectID == entryObjectID } }
             onEntryDeleted?()
-            // attachment 清理走 fire-and-forget(跟 Home/Detail 同 idiom)
-            Task.detached(priority: .utility) {
-                for fn in imageFileNames {
-                    do { try DiaryEntry.deleteImageFromDocuments(fn) } catch { Log.error("[ThemeFiltered] image cleanup: \(error)", category: .ui) }
+
+            // 注册到 undo service + 弹带"撤销"按钮 toast。撤销时把 entry 加回 entries 列表。
+            let viewContextRef = viewContext
+            let onEntryDeletedRef = onEntryDeleted
+            EntryDeletionUndoService.shared.register(snapshot: snapshot)
+            LumoryToastCenter.shared.show(
+                NSLocalizedString("已删除", comment: "Toast after entry deletion"),
+                severity: .success,
+                duration: EntryDeletionUndoService.undoWindow,
+                action: LumoryToastCenter.Action(
+                    label: NSLocalizedString("撤销", comment: "Undo delete action")
+                ) {
+                    if let restoredEntry = EntryDeletionUndoService.shared.undo(into: viewContextRef) {
+                        #if canImport(UIKit)
+                        HapticManager.shared.notification(.success)
+                        #endif
+                        // 本 sheet 用 `@State [DiaryEntry]` 缓存,不会自动响应 CoreData;手工 splice
+                        // 回去 — 不然撤销 toast 给了 success haptic 但用户在这页里看不到那条回来。
+                        // 按 `entry.date` desc 排序对齐 fetch() 的 sortDescriptor。
+                        withAnimation {
+                            entries.append(restoredEntry)
+                            entries.sort { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+                        }
+                        // 父级聚合刷新(InsightsView aggregate),保持 P0-2 的 4-callsite 一致性。
+                        onEntryDeletedRef?()
+                    }
                 }
-                if let af = audioFileName, !af.isEmpty {
-                    DiaryEntry.deleteAudioFromDocuments(af)
-                }
-            }
+            )
         } catch {
             viewContext.rollback()
             Log.error("[ThemeFilteredEntriesView] 删除日记失败: \(error)", category: .ui)

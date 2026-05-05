@@ -43,6 +43,7 @@ struct AdvancedSettingsView: View {
         #endif
         .sheet(isPresented: $showDiagnosticSheet) {
             SyncDiagnosticView(result: diagnosticResult)
+                .lumorySheetDecoration()
         }
         .alert(NSLocalizedString("数据库修复", comment: "Database repair alert title"), isPresented: $showDatabaseRecoveryAlert) {
             Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }
@@ -54,6 +55,8 @@ struct AdvancedSettingsView: View {
 
     @ViewBuilder
     private var troubleshootingSection: some View {
+        // P1-Set-5 拆两个 Section — "立即同步 / 同步诊断" 是日常操作,"数据库修复" 是危险操作,
+        // 之前共一个 Section 视觉权重平等,用户容易误点修复。独立 + 专属 footer 警告。
         Section(
             header: Text(NSLocalizedString("诊断与修复", comment: "Diagnose & repair")),
             footer: Text(NSLocalizedString("只有同步出问题 / 数据显示异常时才需要用到这一层。",
@@ -101,7 +104,15 @@ struct AdvancedSettingsView: View {
                 }
             }
             .disabled(isRunningDiagnostic)
+        }
 
+        // P1-Set-5 数据库修复独立 Section — 专属 footer 强调"危险 + 不可撤销 + 仅在严重错时使用"。
+        Section(
+            footer: Text(NSLocalizedString(
+                "仅当 App 启动时报错 / 反复同步失败时使用。会重建本地数据库并尝试从 iCloud 恢复,期间数据不可访问。",
+                comment: "Database recovery footer warning"
+            ))
+        ) {
             Button {
                 showDatabaseRecoveryAlert = true
             } label: {

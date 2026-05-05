@@ -35,9 +35,7 @@ struct InsightsView: View {
     @State private var selectedPoint: InsightsEngine.MoodPoint?
     @State private var selectedPointBucket: InsightsEngine.Bucket = .day
 
-    /// 合并/删除 完成后的 transient toast(底部 capsule,3s 后自动消失)。
-    @State private var toastMessage: String?
-    @State private var toastTask: Task<Void, Never>?
+    // P0-2 toast 已迁到全局 LumoryToastCenter,旧 local toastMessage / toastTask state 删除。
 
     // Load token — 避免老请求完成后覆盖新 range 的数据
     @State private var loadToken: UUID = UUID()
@@ -102,6 +100,8 @@ struct InsightsView: View {
                 }
                 .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.insightsContentMaxWidth)
             }
+            // iOS 26 顶部边缘软渐隐 — Insights 滚动顶部跟 large title 过渡更自然。
+            .scrollEdgeEffectStyle(.soft, for: .top)
             .scrollIndicators(.hidden)
             .navigationTitle(NSLocalizedString("洞察", comment: "Insights"))
             #if canImport(UIKit)
@@ -142,10 +142,13 @@ struct InsightsView: View {
                     theme: theme,
                     allThemes: themes,
                     onMerged: { message in
-                        showToast(message: message)
+                        LumoryToastCenter.shared.show(message, severity: .success)
                     },
                     onDeleted: { name in
-                        showToast(message: String(format: NSLocalizedString("已删除主题「%@」", comment: "Delete toast"), name))
+                        LumoryToastCenter.shared.show(
+                            String(format: NSLocalizedString("已删除主题「%@」", comment: "Delete toast"), name),
+                            severity: .success
+                        )
                     },
                     onEntryDeleted: {
                         reloadAfterChildEntryDelete()
@@ -226,48 +229,13 @@ struct InsightsView: View {
                     guard let message = outcome.toastMessage else { return }
                     Task { @MainActor in
                         try? await Task.sleep(for: .milliseconds(120))
-                        showToast(message: message)
+                        LumoryToastCenter.shared.show(message, severity: .success)
                     }
                 }
             }
-            .overlay(alignment: .bottom) {
-                // 底部 transient toast —— 合并 / 删除 等操作的非阻塞反馈。3s 自动消失。
-                if let message = toastMessage {
-                    HStack(spacing: 10) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.callout)
-                            .foregroundStyle(Color.moodSpectrum(value: 0.85))
-                        Text(message)
-                            .font(.callout.weight(.medium))
-                            .foregroundStyle(Color.primary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .liquidGlassCard(cornerRadius: 22, interactive: false)
-                    .shadow(color: Color.primary.opacity(0.10), radius: 14, y: 4)
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 36)
-                    .frame(maxWidth: .infinity)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .animation(.spring(response: 0.34, dampingFraction: 0.86), value: toastMessage)
-            // View struct 是 value type 不会泄漏,但 toastTask 在 view tear-down 后还会向已弃 state
-            // 写 nil,iOS 26 beta 会喷 "modifying state during view update"。显式 cancel 干净点。
-            .onDisappear { toastTask?.cancel() }
-        }
-    }
-
-    /// 弹一条 transient toast(底部 capsule,3s 自动消失)。重复调用会取消上一次 task,刷新计时。
-    private func showToast(message: String) {
-        toastTask?.cancel()
-        toastMessage = message
-        toastTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled else { return }
-            toastMessage = nil
+            // P0-2 InsightsView 是 sheet 内容,root LumoryToastOverlay 被 sheet 压在下面,
+            // 必须在这一层重挂,合并主题完成等内部触发才能可见。共享 LumoryToastCenter 单例。
+            .lumoryToastOverlay()
         }
     }
 

@@ -157,7 +157,10 @@ final class AudioRecorder: NSObject, ObservableObject {
             // 改成手动 init + 单次 RunLoop.add(.common)：原来的 scheduledTimer 已经自动
             // 注册到 .default mode，再 add(.common) 会被双重注册，造成每 tick 双触发。
             timerLock.lock()
-            let timer = Timer(timeInterval: 0.03, repeats: true) { [weak self] _ in
+            // 0.03 → 0.05(33Hz → 20Hz)— 用户实测 33Hz publish 让 AudioMeterBar 的 SwiftUI
+            // animation merge 不过来导致卡顿。Voice Memos 实测也是 ~16-20Hz 更新视觉已经流畅,
+            // 没必要给 SwiftUI 推 33Hz 那么频繁。layout pass 直接砍 1/3。
+            let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     self?.handleMeterUpdate()
                 }

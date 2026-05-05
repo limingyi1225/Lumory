@@ -63,12 +63,15 @@ struct AudioMeterBar: View {
     }
 
     private func pushSample(_ level: Float) {
-        // O(N) shift。N=12 + amplitude 30Hz 更新 = 360 ops/s,主线程上无感。
+        // O(N) shift。N=12,配合 AudioRecorder 20Hz publish = 240 ops/s。
         var next = history
         next.removeFirst()
         next.append(level)
-        // 显式 withAnimation 让 height 平滑过渡,避免每个 sample 都跳。spring 偏 stiff 让响应感强。
-        withAnimation(.linear(duration: 0.06)) {
+        // **interactiveSpring 替 .linear**(2026-05-05 用户反馈卡顿):
+        // .linear(0.06) + 30Hz publish = 永远两个 in-flight transition 同时插值,12 capsule × 30 帧 ≈
+        // 400 layout pass/s,Pro 机器无感低端卡顿。spring 是 over-damped,新 sample 来时 SwiftUI 自动
+        // merge transition target 不重启动画 — Apple 推荐的高频 binding 改 sprung 不改 linear。
+        withAnimation(.interactiveSpring(response: 0.12, dampingFraction: 0.85)) {
             history = next
         }
     }

@@ -17,6 +17,7 @@ module.exports = [
         console: 'readonly',
         setTimeout: 'readonly',
         // Node 18+ web APIs
+        AbortController: 'readonly',
         FormData: 'readonly',
         Blob: 'readonly',
       },

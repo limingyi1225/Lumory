@@ -56,27 +56,51 @@ if (!APP_SHARED_SECRET) {
 }
 
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
+function positiveNumberEnv(name, defaultValue) {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value > 0 ? value : defaultValue;
+}
+
+function modelAllowlistEnv(name, defaults) {
+  const raw = process.env[name];
+  if (!raw) return defaults;
+  const models = raw
+    .split(',')
+    .map((model) => model.trim())
+    .filter(Boolean);
+  return models.length > 0 ? models : defaults;
+}
+
 // 长 SSE 流（Ask-Your-Past / NarrativeReader 拼全文回答）在高 reasoning_effort 下能跑 60–90s，
 // 30s 上游 timeout 会在 token 还没流完时把连接 abort，客户端 NetworkRetryHelper 重试又从头
 // 烧一遍 prompt cost。抬到 120s：留余量给 reasoning + 工具调用，同时和客户端
 // URLSessionConfiguration.timeoutIntervalForResource = 300s 对齐（客户端传输层兜底更长，
 // 保证上游超时在服务器侧先触发、客户端能看到干净的 504 而不是 "网络断了"）。
-const REQUEST_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS) || 120_000;
-const MAX_MESSAGES_CHARS = Number(process.env.MAX_MESSAGES_CHARS) || 32_000;
-const MAX_EMBEDDING_INPUT_CHARS = Number(process.env.MAX_EMBEDDING_INPUT_CHARS) || 8_192;
-const MAX_CHAT_COMPLETION_TOKENS = Number(process.env.MAX_CHAT_COMPLETION_TOKENS) || 16_384;
-const DEFAULT_CHAT_COMPLETION_TOKENS = Number(process.env.DEFAULT_CHAT_COMPLETION_TOKENS) || 4_096;
-const GLOBAL_IP_LIMIT_MAX = Number(process.env.GLOBAL_IP_LIMIT_MAX) || 600;
-const CHAT_MODEL_ALLOWLIST = new Set(['gpt-5.5', 'gpt-5.4-mini']);
-const CHAT_DEFAULT_MODEL = 'gpt-5.5';
+const REQUEST_TIMEOUT_MS = positiveNumberEnv('OPENAI_TIMEOUT_MS', 120_000);
+const MAX_MESSAGES_CHARS = positiveNumberEnv('MAX_MESSAGES_CHARS', 32_000);
+const MAX_EMBEDDING_INPUT_CHARS = positiveNumberEnv('MAX_EMBEDDING_INPUT_CHARS', 8_192);
+const MAX_CHAT_COMPLETION_TOKENS = positiveNumberEnv('MAX_CHAT_COMPLETION_TOKENS', 16_384);
+const DEFAULT_CHAT_COMPLETION_TOKENS = positiveNumberEnv('DEFAULT_CHAT_COMPLETION_TOKENS', 4_096);
+const GLOBAL_IP_LIMIT_MAX = positiveNumberEnv('GLOBAL_IP_LIMIT_MAX', 600);
+const CHAT_MODEL_ALLOWLIST = new Set(
+  modelAllowlistEnv('CHAT_MODEL_ALLOWLIST', ['gpt-5.5', 'gpt-5.4-mini'])
+);
+// Fallback 必须在当前 allowlist 内 —— 否则 cost-rollback 配置(把 allowlist 限制到只有 mini 时)
+// 还会被 fallback 默默升回 gpt-5.5,绕过 incident-mitigation 意图。allowlist 总有至少一个值
+// (modelAllowlistEnv 在 split 后空数组会回退到 defaults),first() 取确定项。
+const CHAT_DEFAULT_MODEL = CHAT_MODEL_ALLOWLIST.has('gpt-5.5')
+  ? 'gpt-5.5'
+  : CHAT_MODEL_ALLOWLIST.values().next().value;
 const EMBEDDING_MODEL = 'text-embedding-3-small';
 // 转写模型 hardcode,不读 client `model` 字段——客户端可篡改 header,信任边界在服务端。
 // 未来要 A/B 不同模型,在这里加 allowlist。
 const TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 // OpenAI `/audio/transcriptions` 上限 25 MB。multer 用 fileSize 触发 LIMIT_FILE_SIZE,
 // 我们 catch 后回 413 给客户端,让客户端 banner 区分"分段录制"提示。
-const MAX_TRANSCRIPTION_FILE_BYTES =
-  Number(process.env.MAX_TRANSCRIPTION_FILE_BYTES) || 25 * 1024 * 1024;
+const MAX_TRANSCRIPTION_FILE_BYTES = positiveNumberEnv(
+  'MAX_TRANSCRIPTION_FILE_BYTES',
+  25 * 1024 * 1024
+);
 // 客户端录音是 audio/mp4(AAC m4a),其他常见格式留余量。Content-Type 白名单挡掉
 // 任意上传(被加 X-App-Secret 后,白名单是另一道防线)。
 const TRANSCRIPTION_MIME_ALLOWLIST = new Set([
@@ -285,6 +309,13 @@ function sanitizeChatBody(body) {
   return sanitized;
 }
 
+function sseFrameHasDone(frame) {
+  return frame.split(/\r?\n/).some((line) => {
+    if (!line.startsWith('data:')) return false;
+    return line.slice(5).trim() === '[DONE]';
+  });
+}
+
 function safeUpstreamError(err) {
   return {
     name: err?.name,
@@ -320,6 +351,13 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('X-Accel-Buffering', 'no');
 
+      const abortController = new AbortController();
+      const abortUpstream = () => {
+        abortController.abort();
+      };
+      req.on('aborted', abortUpstream);
+      res.on('close', abortUpstream);
+
       const upstream = await axios({
         method: 'post',
         url: `${OPENAI_BASE_URL}/chat/completions`,
@@ -331,20 +369,32 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         },
         responseType: 'stream',
         timeout: REQUEST_TIMEOUT_MS,
+        signal: abortController.signal,
       });
 
       activeStreams.add(upstream.data);
 
       let sawDone = false;
-      let doneScanTail = '';
+      let sseBuffer = '';
       upstream.data.on('data', (chunk) => {
         const text = chunk.toString('utf8');
-        doneScanTail = (doneScanTail + text).slice(-128);
-        if (doneScanTail.includes('data: [DONE]')) sawDone = true;
+        const frames = (sseBuffer + text).split(/\r?\n\r?\n/);
+        sseBuffer = frames.pop() || '';
+        if (sseBuffer.length > 8192) {
+          sseBuffer = sseBuffer.slice(-8192);
+        }
+        if (!sawDone && frames.some(sseFrameHasDone)) {
+          sawDone = true;
+        }
         res.write(chunk);
       });
       upstream.data.on('end', () => {
         activeStreams.delete(upstream.data);
+        req.off('aborted', abortUpstream);
+        res.off('close', abortUpstream);
+        if (!sawDone && sseFrameHasDone(sseBuffer)) {
+          sawDone = true;
+        }
         if (!sawDone) {
           res.destroy(new Error('upstream ended without [DONE]'));
           return;
@@ -353,20 +403,14 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       });
       upstream.data.on('error', (error) => {
         activeStreams.delete(upstream.data);
+        req.off('aborted', abortUpstream);
+        res.off('close', abortUpstream);
         req.log.error({ err: safeUpstreamError(error) }, 'upstream stream errored');
         // 不能写 `data: [DONE]`—— 那是 SSE 的**成功**终止帧，iOS 端的
         // `streamChat` 看到 `[DONE]` 会 `break` 并 `return result`，把半截
         // 流当完整响应回调给用户。硬破连接让客户端 `bytes.lines` 抛错，
         // 被 NetworkRetryHelper 接住重试；重试到头会把错误冒到 UI。
         res.destroy(error);
-      });
-
-      // Client disconnected — cancel upstream so we stop paying for the tokens.
-      req.on('close', () => {
-        activeStreams.delete(upstream.data);
-        if (!upstream.data.destroyed) {
-          upstream.data.destroy();
-        }
       });
     } else {
       req.log.info('non-streaming request started');
@@ -381,6 +425,13 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       res.json(upstream.data);
     }
   } catch (err) {
+    if (isStreaming && err.code === 'ERR_CANCELED') {
+      req.log.info('streaming request cancelled');
+      if (!res.destroyed) {
+        res.destroy(err);
+      }
+      return;
+    }
     const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
     req.log.error({ err: safeUpstreamError(err), status }, 'OpenAI request failed');
     if (!res.headersSent) {
@@ -389,6 +440,8 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         res.setHeader('Retry-After', retryAfter);
       }
       res.status(status).json({ error: sanitizeUpstreamError(err, status) });
+    } else if (isStreaming) {
+      res.destroy(err);
     } else {
       res.end();
     }
@@ -631,8 +684,11 @@ if (require.main === module) {
 module.exports = {
   app,
   countMessageContentChars,
+  positiveNumberEnv,
+  modelAllowlistEnv,
   sanitizeChatBody,
   sanitizeUpstreamError,
+  sseFrameHasDone,
   normalizeInstallId,
   startServer,
 };

@@ -3,13 +3,24 @@
 //   pm2 set pm2-logrotate:max_size 10M
 //   pm2 set pm2-logrotate:retain 10
 //   pm2 set pm2-logrotate:compress true
-// PM2 ecosystem config. Usage: `pm2 start ecosystem.config.js`
+const fs = require('fs');
+const path = require('path');
+
+const serverDirFromRepoRoot = path.join(__dirname, 'server');
+const appCwd = fs.existsSync(path.join(serverDirFromRepoRoot, 'index.js'))
+  ? serverDirFromRepoRoot
+  : __dirname;
+
+// PM2 ecosystem config.
+// Usage from repo root: `pm2 start ecosystem.config.js`
+// Usage on production host (/root/server): `pm2 start ecosystem.config.js`
 module.exports = {
   apps: [
     {
       // Name must match the running process on the production server (/root/server).
       name: 'lumory-server',
-      script: './server/index.js',
+      cwd: appCwd,
+      script: './index.js',
       instances: 1,
       exec_mode: 'fork',
       watch: false,

@@ -11,19 +11,8 @@ enum SettingsEntryDeletionService {
         }
         do {
             try viewContext.save()
-            // 批量删除会改变当前周期是否已完成,需要立刻重排本地提醒。
-            ReminderService.shared.requestReschedule()
-            // 清掉 alias resolver state(pending / groups / coolUntil)+ prompt cache,
-            // 否则 banner 还会弹引用已删 entry 的建议、ReminderService 通知 body 还会引用
-            // 已死主题词。negativePairs 保留(用户主观判断与 entry 存在与否无关)。
-            ThemeAliasResolver.shared.resetForBulkEntryWipe()
-            PromptSuggestionEngine.shared.clearCache()
-            InsightsResultCache.shared.clear()
-            // Widget snapshot:清空盘上文件 + reload widget,防 widget 显示已删 entry 的 stale 数据。
-            // **直接 `await`** 而不是 fire-and-forget `Task { ... }` —— 用户点完"全部清空"立刻锁屏 / 杀 App,
-            // unstructured Task 会被 background grace 切掉,残留旧 snapshot 在 App Group 容器里。
-            // `clear()` 是 actor 上的 sync body,await 只是跨 actor 边界,等不了几 ms。
-            await WidgetSnapshotService.shared.clear()
+            // 五件套清理走统一入口(EntryWipeOrchestrator) — 见该文件 doc。
+            await EntryWipeOrchestrator.performBulkWipeCleanup()
         } catch {
             Log.error("[SettingsView] 删除所有日记失败: \(error)", category: .ui)
             viewContext.rollback()

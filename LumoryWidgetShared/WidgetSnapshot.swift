@@ -19,7 +19,7 @@ import Foundation
 /// 4. `schemaVersion` 给 future migration 用,V2 = 2。读到不认识版本 → 让调用方走 empty 兜底。
 ///    旧 V1 / 中间形态(带 recentDays)的文件被严格 schemaVersion guard 拒收 → empty → 主 App
 ///    再写入,自然 self-heal。
-public struct WidgetSnapshot: Codable, Equatable {
+public struct WidgetSnapshot: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var generatedAt: Date
 

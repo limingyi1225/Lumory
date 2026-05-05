@@ -44,6 +44,8 @@ final class PersistenceController {
     let container: NSPersistentCloudKitContainer
     let isInMemory: Bool
     private var observers: [NSObjectProtocol] = []
+    private static let productionStoreInitLock = NSLock()
+    private static var didCreateProductionStore = false
 
     /// **进程级共享 NSManagedObjectModel**。
     /// 之前 `init(inMemory:)` 每次走 `NSPersistentCloudKitContainer(name: "Model")`,
@@ -77,6 +79,14 @@ final class PersistenceController {
     /// in-memory 模式下完全不挂 CloudKit container options、不持久化、不走 history tracking。
     init(inMemory: Bool = false) {
         self.isInMemory = inMemory
+        if !inMemory {
+            Self.productionStoreInitLock.lock()
+            defer { Self.productionStoreInitLock.unlock() }
+            guard !Self.didCreateProductionStore else {
+                fatalError("PersistenceController(inMemory: false) must be process-singleton; use .shared")
+            }
+            Self.didCreateProductionStore = true
+        }
         // 创建容器，名称必须与 .xcdatamodeld 文件名匹配。
         // 显式传 `managedObjectModel: Self.cachedModel` 让所有实例共享同一份 model
         // (修 P0 测试期多实例 ambiguity → SIGABRT,见 cachedModel doc)。
@@ -194,6 +204,14 @@ final class PersistenceController {
             Log.info("[PersistenceController] iCloud sync: Remote changes detected", category: .persistence)
             // automaticallyMergesChangesFromParent already merges CloudKit changes.
             // A blanket refreshAllObjects() here would discard unsaved edits in viewContext.
+            //
+            // **Widget cheap fingerprint 在 remote-change 路径上是盲区**:CK pull 可能带来对**非最新 entry**
+            // 的 date / mood 编辑,fingerprint 只看 (count, latestDate, latestMood, prompt) 都不变 →
+            // 短路 → widget streak / longestStreak 不更新。本机 DiaryDetailView 编辑路径已经显式调
+            // `invalidateCaches()` 兜底;remote-change 这边只能盲调一次 invalidate,让下次 fingerprint
+            // 强制 miss、走 full path 重抓。invalidateCaches 廉价(只清几个 ivar),频繁 CK pull 不会成瓶颈
+            // —— widget refresh 本身有 250ms debounce + content digest 兜底防 N 次重写 widget 文件。
+            Task { await WidgetSnapshotService.shared.invalidateCaches() }
             self?.scheduleWidgetSnapshotRefresh()
         }
         observers.append(remoteChangeObserver)

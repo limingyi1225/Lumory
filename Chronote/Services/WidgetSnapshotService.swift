@@ -51,6 +51,30 @@ actor WidgetSnapshotService {
     private var cachedPrompt: String?
     private var cachedPromptDay: Date?
 
+    /// **Cheap input fingerprint** —— 在跑 full bg dict-fetch 之前先做廉价 SQL count + 单行 peek,
+    /// 跟上一次成功 fetch 用过的 fingerprint 比;一致就直接 return 不动 widget 文件。
+    ///
+    /// 背景:backfill 节奏 ~900ms 一次 save,debounce 250ms 合并不掉;每次 save 都触发一次全表 dict-fetch
+    /// 拉 streak / longest 过几千行。这些 save 改的是 `embedding` / `themes` 字段,**不影响**
+    /// `count` / `lastEntryDate` / `lastEntryMood` —— 内容 digest 也会一致,但 dict-fetch 本身已经付出
+    /// SQL 代价。fingerprint 让 backfill 第一次 fetch 后 N-1 次直接短路。
+    ///
+    /// fingerprint 四元组:(count, lastEntryDate, lastEntryMood, prompt)。
+    /// **`lastEntryMood` 必须包含进 fingerprint** —— DiaryDetailView 编辑最新一条 entry 的 mood 时
+    /// count + lastEntryDate 都不变,但 widget 头像 mood 颜色应该变。漏 mood 会让 mood 编辑不刷 widget。
+    /// (streak 类不入 fingerprint —— 只受 count + lastEntryDate 控制,这两个变了 fingerprint 就 miss。)
+    ///
+    /// `clear()` 必须连带把 fingerprint 设回 `nil`:否则 clear 之后立刻来一次 refresh,
+    /// cheap fingerprint 算到 (count=0, lastDate=nil, mood=nil, prompt) 仍可能跟 clear 之前最后一次
+    /// 的 fingerprint(用户全删 → cheap 也是 0 entries 三元组)误命中,跳过真正的 reload。
+    private struct InputFingerprint: Equatable {
+        let entryCount: Int
+        let lastEntryDate: Date?
+        let lastEntryMood: Double?
+        let prompt: String?
+    }
+    private var lastInputFingerprint: InputFingerprint?
+
     private init() {}
 
     /// 请求一次 snapshot 重写。250ms debounce —— 短时间内多次 save(批量 import / CloudKit
@@ -60,18 +84,24 @@ actor WidgetSnapshotService {
     /// 写到真实 widget snapshot 反而会污染主屏。
     func requestRefresh(persistence: PersistenceController, bypassDebounce: Bool = false) async {
         guard !persistence.isInMemory else { return }
+        await requestRefresh(container: persistence.container, bypassDebounce: bypassDebounce)
+    }
+
+    /// Same refresh pipeline as `requestRefresh(persistence:)`, for recovery code that only owns the
+    /// already-loaded container. Callers are responsible for avoiding in-memory/test containers.
+    func requestRefresh(container: NSPersistentContainer, bypassDebounce: Bool = false) async {
         // **stores 还没 load 完时跳过** —— 否则 `context.fetch` 会抛错或返空,落到 `.empty()` 兜底,
         // 把磁盘上有效 snapshot 覆盖成 0/0/0。冷启动时 `ChronoteApp.init` 的 `Task.detached` 会先 fire 一次,
         // 此刻 store 大概率没 load 完;`PersistenceController.loadPersistentStores` 成功 callback 内
         // 会再 schedule 一次 refresh —— 那时再走真正的 fetch。
-        guard !persistence.container.persistentStoreCoordinator.persistentStores.isEmpty else { return }
+        guard !container.persistentStoreCoordinator.persistentStores.isEmpty else { return }
 
         if bypassDebounce {
             pendingTask?.cancel()
             pendingTask = nil
             generation &+= 1
             let myGen = generation
-            await performRefresh(persistence: persistence, gen: myGen)
+            await performRefresh(container: container, gen: myGen)
             return
         }
 
@@ -81,7 +111,7 @@ actor WidgetSnapshotService {
         let task = Task { [weak self] in
             try? await Task.sleep(nanoseconds: Self.debounceInterval)
             guard !Task.isCancelled, let self else { return }
-            await self.performRefresh(persistence: persistence, gen: myGen)
+            await self.performRefresh(container: container, gen: myGen)
         }
         pendingTask = task
     }
@@ -92,12 +122,26 @@ actor WidgetSnapshotService {
     /// 我们不留 stale 引用让下次 refresh 能拿到 nil → fallback CTA。
     /// **`generation &+= 1`** 让任何已经在 `performRefresh` await 里挂着的 in-flight task
     /// 在 resume 后 write 之前发现 gen 过期,跳过 write,不会用 stale 数据覆盖刚写的 empty。
+    /// 让下一次 `requestRefresh` 强制走 full fetch + 重新取 prompt,跳过 cheap fingerprint 短路
+    /// + per-day prompt cache。**不**清盘上 snapshot 文件,适合"数据可能改变了 widget 派生字段
+    /// 但不需要 nuclear clear"的场景:
+    ///   - DiaryDetailView 编辑 save 后(改 date / 改 mood / 改 text → streak / 头像色 / prompt 都可能变)
+    ///   - EntryWipeOrchestrator 单删后(per-day cachedPrompt 可能基于已删 entry 算的)
+    /// 跟 `clear()` 的差别:`clear()` 写 empty snapshot + 清 lastWrittenDigest + reload widget,
+    /// 用于"全部清空"语义;`invalidateCaches()` 只清 in-memory 派生缓存,等下次 refresh 走 full path。
+    func invalidateCaches() {
+        cachedPrompt = nil
+        cachedPromptDay = nil
+        lastInputFingerprint = nil
+    }
+
     func clear() {
         pendingTask?.cancel()
         pendingTask = nil
         generation &+= 1
         cachedPrompt = nil
         cachedPromptDay = nil
+        lastInputFingerprint = nil
         WidgetSnapshotStore.clear()
         // 同步指纹到 empty —— 避免"清完后立刻 fetch 拿到的也是 empty"被 dedup 错误跳过(其实有道理跳过,
         // 但这里语义是"主动 reset",跟 user-driven 全删一样,显式更新指纹比依赖巧合好读)。
@@ -107,7 +151,7 @@ actor WidgetSnapshotService {
 
     // MARK: - Private
 
-    private func performRefresh(persistence: PersistenceController, gen: Int) async {
+    private func performRefresh(container: NSPersistentContainer, gen: Int) async {
         // Prompt:走 per-day cache(见 `currentPrompt()`),保证 widget headline 不在
         // 多次 refresh 之间抖动。
         //
@@ -118,24 +162,120 @@ actor WidgetSnapshotService {
         // 已评估过"主题词可能含人名 / 锁屏可见"的隐私 axis,产品决策**故意不 gate**,接受这个面。
         // 用户想匿名化主屏可以系统级关锁屏 always-on,或者关 widget 整个不用。
         // -------------------------------------------------------------------------
-        let prompt = await currentPrompt()
+        let prompt = await currentPrompt(gen: gen)
         // 世代号 gate:每个 await 之后都要再确认一遍 gen 还没被 clear() / 新 requestRefresh bump 过,
         // 否则我们就是个"上一辈"task,write 会用 stale 数据覆盖最新 snapshot。
         guard gen == generation else { return }
-        let snapshot = await fetchSnapshot(persistence: persistence, prompt: prompt)
+
+        // **Cheap input fingerprint short-circuit** —— 廉价 SQL `count` + 1 行 peek;若 fingerprint
+        // 四元组(count, lastEntryDate, lastEntryMood, prompt)与上次一致 + snapshot 文件还在,
+        // 跳过 full fetch + write。Backfill 写 embedding/themes 时 fingerprint 不变,直接短路。
+        // fingerprint 不可用(fetch 失败)就退回到 full fetch + content digest 双保险。
+        //
+        // **盲区**:streak 由全 unique days 决定,但 fingerprint 只看 latest date。编辑某老 entry 的 date
+        // (改它从 7 天前到 14 天前,中间 streak 断)→ count + latestDate 不变,fingerprint 命中错误地短路。
+        // 此场景由 `DiaryDetailView` 编辑 save 路径主动调 `invalidateCaches()` 兜底。
+        let cheap = await cheapInputFingerprint(container: container, prompt: prompt)
         guard gen == generation else { return }
+        if let cheap, cheap == lastInputFingerprint {
+            let snapshotFileExists = WidgetSnapshotStore.snapshotURL()
+                .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+            if snapshotFileExists { return }
+            // 文件被外部删了 → 不能信 fingerprint,继续下面 fetch + 重写。
+        }
+
+        guard let snapshot = await fetchSnapshot(container: container, prompt: prompt) else {
+            return
+        }
+        guard gen == generation else { return }
+        let writeOK = writeSnapshotIfNeeded(snapshot)
+        // 完整 fetch + write 路径成功才更新 fingerprint(用刚算到的 cheap 四元组),下一次同 input
+        // 的 refresh 才能在 cheap 路径命中。**write 失败时千万别 update fingerprint** ——
+        // 否则下次同 input 来 cheap 路径会短路,disk 永远停在 stale 状态。fetch 失败 / cheap
+        // 计算失败 / write 失败 → fingerprint 不变,等下次能再试。
+        if writeOK, let cheap {
+            lastInputFingerprint = cheap
+        }
+    }
+
+    /// 廉价 fingerprint 计算 — 一个 `count(for:)` + 一个 `fetchLimit=1` peek 取 (date, moodValue)。
+    /// 失败返 nil 让 caller 退回 full fetch。与 `fetchSnapshot` 用同一 predicate(`date <= now`)保证
+    /// fingerprint 反映的是同一份数据视图。
+    private func cheapInputFingerprint(container: NSPersistentContainer, prompt: String?) async -> InputFingerprint? {
+        let now = Date()
+        return await container.performBackgroundTask { context -> InputFingerprint? in
+            let countRequest = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            countRequest.resultType = .countResultType
+            countRequest.predicate = NSPredicate(format: "date <= %@", now as NSDate)
+
+            let peekRequest = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            peekRequest.resultType = .dictionaryResultType
+            // **`moodValue` 必须 fetch** —— mood 编辑要触发 widget 重抓(见 InputFingerprint doc)。
+            peekRequest.propertiesToFetch = ["date", "moodValue"]
+            peekRequest.predicate = NSPredicate(format: "date <= %@", now as NSDate)
+            peekRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
+            peekRequest.fetchLimit = 1
+
+            do {
+                let count = try context.count(for: countRequest)
+                let lastDate: Date?
+                let lastMood: Double?
+                if count > 0,
+                   let row = try context.fetch(peekRequest).first {
+                    lastDate = row["date"] as? Date
+                    // CoreData 字典结果里 scalar Double 走 NSNumber 桥接,直接 cast 偶尔丢。同其他 fetch 一致用 NSNumber 取再 .doubleValue。
+                    lastMood = (row["moodValue"] as? NSNumber)?.doubleValue
+                } else {
+                    lastDate = nil
+                    lastMood = nil
+                }
+                return InputFingerprint(
+                    entryCount: count,
+                    lastEntryDate: lastDate,
+                    lastEntryMood: lastMood,
+                    prompt: prompt
+                )
+            } catch {
+                return nil
+            }
+        }
+    }
+
+    /// Writes if needed; returns `true` iff state is "consistent with this snapshot"
+    /// (either a successful write occurred, or a digest-skip happened — both mean disk file
+    /// reflects the snapshot we just computed). Returns `false` only on write **failure** so
+    /// `performRefresh` knows not to update `lastInputFingerprint` — otherwise the next refresh
+    /// with same input would short-circuit on cheap fingerprint while disk still holds stale data.
+    @discardableResult
+    private func writeSnapshotIfNeeded(_ snapshot: WidgetSnapshot) -> Bool {
         // Content digest dedup —— 内容跟上次 write 一致(典型:backfill 改 embedding/themes 但
         // streak/lastEntry/prompt 都没变)就跳过 write + reload,避免一键重建期间 N 次空刷。
+        // input fingerprint 由 caller(`performRefresh`)在 fetch 完成后统一更新,这里不动。
         let digest = Self.contentDigest(snapshot)
-        guard digest != lastWrittenDigest else { return }
+        let snapshotFileExists = WidgetSnapshotStore.snapshotURL()
+            .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        guard digest != lastWrittenDigest || !snapshotFileExists else { return true }
         do {
             try WidgetSnapshotStore.write(snapshot)
             lastWrittenDigest = digest
             reloadWidgets()
+            return true
         } catch {
             Log.error("[WidgetSnapshotService] write failed: \(error)", category: .persistence)
+            return false
         }
     }
+
+    #if DEBUG
+    /// Test seam for fetch-failure retention. Production refresh reaches the same write helper
+    /// after Core Data fetch succeeds; a nil fetch must leave the existing snapshot untouched.
+    func refreshForTesting(fetchSnapshot: @Sendable () async -> WidgetSnapshot?) async {
+        generation &+= 1
+        let myGen = generation
+        guard let snapshot = await fetchSnapshot(), myGen == generation else { return }
+        writeSnapshotIfNeeded(snapshot)
+    }
+    #endif
 
     /// 用户可见字段的指纹。**故意不含 `generatedAt`** —— 那是 wall-clock 时间戳,每次 fetch 都不一样,
     /// 含进去会让 dedup 永远 miss。
@@ -152,7 +292,7 @@ actor WidgetSnapshotService {
 
     /// Per-day prompt 缓存的查取入口。同一天命中 cache,跨天或第一次 miss 才 hop MainActor 拿新值。
     /// nil 不进 cache —— PromptSuggestionEngine 还没 ready 时下次能再试。
-    private func currentPrompt() async -> String? {
+    private func currentPrompt(gen: Int) async -> String? {
         let today = Calendar.current.startOfDay(for: Date())
         if let cached = cachedPrompt, cachedPromptDay == today {
             return cached
@@ -160,6 +300,7 @@ actor WidgetSnapshotService {
         let fresh = await MainActor.run {
             PromptSuggestionEngine.shared.randomHomePlaceholder()
         }
+        guard gen == generation else { return fresh }
         if let fresh {
             cachedPrompt = fresh
             cachedPromptDay = today
@@ -169,13 +310,13 @@ actor WidgetSnapshotService {
 
     /// CoreData 后台 fetch + 计算。返值类型 (`WidgetSnapshot`) 是 `Sendable`,跨 actor 安全。
     /// 不在 main / 不在 viewContext 上跑。
-    private func fetchSnapshot(persistence: PersistenceController, prompt: String?) async -> WidgetSnapshot {
+    private func fetchSnapshot(container: NSPersistentContainer, prompt: String?) async -> WidgetSnapshot? {
         // 外部预算时间锚点 —— 跟 InsightsEngine.writingStats 同 idiom,锁死时区/DST 边界秒。
         let calendar = Calendar.current
         let now = Date()
         let today = calendar.startOfDay(for: now)
 
-        return await persistence.container.performBackgroundTask { context -> WidgetSnapshot in
+        return await container.performBackgroundTask { context -> WidgetSnapshot? in
             // **Dictionary fetch**(`NSDictionaryResultType` + `propertiesToFetch=[date, moodValue]`)——
             // 只取两列原始值,**不实例化** `NSManagedObject`,所以 `embedding`(Float32 数组,KB/行)
             // 和 `imagesData`(UIImage 归档,可达 MB/行)完全不会进 RAM。每行 ~16 字节,数千 entry 也轻松。
@@ -194,7 +335,15 @@ actor WidgetSnapshotService {
             // entry / mood 全被这条幽灵未来 entry 顶掉。同 idiom 已用在 reminder 调度中。
             request.predicate = NSPredicate(format: "date <= %@", now as NSDate)
 
-            guard let dicts = try? context.fetch(request), !dicts.isEmpty else {
+            let dicts: [NSDictionary]
+            do {
+                dicts = try context.fetch(request)
+            } catch {
+                Log.warning("[WidgetSnapshotService] fetch failed, keeping previous snapshot: \(error)", category: .persistence)
+                return nil
+            }
+
+            guard !dicts.isEmpty else {
                 // 没数据(全新装机 / 用户全删后)—— 透传 prompt;widget headline 仍能渲染 prompt
                 // 或 fallback "记录今天" CTA,不至于完全空白。
                 return WidgetSnapshot(
@@ -225,7 +374,7 @@ actor WidgetSnapshotService {
             // dicts 已按 date 降序,首行就是最新 entry 的 (date, moodValue)。
             let firstDict = dicts.first
             let lastEntryDate = firstDict?["date"] as? Date
-            let lastEntryMood = firstDict?["moodValue"] as? Double
+            let lastEntryMood = (firstDict?["moodValue"] as? NSNumber)?.doubleValue
             return WidgetSnapshot(
                 generatedAt: Date(),
                 currentStreak: currentStreak,
@@ -240,6 +389,7 @@ actor WidgetSnapshotService {
     private nonisolated func reloadWidgets() {
         #if canImport(WidgetKit)
         WidgetCenter.shared.reloadTimelines(ofKind: LumoryWidgetKind.quickWrite)
+        WidgetCenter.shared.reloadTimelines(ofKind: LumoryWidgetKind.lockStreak)
         #endif
     }
 }

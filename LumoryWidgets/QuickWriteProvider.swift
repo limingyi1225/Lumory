@@ -17,17 +17,26 @@ struct QuickWriteEntry: TimelineEntry {
 }
 
 struct QuickWriteProvider: TimelineProvider {
+    private static let maxSnapshotAge: TimeInterval = 7 * 24 * 60 * 60
+
+    private static func currentSnapshot() -> WidgetSnapshot {
+        guard let snap = WidgetSnapshotStore.read() else { return .empty() }
+        let age = Date().timeIntervalSince(snap.generatedAt)
+        guard age >= 0, age <= maxSnapshotAge else { return .empty() }
+        return snap
+    }
+
     func placeholder(in context: Context) -> QuickWriteEntry {
         Self.makeEntry(snapshot: .empty(), asOf: Date())
     }
 
     func getSnapshot(in context: Context, completion: @escaping (QuickWriteEntry) -> Void) {
-        let snap = WidgetSnapshotStore.read() ?? .empty()
+        let snap = Self.currentSnapshot()
         completion(Self.makeEntry(snapshot: snap, asOf: Date()))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<QuickWriteEntry>) -> Void) {
-        let snap = WidgetSnapshotStore.read() ?? .empty()
+        let snap = Self.currentSnapshot()
         let now = Date()
         let calendar = Calendar.current
         // **必须用 calendar.date(byAdding:value:to:)**,不是 now + 86400 ——

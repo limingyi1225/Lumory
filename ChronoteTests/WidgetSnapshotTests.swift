@@ -88,6 +88,30 @@ final class WidgetSnapshotTests: XCTestCase {
         XCTAssertNil(loaded?.prompt)
     }
 
+    #if DEBUG
+    func testFetchFailureKeepsPreviousSnapshotFile() async throws {
+        let previous = WidgetSnapshot(
+            generatedAt: Date(),
+            currentStreak: 4,
+            longestStreak: 9,
+            lastEntryDate: Date(),
+            lastEntryMood: 0.8,
+            prompt: "previous prompt"
+        )
+        try WidgetSnapshotStore.write(previous)
+
+        await WidgetSnapshotService.shared.refreshForTesting {
+            nil
+        }
+
+        let loaded = WidgetSnapshotStore.read()
+        XCTAssertEqual(loaded?.currentStreak, 4)
+        XCTAssertEqual(loaded?.longestStreak, 9)
+        XCTAssertEqual(loaded?.lastEntryMood, 0.8)
+        XCTAssertEqual(loaded?.prompt, "previous prompt")
+    }
+    #endif
+
     func testBackupExclusion() throws {
         let snap = WidgetSnapshot.empty()
         try WidgetSnapshotStore.write(snap)

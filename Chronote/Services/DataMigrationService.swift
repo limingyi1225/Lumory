@@ -6,8 +6,14 @@ struct DataMigrationService {
     
     /// 执行从 JSON 到 Core Data 的一次性迁移
     static func performMigrationIfNeeded() {
+        let defaults = AppGroup.userDefaults
+        if defaults.object(forKey: migrationKey) == nil,
+           UserDefaults.standard.bool(forKey: migrationKey) {
+            defaults.set(true, forKey: migrationKey)
+        }
+
         // 检查是否已经迁移过
-        guard !UserDefaults.standard.bool(forKey: migrationKey) else {
+        guard !defaults.bool(forKey: migrationKey) else {
             Log.info("[DataMigration] 已完成迁移，跳过", category: .migration)
             return
         }
@@ -18,7 +24,7 @@ struct DataMigrationService {
         
         guard FileManager.default.fileExists(atPath: jsonURL.path) else {
             Log.info("[DataMigration] 没有找到旧数据文件，标记为已迁移", category: .migration)
-            UserDefaults.standard.set(true, forKey: migrationKey)
+            defaults.set(true, forKey: migrationKey)
             return
         }
         
@@ -38,18 +44,21 @@ struct DataMigrationService {
                 // Core Data 模型没有 uniquenessConstraints，重跑时把同一批 UUID 再插一次
                 // **不会**被 Core Data 拦下，会得到同 id 的两条 ghost entry 同步到 CloudKit。
                 // 插入前先一次性 fetch 已有 id 集合，按 UUID 去重（O(N) 一次 vs. N × O(log N) 每条 fetch）。
-                let existingIDs: Set<UUID> = {
+                var seenIDs: Set<UUID> = {
                     let req = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
                     req.resultType = .dictionaryResultType
                     req.propertiesToFetch = ["id"]
                     guard let rows = try? context.fetch(req) else { return [] }
-                    return Set(rows.compactMap { $0["id"] as? UUID })
+                    return Set(rows.compactMap { row in
+                        (row["id"] as? UUID)
+                            ?? (row["id"] as? NSUUID).flatMap { UUID(uuidString: $0.uuidString) }
+                    })
                 }()
 
                 var inserted = 0
                 var skipped = 0
                 for oldEntry in oldEntries {
-                    if existingIDs.contains(oldEntry.id) {
+                    if seenIDs.contains(oldEntry.id) {
                         skipped += 1
                         continue
                     }
@@ -67,6 +76,7 @@ struct DataMigrationService {
                     if let typed = newEntry as? DiaryEntry {
                         typed.recomputeWordCount()
                     }
+                    seenIDs.insert(oldEntry.id)
                     inserted += 1
                 }
 
@@ -80,13 +90,14 @@ struct DataMigrationService {
                     // 的 bg 队列里同步写入。async 写法下，context.save() 成功到 UserDefaults 写入
                     // 之间存在窗口，如果 App 被系统杀（内存压力 / 用户 force-quit），下次启动
                     // migrationKey 还没落盘 → performMigrationIfNeeded 再跑一遍 → **数据翻倍导入**。
-                    UserDefaults.standard.set(true, forKey: migrationKey)
+                    defaults.set(true, forKey: migrationKey)
 
                     // 备份原文件（非关键路径，失败可接受）
                     let backupURL = jsonURL.appendingPathExtension("backup")
                     try? FileManager.default.moveItem(at: jsonURL, to: backupURL)
                     Log.info("[DataMigration] 原文件已备份至: \(backupURL.lastPathComponent)", category: .migration)
                 } catch {
+                    context.rollback()
                     Log.error("[DataMigration] Core Data 保存失败: \(error)", category: .migration)
                 }
             }

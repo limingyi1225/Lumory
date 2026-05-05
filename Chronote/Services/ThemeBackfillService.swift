@@ -137,6 +137,7 @@ final class ThemeBackfillService: ObservableObject {
                 await publish(Progress(processed: processed, total: objectIDs.count, failed: failed, isRunning: true), runID: runID)
             }
             try? await Task.sleep(nanoseconds: throttleNanos)
+            if Task.isCancelled { break }
         }
 
         Log.info("[ThemeBackfill] 完成: 成功 \(processed) / 失败 \(failed)", category: .migration)
@@ -180,22 +181,29 @@ final class ThemeBackfillService: ObservableObject {
 
     private func fetchCandidates(mode: Mode) async -> [NSManagedObjectID] {
         await persistence.container.performBackgroundTask { context in
-            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
-            request.predicate = NSPredicate(format: "text != nil AND text != %@", "")
-            request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
-            request.fetchBatchSize = 200
-            guard let entries = try? context.fetch(request) else { return [] }
-
             switch mode {
             case .all:
-                return entries.map { $0.objectID }
+                let request = NSFetchRequest<NSManagedObjectID>(entityName: "DiaryEntry")
+                request.predicate = NSPredicate(format: "text != nil AND text != %@", "")
+                request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+                request.resultType = .managedObjectIDResultType
+                return (try? context.fetch(request)) ?? []
             case .problemsOnly:
+                let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+                request.predicate = NSPredicate(format: "text != nil AND text != %@", "")
+                request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+                guard let entries = try? context.fetch(request) else { return [] }
                 return entries.compactMap { entry -> NSManagedObjectID? in
-                    let themes = entry.themeArray
-                    if themes.isEmpty { return entry.objectID }
+                    let themesCSV = entry.themes ?? ""
+                    let themes = themesCSV
+                        .split(separator: ",")
+                        .map { String($0).trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                    let objectID = entry.objectID
+                    if themes.isEmpty { return objectID }
                     // 任何一个命中 banned 词就视为需要清理
                     if themes.contains(where: { InsightsEngine.isBannedTheme($0) }) {
-                        return entry.objectID
+                        return objectID
                     }
                     return nil
                 }

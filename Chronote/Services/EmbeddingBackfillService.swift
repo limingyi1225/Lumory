@@ -124,6 +124,7 @@ final class EmbeddingBackfillService: ObservableObject {
             }
             // 喘口气，避免 OpenAI 限流
             try? await Task.sleep(nanoseconds: throttleNanos)
+            if Task.isCancelled { break }
         }
 
         Log.info("[EmbeddingBackfill] 完成: 成功 \(processed) / 失败 \(failed)", category: .migration)
@@ -157,7 +158,6 @@ final class EmbeddingBackfillService: ObservableObject {
             request.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
             request.resultType = .managedObjectIDResultType
-            request.fetchBatchSize = 200
             return (try? context.fetch(request)) ?? []
         }
     }

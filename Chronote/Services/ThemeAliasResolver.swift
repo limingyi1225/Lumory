@@ -102,9 +102,14 @@ final class ThemeAliasResolver: ObservableObject {
     /// `precomposedStringWithCanonicalMapping`,Resolver 这边查找时也 NFC 一遍以防
     /// 用户老 entry 的 NFD 形式 "café" 跟 AI 返回的 NFC "café" 落到不同 bucket)。
     func canonicalize(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespaces).precomposedStringWithCanonicalMapping
-        guard !trimmed.isEmpty else { return raw }
-        return aliasToCanonical[trimmed.lowercased()] ?? trimmed
+        // 用统一的 ThemeKey.make 做 NFC + lowercased + trim;reverse index 也用同 idiom
+        // (见 rebuildIndex)。返回的 canonical 优先保留入库原文(已 NFC 化),命中 index 时返回 group 主名,
+        // 否则返回 trimmed NFC 后的原文(保留大小写,只去掉边缘空格 / NFC 化)。
+        let trimmedNFC = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+        guard !trimmedNFC.isEmpty else { return raw }
+        return aliasToCanonical[ThemeKey.make(raw)] ?? trimmedNFC
     }
 
     /// 批量 canonicalize + 去重(保留首次 canonical 的原文大小写)。
@@ -582,7 +587,10 @@ final class ThemeAliasResolver: ObservableObject {
         // active 集合无差别 removeAll,新 enqueue 的 suggestion 因 newTag 不在 stale active 里
         // 被误删。只针对 await 前就在的 pending 做 cleanup,新加的活下来。
         let beforeIDs = Set(pending.map(\.id))
-        let rawActiveLabels = await fetchActiveLowercasedLabels()
+        guard let rawActiveLabels = await fetchActiveLowercasedLabels() else {
+            Log.warning("[ThemeAliasResolver] cleanupOrphanedPending: active label fetch failed, keeping pending queue", category: .persistence)
+            return
+        }
 
         // 把每个 raw label 通过 alias map canonicalize 一次,union 进 active set。
         // 一个 alias 在日记里出现 → 它对应的 canonical 也算 active(group 仍然活着)。
@@ -612,13 +620,19 @@ final class ThemeAliasResolver: ObservableObject {
     /// 后台扫所有 entry.themes,返回 lowercased distinct set。给 cleanupOrphanedPending 用。
     /// 用 dictionaryResultType + propertiesToFetch=["themes"] 避免实体化 NSManagedObject —
     /// heavy user(1000+ 篇)上每次 entry 删除后跑都要走一次,实体化全量 entry 会卡顿。
-    private func fetchActiveLowercasedLabels() async -> Set<String> {
+    private func fetchActiveLowercasedLabels() async -> Set<String>? {
         await PersistenceController.shared.container.performBackgroundTask { context in
             let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
             request.resultType = .dictionaryResultType
             request.propertiesToFetch = ["themes"]
             request.predicate = NSPredicate(format: "themes != nil AND themes != %@", "")
-            guard let rows = try? context.fetch(request) else { return Set<String>() }
+            let rows: [NSDictionary]
+            do {
+                rows = try context.fetch(request)
+            } catch {
+                Log.warning("[ThemeAliasResolver] fetchActiveLowercasedLabels failed: \(error)", category: .persistence)
+                return nil
+            }
             var labels = Set<String>()
             for row in rows {
                 guard let csv = row["themes"] as? String, !csv.isEmpty else { continue }
@@ -658,7 +672,7 @@ final class ThemeAliasResolver: ObservableObject {
         let interval = coolUntil.timeIntervalSinceNow
         guard interval > 0 else { return }  // 已过期,不必 schedule
         // tolerance 给 OS 节能优化空间;到期点偏 30s 完全可接受。
-        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 // SwiftUI ObservableObject 重 re-render
@@ -669,6 +683,7 @@ final class ThemeAliasResolver: ObservableObject {
             }
         }
         timer.tolerance = 30  // 30s tolerance,允许 OS coalesce
+        RunLoop.main.add(timer, forMode: .common)
         coolUntilExpiryTimer = timer
     }
 
@@ -759,12 +774,11 @@ final class ThemeAliasResolver: ObservableObject {
     private func rebuildIndex() {
         var index: [String: String] = [:]
         for (canonical, aliases) in groups {
-            // NFC + lowercased key —— 跟 canonicalize(_:) 入参的归一化对齐,
-            // 否则 NFD entry / NFC AI return 落到不同 bucket。
-            let canonKey = canonical.precomposedStringWithCanonicalMapping.lowercased()
-            index[canonKey] = canonical
+            // 用 ThemeKey.make 跟 canonicalize(_:) 入参的归一化对齐,否则 NFD entry / NFC AI return
+            // 落到不同 bucket。
+            index[ThemeKey.make(canonical)] = canonical
             for alias in aliases {
-                index[alias.precomposedStringWithCanonicalMapping.lowercased()] = canonical
+                index[ThemeKey.make(alias)] = canonical
             }
         }
         self.aliasToCanonical = index

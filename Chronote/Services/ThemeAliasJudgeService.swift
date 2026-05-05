@@ -284,23 +284,27 @@ final class ThemeAliasJudgeService: ObservableObject {
     /// 不排"已合并的别名"——本来就要让 judge 看到 Abby 和 宝贝 共存才能判出对子。
     private func fetchInventory(excluding excludeID: UUID?) async -> [ThemeAliasJudgeCandidate] {
         await persistence.container.performBackgroundTask { context in
-            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            request.resultType = .dictionaryResultType
             request.predicate = NSPredicate(format: "themes != nil AND themes != %@", "")
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+            request.propertiesToFetch = ["id", "themes", "summary"]
             request.fetchBatchSize = 200
             guard let entries = try? context.fetch(request) else { return [] }
 
             var counts: [String: Int] = [:]
             var samples: [String: String] = [:]
             for entry in entries {
-                if let excludeID, entry.id == excludeID { continue }
-                let tags = entry.themeArray
+                let entryID = (entry["id"] as? UUID)
+                    ?? (entry["id"] as? NSUUID).flatMap { UUID(uuidString: $0.uuidString) }
+                if let excludeID, entryID == excludeID { continue }
+                let tags = Self.parseThemesCSV(entry["themes"] as? String)
                 // **隐私**:snippet 只取 `entry.summary`(已是 AI 总结后的短语,十几个字),
                 // **绝不**回退到 raw `entry.text`。之前的 `summary ?? text` fallback 会把
                 // 整篇日记的前 80 字符发上后端,与"alias 判别只需 tag"的设计意图相悖
                 // (codex P1 #9 fix)。summary 为 nil 时这条 tag 没 snippet,模型靠
                 // tag literal 名字判别已足够。
-                let snippetSource = entry.summary ?? ""
+                let snippetSource = entry["summary"] as? String ?? ""
                 for tag in tags where !tag.isEmpty && !InsightsEngine.isBannedTheme(tag) {
                     counts[tag, default: 0] += 1
                     if samples[tag] == nil, !snippetSource.isEmpty {
@@ -313,6 +317,14 @@ final class ThemeAliasJudgeService: ObservableObject {
                 ThemeAliasJudgeCandidate(tag: tag, count: count, sampleSnippet: samples[tag])
             }.sorted { $0.count > $1.count }
         }
+    }
+
+    nonisolated private static func parseThemesCSV(_ csv: String?) -> [String] {
+        guard let csv, !csv.isEmpty else { return [] }
+        return csv
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 
     /// 给 PendingSuggestion 准备最多 N 条引文的 entry id —— management view 用 id 去 fetch 真 entry 显示卡片。

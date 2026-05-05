@@ -227,16 +227,20 @@ final class ContextPromptGenerator {
         // 才能正确判定。同一篇 entry 内多 alias 重复也在这里去重。
         let aliasMap = await MainActor.run { ThemeAliasResolver.shared.snapshotIndex() }
         return await persistence.container.performBackgroundTask { context in
-            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            request.resultType = .dictionaryResultType
             request.predicate = NSPredicate(format: "date >= %@", lapseStart as NSDate)
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+            request.propertiesToFetch = ["date", "themes", "moodValue"]
             guard let entries = try? context.fetch(request) else { return ([], []) }
             var recent: [Snapshot] = []
             var older: [Snapshot] = []
             for entry in entries {
-                let date = entry.date ?? Date.distantPast
-                let canonicalThemes = Self.canonicalize(entry.themeArray, with: aliasMap)
-                let snap = Snapshot(date: date, themes: canonicalThemes, moodValue: entry.moodValue)
+                let date = entry["date"] as? Date ?? Date.distantPast
+                let rawThemes = Self.parseThemesCSV(entry["themes"] as? String)
+                let canonicalThemes = Self.canonicalize(rawThemes, with: aliasMap)
+                let moodValue = (entry["moodValue"] as? NSNumber)?.doubleValue ?? 0.5
+                let snap = Snapshot(date: date, themes: canonicalThemes, moodValue: moodValue)
                 if date >= recentStart {
                     recent.append(snap)
                 } else {
@@ -260,5 +264,13 @@ final class ContextPromptGenerator {
             if seen.insert(key).inserted { out.append(canon) }
         }
         return out
+    }
+
+    private static func parseThemesCSV(_ csv: String?) -> [String] {
+        guard let csv, !csv.isEmpty else { return [] }
+        return csv
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 }

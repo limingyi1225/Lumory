@@ -87,7 +87,8 @@ final class PromptSuggestionEngine: ObservableObject {
     // V5:home placeholder 改成第二人称 + 当下相关(App 跟今天的用户搭话)。
     //     V4 的 placeholder 是第一人称内心独白("我..."),和 askPast 重了,且没有"现在"
     //     框架。askPast 仍是第一人称(用户问自己),两套视角分得更清楚。
-    private let cacheKey = "promptSuggestionCacheV6"
+    private nonisolated static let currentCacheKey = "promptSuggestionCacheV6"
+    private let cacheKey = PromptSuggestionEngine.currentCacheKey
     private let ttl: TimeInterval = 24 * 60 * 60   // 24 小时
 
     /// 随机池选中后记录，避免连续重复
@@ -95,6 +96,7 @@ final class PromptSuggestionEngine: ObservableObject {
     /// Bool 语义：true = AI 真的生成并写入新 bundle；false = 跳过（信号不足）或失败。
     /// "一键重建" 里会再拿日记总数兜底判断 false 是不是因为 <3 条，避免误报失败。
     private var inFlight: Task<Bool, Never>?
+    private var inFlightToken: UUID?
 
     init(
         insights: InsightsEngine = .shared,
@@ -121,7 +123,9 @@ final class PromptSuggestionEngine: ObservableObject {
         current = nil
         inFlight?.cancel()
         inFlight = nil
+        inFlightToken = nil
         UserDefaults.standard.removeObject(forKey: cacheKey)
+        Self.removeCacheFile(key: cacheKey)
         lastPlaceholderIndex = nil
         Log.info("[PromptSuggestionEngine] clearCache: 缓存已清(含 inflight 取消)", category: .ai)
     }
@@ -178,13 +182,18 @@ final class PromptSuggestionEngine: ObservableObject {
             guard let self else { return false }
             return await self.executeRefresh(context: context)
         }
+        let token = UUID()
         inFlight = task
+        inFlightToken = token
         let result = await withTaskCancellationHandler {
             await task.value
         } onCancel: {
             task.cancel()
         }
-        inFlight = nil
+        if inFlightToken == token {
+            inFlight = nil
+            inFlightToken = nil
+        }
         return result
     }
 
@@ -278,7 +287,7 @@ final class PromptSuggestionEngine: ObservableObject {
     /// file protection——这份 bundle 里含用户日记派生的 prompt（指向 Abby / 工作 / 某天某事），
     /// 以前放在 UserDefaults 里明文，越狱 / sysdiagnose / 第三方备份都能读。file protection 能保证
     /// 设备锁定后的磁盘镜像里是加密的。
-    private static func cacheFileURL(key: String) -> URL? {
+    private nonisolated static func cacheFileURL(key: String) -> URL? {
         guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
@@ -286,11 +295,14 @@ final class PromptSuggestionEngine: ObservableObject {
         return support.appendingPathComponent("\(key).protected.json")
     }
 
-    private static func loadCache(key: String) -> SuggestionBundle? {
-        if let url = cacheFileURL(key: key),
-           let data = try? Data(contentsOf: url),
-           let bundle = try? JSONDecoder().decode(SuggestionBundle.self, from: data) {
-            return bundle
+    private nonisolated static func loadCache(key: String) -> SuggestionBundle? {
+        if let url = cacheFileURL(key: key), FileManager.default.fileExists(atPath: url.path) {
+            do {
+                let data = try Data(contentsOf: url)
+                return try JSONDecoder().decode(SuggestionBundle.self, from: data)
+            } catch {
+                Log.warning("[PromptSuggestionEngine] loadCache failed for \(url.lastPathComponent): \(error)", category: .ai)
+            }
         }
         // 兼容老版本：UserDefaults 里的旧 cache 还在就一次性迁移走
         if let legacy = UserDefaults.standard.data(forKey: key) {
@@ -299,12 +311,13 @@ final class PromptSuggestionEngine: ObservableObject {
                 UserDefaults.standard.removeObject(forKey: key)
                 return bundle
             }
+            Log.warning("[PromptSuggestionEngine] legacy UserDefaults cache decode failed, dropping", category: .ai)
             UserDefaults.standard.removeObject(forKey: key)
         }
         return nil
     }
 
-    private static func saveCache(bundle: SuggestionBundle, key: String) {
+    private nonisolated static func saveCache(bundle: SuggestionBundle, key: String) {
         guard let data = try? JSONEncoder().encode(bundle), let url = cacheFileURL(key: key) else { return }
         do {
             try data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
@@ -312,6 +325,20 @@ final class PromptSuggestionEngine: ObservableObject {
             Log.error("[PromptSuggestion] cache 写失败：\(error)", category: .ai)
         }
     }
+
+    private nonisolated static func removeCacheFile(key: String) {
+        guard let url = cacheFileURL(key: key), FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            Log.warning("[PromptSuggestionEngine] remove cache file failed for \(url.lastPathComponent): \(error)", category: .ai)
+        }
+    }
+
+    #if DEBUG
+    nonisolated static var cacheKeyForTesting: String { currentCacheKey }
+    nonisolated static var cacheFileURLForTesting: URL? { cacheFileURL(key: currentCacheKey) }
+    #endif
 
     // MARK: Helpers
 

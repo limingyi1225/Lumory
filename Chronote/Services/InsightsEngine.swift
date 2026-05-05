@@ -144,11 +144,11 @@ final class InsightsEngine {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
         return await persistence.container.performBackgroundTask { context -> WritingStats in
-            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            request.resultType = .dictionaryResultType
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
             request.propertiesToFetch = ["date", "moodValue", "wordCount"]
-            request.returnsObjectsAsFaults = false
-            guard let entries = try? context.fetch(request), !entries.isEmpty else {
+            guard let dicts = try? context.fetch(request), !dicts.isEmpty else {
                 return WritingStats(totalEntries: 0, currentStreak: 0, longestStreak: 0, totalWords: 0, avgMood: 0.5)
             }
 
@@ -156,16 +156,16 @@ final class InsightsEngine {
             var totalWords = 0
             var moodSum = 0.0
             var uniqueDaysDesc: [Date] = []
-            uniqueDaysDesc.reserveCapacity(entries.count)
-            for entry in entries {
-                totalWords += Int(entry.wordCount)
-                moodSum += entry.moodValue
-                if let date = entry.date {
+            uniqueDaysDesc.reserveCapacity(dicts.count)
+            for dict in dicts {
+                totalWords += (dict["wordCount"] as? NSNumber)?.intValue ?? 0
+                moodSum += (dict["moodValue"] as? NSNumber)?.doubleValue ?? 0.5
+                if let date = dict["date"] as? Date {
                     let day = calendar.startOfDay(for: date)
                     if uniqueDaysDesc.last != day { uniqueDaysDesc.append(day) }
                 }
             }
-            let total = entries.count
+            let total = dicts.count
             let avg = moodSum / Double(total)
             let (currentStreak, longestStreak) = Self.computeStreaks(uniqueDaysDesc: uniqueDaysDesc, today: today, calendar: calendar)
 

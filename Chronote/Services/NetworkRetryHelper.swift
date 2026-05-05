@@ -6,7 +6,7 @@ struct NetworkRetryHelper {
     static let maxRetries = 3
     static let retryDelay: TimeInterval = 1.0
     static let maxRetryDelay: TimeInterval = 8.0
-    static let maxRetryAfterDelay: TimeInterval = 60.0
+    static let maxRetryAfterDelay: TimeInterval = 30.0
 
     /// Execute a network request with automatic retry on SSL/network errors.
     /// 指数回退 (1s → 2s → 4s, cap at maxRetryDelay)，避免 3× 平推在短 2s 内把下游打死。

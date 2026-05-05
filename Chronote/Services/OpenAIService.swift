@@ -180,9 +180,7 @@ Diary Entries:
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // 后端鉴权用 shared secret；后端 middleware `requireAppSecret` 会 time-safe compare。
-        request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
-        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
+        request.applyBackendAuth()
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("keep-alive", forHTTPHeaderField: "Connection")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
@@ -229,7 +227,14 @@ Diary Entries:
                         type: OpenAIStreamResponse.self,
                         decoder: self.jsonDecoder
                     ) {
-                        if let content = streamResp.choices.first?.delta.content, !content.isEmpty {
+                        try Task.checkCancellation()
+                        if streamResp.hasTruncatedFinish {
+                            let reason = NSLocalizedString("stream.truncated.report", comment: "Report truncated marker")
+                            didEmitTerminalStreamEvent = true
+                            await MainActor.run { onEvent(.truncated(reason: reason)) }
+                            return
+                        }
+                        if let content = streamResp.choices.first?.delta?.content, !content.isEmpty {
                             chunkCount += 1
                             hasEmittedAnyChunk = true
                             await MainActor.run { onEvent(.chunk(content)) }
@@ -313,9 +318,7 @@ Diary Entries:
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // 后端鉴权用 shared secret；后端 middleware `requireAppSecret` 会 time-safe compare。
-        request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
-        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
+        request.applyBackendAuth()
         request.httpBody = try? jsonEncoder.encode(requestBody)
 
         // 新增：支持流式响应
@@ -337,7 +340,7 @@ Diary Entries:
                         type: OpenAIStreamResponse.self,
                         decoder: self.jsonDecoder
                     ) {
-                        if let content = streamResp.choices.first?.delta.content {
+                        if let content = streamResp.choices.first?.delta?.content {
                             result.append(content)
                         }
                     }
@@ -452,8 +455,7 @@ Diary Entries:
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
-        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
+        request.applyBackendAuth()
         request.httpBody = try jsonEncoder.encode(requestBody)
 
         return try await NetworkRetryHelper.performWithRetry {
@@ -533,15 +535,19 @@ Diary Entries:
         }
 
         let token = await Self.debounceRegistry.register(key: key, task: task)
-        await task.value
-        await Self.debounceRegistry.clearIfCurrent(key: key, token: token)
-        return resultBox.get() ?? cancelledFallback
+        return await withTaskCancellationHandler {
+            await task.value
+            await Self.debounceRegistry.clearIfCurrent(key: key, token: token)
+            return resultBox.get() ?? cancelledFallback
+        } onCancel: {
+            task.cancel()
+        }
     }
 }
 
 /// 小的引用容器，用来把 debounce Task 内部算出的泛型值存到外层作用域。
 /// 锁是不可避免的——Task 内外是两个调度域；但只有两次 set+get，单锁够用。
-private final class ResultBox<T> {
+private final class ResultBox<T>: @unchecked Sendable {
     private var value: T?
     private let lock = NSLock()
     func set(_ newValue: T) {
@@ -747,12 +753,26 @@ enum SSEParser {
 
 // MARK: - SSE stream response (OpenAI Chat Completions)
 @available(iOS 15.0, macOS 12.0, *)
-private struct OpenAIStreamResponse: Decodable {
+struct OpenAIStreamResponse: Decodable {
     struct Choice: Decodable {
         struct Delta: Decodable { let content: String? }
-        let delta: Delta
+        let delta: Delta?
+        let finishReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case delta
+            case finishReason = "finish_reason"
+        }
+
+        var isTruncatedFinish: Bool {
+            finishReason == "length" || finishReason == "content_filter"
+        }
     }
     let choices: [Choice]
+
+    var hasTruncatedFinish: Bool {
+        choices.contains { $0.isTruncatedFinish }
+    }
 }
 
 @available(iOS 15.0, macOS 12.0, *)
@@ -1349,9 +1369,29 @@ extension OpenAIService {
     }
 
     // MARK: Embeddings
+    private static let maxEmbeddingPayloadUTF16Units = 8_000
+
+    private static func embeddingPayload(from text: String) -> String {
+        guard text.utf16.count > maxEmbeddingPayloadUTF16Units else { return text }
+
+        var end = text.startIndex
+        var utf16Count = 0
+        while end < text.endIndex {
+            let next = text.index(after: end)
+            let scalarCount = text[end].utf16.count
+            if utf16Count + scalarCount > maxEmbeddingPayloadUTF16Units {
+                break
+            }
+            utf16Count += scalarCount
+            end = next
+        }
+        return String(text[..<end])
+    }
+
     func embed(text: String) async -> [Float]? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        let payload = Self.embeddingPayload(from: trimmed)
 
         struct RequestBody: Codable {
             let model: String
@@ -1373,9 +1413,8 @@ extension OpenAIService {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
-        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
-        let body = RequestBody(model: "text-embedding-3-small", input: trimmed)
+        request.applyBackendAuth()
+        let body = RequestBody(model: "text-embedding-3-small", input: payload)
         request.httpBody = try? jsonEncoder.encode(body)
 
         // **不用 [weak self]**：OpenAIService.shared 是进程级 singleton，self 永不释放。
@@ -1389,7 +1428,7 @@ extension OpenAIService {
                 let (data, response) = try await URLSession.sharedRetrySession.data(for: request)
                 guard let http = response as? HTTPURLResponse else {
                     Log.error("[OpenAIService] Embed: non-HTTP response", category: .ai)
-                    throw NSError(domain: "OpenAIService", code: -1)
+                    throw BackendErrorMapper.error(forStatus: -1)
                 }
                 guard (200...299).contains(http.statusCode) else {
                     // 只记 status + body 长度;body 内容可能夹带 embedding input(用户日记原文)或上游
@@ -1538,8 +1577,7 @@ extension OpenAIService {
                 request.httpMethod = "POST"
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-                request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
-                request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
+                request.applyBackendAuth()
                 request.httpBody = try? self.jsonEncoder.encode(body)
 
                 // 重试保护：一旦已经向 caller yield 过任意 chunk，就不允许再重试——
@@ -1560,8 +1598,14 @@ extension OpenAIService {
                                 type: OpenAIStreamResponse.self,
                                 decoder: self.jsonDecoder
                             ) {
-                                if Task.isCancelled { return }
-                                if let content = streamResp.choices.first?.delta.content, !content.isEmpty {
+                                try Task.checkCancellation()
+                                if streamResp.hasTruncatedFinish {
+                                    let reason = NSLocalizedString("stream.truncated.answer", comment: "Answer truncated marker")
+                                    didEmitTerminalStreamEvent = true
+                                    continuation.yield(.truncated(reason: reason))
+                                    return
+                                }
+                                if let content = streamResp.choices.first?.delta?.content, !content.isEmpty {
                                     hasEmittedAnyChunk = true
                                     continuation.yield(.chunk(content))
                                 }

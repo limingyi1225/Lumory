@@ -69,8 +69,7 @@ final class OpenAITranscriber: TranscriberProtocol {
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(prepared.boundary)", forHTTPHeaderField: "Content-Type")
-        request.setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
-        request.setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
+        request.applyBackendAuth()
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = prepared.body
 

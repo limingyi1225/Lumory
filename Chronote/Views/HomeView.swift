@@ -17,6 +17,19 @@ struct Recording: Identifiable {
     let duration: TimeInterval
 }
 
+private func deleteHomeEntryAttachmentFiles(imageFileNames: [String], audioFileName: String?) {
+    for fileName in imageFileNames {
+        do {
+            try DiaryEntry.deleteImageFromDocuments(fileName)
+        } catch {
+            Log.error("[HomeView] 删除图片附件失败 \(fileName): \(error)", category: .ui)
+        }
+    }
+    if let audioFileName, !audioFileName.isEmpty {
+        DiaryEntry.deleteAudioFromDocuments(audioFileName)
+    }
+}
+
 struct HomeView: View {
     // Core Data 相关
     @Environment(\.managedObjectContext) private var viewContext
@@ -25,7 +38,10 @@ struct HomeView: View {
     // 三层动画时序会错开导致行错位。把 FetchRequest 的 animation 撤掉后，动画由 List + `withAnimation`
     // 两层控制就够，且 `ForEach(entries, id: \.objectID)` 也能恢复正常 identity。
     @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+        sortDescriptors: [
+            NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false),
+            NSSortDescriptor(keyPath: \DiaryEntry.id, ascending: false)
+        ]
     ) private var entries: FetchedResults<DiaryEntry>
     
     // AI 服务从 SwiftUI Environment 注入，默认指向 `OpenAIService.shared`。
@@ -53,6 +69,7 @@ struct HomeView: View {
     @StateObject private var recorder = AudioRecorder()
     @StateObject private var audioPlaybackController = AudioPlaybackController() // 新的控制器
     @FocusState private var isInputFocused: Bool
+    @State private var transcriptionGeneration = 0
 
     private let cal = Calendar.current
     @Environment(\.colorScheme) private var colorScheme
@@ -93,9 +110,6 @@ struct HomeView: View {
     private let topAnchorID = "__lumory_top__"
     @State private var composerFocusRequestID: UUID?
 
-    // Database recreation observer
-    @State private var databaseRecreationObserver: NSObjectProtocol?
-
     var body: some View {
         iOSHomeView
     }
@@ -121,7 +135,6 @@ struct HomeView: View {
                 }
             }
             .onAppear {
-                setupDatabaseRecreationObserver()
                 // AI 池可能已就绪（另一视图暖过）——进入首页立即尝试拿一条稳定值
                 rollPlaceholderIfNeeded()
                 handleReminderComposeFocusIfNeeded()
@@ -136,13 +149,23 @@ struct HomeView: View {
                 // 让两条路径都至少能各跑一次,UUID 单次消费保证不重复 focus。
                 handleReminderComposeFocusIfNeeded()
             }
-            .onDisappear {
-                removeDatabaseRecreationObserver()
-            }
             .onChange(of: reminderRouter.composeFocusRequestID) { _, requestID in
                 if requestID != nil {
                     handleReminderComposeFocusIfNeeded()
                 }
+            }
+            // **音频中断录音 → UI 接管**:电话 / Siri 打断录音时,AudioRecorder 自己 stopRecording 落盘 +
+            // 透出 filename。HomeView 在这里接住,把段落塞进 audioRecordings 起转写,然后清 filename
+            // (单次消费)。否则用户的录音段落留在磁盘但 UI 看不到,等于丢失。
+            .onChange(of: recorder.interruptedRecordingFileName) { _, fileName in
+                if let fileName {
+                    processStoppedRecording(fileName: fileName, duration: recorder.duration)
+                    recorder.interruptedRecordingFileName = nil
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .databaseRecreated)) { _ in
+                Log.info("[HomeView] Database recreated notification received", category: .ui)
+                handleDatabaseRecreation()
             }
             .alert(NSLocalizedString("删除日记", comment: "Delete entry"), isPresented: $showDeleteConfirmation) {
                 Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
@@ -239,7 +262,7 @@ struct HomeView: View {
                             shouldStartEditing = false
                         }
                 }
-                .sheet(isPresented: $isInsightsPresented) {
+                .lumoryAdaptiveModal(isPresented: $isInsightsPresented) {
                     InsightsView()
                         .environment(\.managedObjectContext, viewContext)
                 }
@@ -336,7 +359,11 @@ struct HomeView: View {
         showDeleteConfirmation = false
         entryToDelete = nil
         searchQuery = ""
-        composerFocusRequestID = requestID
+        composerFocusRequestID = nil
+        Task { @MainActor in
+            await Task.yield()
+            composerFocusRequestID = requestID
+        }
     }
 
     /// Pull-to-refresh：触发 CloudKit 同步 + 换一条占位语（从当前池里挑一个不同项）。
@@ -381,6 +408,7 @@ struct HomeView: View {
                 textInputArea
                 recordingsSection
                 if !photoVM.selectedImageItems.isEmpty { photosSection }
+                if photoVM.compressionFailureCount > 0 { compressionFailureBanner }
                 // 卡内分隔线:把"内容区"和"动作区(工具栏)"隔开。
                 Capsule()
                     .fill(Color.primary.opacity(0.06))
@@ -458,6 +486,9 @@ struct HomeView: View {
                 if let failure = recordingVM.transcriptionError {
                     transcriptionErrorBanner(failure: failure)
                 }
+                if let playbackError = recordingVM.audioPlaybackError {
+                    audioPlaybackErrorBanner(message: playbackError)
+                }
             }
         }
         .frame(height: recordingVM.audioRecordings.isEmpty ? 0 : nil)
@@ -471,6 +502,62 @@ struct HomeView: View {
                 recordingVM.deleteTarget = nil
             }
         }
+    }
+
+    /// 音频播放失败 inline banner。playAudio 的 onPlayError 把文案塞 VM,这里渲染。点 X 清。
+    @ViewBuilder
+    private func audioPlaybackErrorBanner(message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.footnote)
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Button {
+                recordingVM.audioPlaybackError = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(NSLocalizedString("关闭", comment: "Dismiss"))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// 图片压缩 / 加载失败 inline banner。9 张选 7 成功 → "2 张图片处理失败" 提醒,跟 transcription
+    /// banner 同 visual idiom。用户点 "知道了" 清。photoVM.compressionFailureCount = 0 不显示。
+    @ViewBuilder
+    private var compressionFailureBanner: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.footnote)
+            Text(String(
+                format: NSLocalizedString("有 %d 张图片处理失败", comment: "Photo compression failure banner"),
+                photoVM.compressionFailureCount
+            ))
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Button {
+                photoVM.compressionFailureCount = 0
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(NSLocalizedString("关闭", comment: "Dismiss"))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 
     @ViewBuilder
@@ -527,6 +614,7 @@ struct HomeView: View {
         // OpenAITranscriber 里 catch URLError(.cancelled) 走通用网络错误分支(无害,
         // 因为 audioRecordings 已清空,banner 不会渲染)。
         if recordingVM.currentAudioFileName == target {
+            transcriptionGeneration &+= 1
             recordingVM.transcriptionTask?.cancel()
             recordingVM.transcriptionTask = nil
             recordingVM.isTranscribing = false
@@ -540,8 +628,9 @@ struct HomeView: View {
         if recordingVM.currentAudioFileName == target {
             recordingVM.currentAudioFileName = nil
         }
-        // 录音被删了,挂着的转写错误 banner 也没意义了。
+        // 录音被删了,挂着的转写 / 播放错误 banner 也没意义了。
         recordingVM.transcriptionError = nil
+        recordingVM.audioPlaybackError = nil
         recordingVM.deleteTarget = nil
     }
 
@@ -558,6 +647,9 @@ struct HomeView: View {
     }
     
     private func loadPhotosWithCompression(_ items: [PhotosPickerItem]) async {
+        // 新一轮 pick 开始就清掉旧的失败 banner,不让用户再选时还看到"上次失败 3 张"。
+        // 真正的 failed count 在末尾根据本轮结果重新写入。
+        photoVM.compressionFailureCount = 0
         // 关键改动 1:每个 item 走 Task.detached 跳到后台 actor —— 之前 addTask 继承父
         // MainActor,compressImage 里的 UIImage 解码 + JPEG 重编码全卡在主线程上,选 9 张图
         // 直接掉帧到底。detached 之后 UI 不再被压死,选完照片到出现缩略图之间也没有阻塞。
@@ -599,12 +691,17 @@ struct HomeView: View {
 
         let prunedItems = successful.map(\.0)
         let imageItems = successful.map { HomePhotoViewModel.SelectedImage(data: $0.1) }
+        // **失败提示** —— 9 张选 7 张成功 → 之前 silently drop 2 张,用户以为都加了。把失败数推进 VM
+        // 让 banner 显示;0 时不显示。
+        let failedCount = items.count - successful.count
+        photoVM.compressionFailureCount = failedCount
 
         await MainActor.run {
             photoVM.selectedImageItems = imageItems
             // F2:把 selectedPhotos 也剪枝到只剩压缩成功的 items,保证两边长度严格对齐。
             // 等值检查避免触发自身的 .onChange 死循环 —— PhotosPickerItem 是 Equatable。
             if photoVM.selectedPhotos != prunedItems {
+                photoVM.suppressNextPhotoSelectionReload = true
                 photoVM.selectedPhotos = prunedItems
             }
             Log.info("[HomeView] Total compressed images: \(photoVM.selectedImageItems.count)", category: .ui)
@@ -622,6 +719,7 @@ struct HomeView: View {
         let mood: Double
     }
 
+    @MainActor
     private func handleSendAction() {
         // 重发双点防护：`hasSendableContent` 已包含 `!isSending`，但用户触到第二次 tap 的极端
         // race（SwiftUI tap dispatch + `isSending` 还没 flip）在 struct-copy 语义下仍可能穿透。
@@ -850,6 +948,14 @@ struct HomeView: View {
         // task cancel + replace,多入口并发安全。
         ReminderService.shared.requestReschedule()
 
+        // Streak milestone 庆祝。fire-and-forget — 内部跑后台 fetch 算 streak,命中 7/14/30/60/100/(+100)
+        // 且之前没庆祝过 → set pendingMilestone,ChronoteApp ZStack 顶层 overlay 自动渲染。
+        // 用最新 entry 的 mood 作 overlay 配色。
+        StreakMilestoneService.shared.evaluateAfterSave(
+            persistence: PersistenceController.shared,
+            latestEntryMood: moodValue ?? 0.5
+        )
+
         // 异步生成摘要、主题、embedding（Phase 3 × Phase 2 融合）
         // **Stale-write guard**：用户可能在 AI 请求返回前就打开这条日记编辑了，
         // 那时 `entry.text` 已经是 v2，但我们手上的结果是基于 v1 算出来的——
@@ -962,7 +1068,7 @@ struct HomeView: View {
     private static func encodeImagesForSyncOffMain(images: [Data]) async -> Data? {
         guard !images.isEmpty else { return nil }
         do {
-            let encoded = try NSKeyedArchiver.archivedData(withRootObject: images, requiringSecureCoding: false)
+            let encoded = try NSKeyedArchiver.archivedData(withRootObject: images, requiringSecureCoding: true)
             Log.info("[HomeView] Encoded \(images.count) images for sync, total size: \(encoded.count) bytes", category: .ui)
             return encoded
         } catch {
@@ -988,10 +1094,15 @@ struct HomeView: View {
     @ViewBuilder
     private var emptyStateSection: some View {
         Section {
-            Text(NSLocalizedString("暂无日记，快去记录吧～", comment: "No entries message"))
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding()
+            // 用项目共享的 EmptyStateView 替代单行 placeholder —— 第一次打开 App 看到的就是这块,
+            // 给图标 + 标题 + 提示三层信息,引导用户走录音 / 文字两条入口。
+            EmptyStateView(
+                systemImage: "book.closed",
+                title: NSLocalizedString("暂无日记，快去记录吧～", comment: "Empty timeline title"),
+                message: NSLocalizedString("点下方输入框写一句,或长按麦克风录一段语音。",
+                                            comment: "Empty timeline subtitle")
+            )
+            .frame(minHeight: 320)
         }
         .listRowSeparator(.hidden)
         .listSectionSeparator(.hidden)
@@ -1060,6 +1171,7 @@ struct HomeView: View {
                 Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
             }
             Button {
+                HapticManager.shared.click()
                 shouldStartEditing = true
                 selectedEntry = entry
             } label: {
@@ -1160,28 +1272,29 @@ struct HomeView: View {
     }
 
     private func cleanedSummary(_ raw: String) -> String {
-        raw
-            .replacingOccurrences(of: ".", with: "")
-            .replacingOccurrences(of: "。", with: "")
-            .replacingOccurrences(of: "*", with: "")
-            .replacingOccurrences(of: "\"", with: "")
+        raw.trimmingCharacters(in: CharacterSet(charactersIn: "*\"“”'‘’ \n\t"))
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".。"))
     }
     
+    @MainActor
     func handleStopRecording() async {
         Log.info("[HomeView handleStopRecording START] Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
         guard let fileName = recorder.stopRecording() else {
             Log.info("[HomeView handleStopRecording: stopRecording returned nil] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
             return
         }
-        Log.info("[HomeView handleStopRecording: recording stopped, fileName: \(fileName)] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+        processStoppedRecording(fileName: fileName, duration: recorder.duration)
+    }
+
+    /// 走过了 `recorder.stopRecording()` 之后,把 (fileName, duration) 接进 UI 状态、清孤儿、起转写。
+    /// 用户主动按停 (handleStopRecording) 和被音频中断 (recorder.interruptedRecordingFileName .onChange)
+    /// 都走这里,**保证中断录到的段落不会被默默吞掉**。
+    @MainActor
+    private func processStoppedRecording(fileName: String, duration: TimeInterval) {
+        Log.info("[HomeView processStoppedRecording: fileName=\(fileName), duration=\(duration)] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
 
         // 标记正在转录
-        await MainActor.run {
-            recordingVM.isTranscribing = true
-            Log.info("[HomeView handleStopRecording: isTranscribing set to true] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
-        }
-
-        Log.info("[HomeView handleStopRecording] Setting currentAudioFileName. Old SFCFN: \(recordingVM.currentAudioFileName ?? "nil"), New FileName: \(fileName)", category: .ui)
+        recordingVM.isTranscribing = true
 
         // UI 理论上已通过 disabled 拦住重复录音，但兜底一下：如果仍存在旧 take，
         // 删掉它们的磁盘文件，避免孤儿音频（数据模型是单值 audioFileName，不会被引用到）。
@@ -1192,33 +1305,36 @@ struct HomeView: View {
             deleteAudioFileFromDocuments(stale)
         }
 
-        recordingVM.currentAudioFileName = fileName // SET FILENAME in handleStopRecording
-        // UI 只保留当前这一段（数据模型也是单值）；新录直接替换。
+        recordingVM.currentAudioFileName = fileName
         withAnimation(AnimationConfig.stiffSpring) {
-            let rec = Recording(id: fileName, fileName: fileName, duration: recorder.duration)
+            let rec = Recording(id: fileName, fileName: fileName, duration: duration)
             recordingVM.audioRecordings.removeAll()
             recordingVM.audioRecordings.append(rec)
         }
-        Log.info("[HomeView handleStopRecording] Did set currentAudioFileName. New SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
 
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        Log.info("[HomeView handleStopRecording: got documentsURL] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
         let audioURL = documentsURL.appendingPathComponent(fileName)
-        Log.info("[HomeView handleStopRecording: got audioURL: \(audioURL)] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
 
         // 进入转写任务前清掉上次的错误,新一轮开始。
         recordingVM.transcriptionError = nil
         startTranscription(audioURL: audioURL, fileName: fileName)
-        Log.info("[HomeView handleStopRecording END FUNCTION] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+        Log.info("[HomeView processStoppedRecording END] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
     }
 
     /// 启动转写任务,失败时把错误塞进 `recordingVM.transcriptionError` 让 UI 显示 inline banner +
     /// 重试按钮。提取成方法是为了 retry 入口能复用同一段逻辑。
     private func startTranscription(audioURL: URL, fileName: String) {
-        recordingVM.transcriptionTask = Task {
+        recordingVM.transcriptionTask?.cancel()
+        transcriptionGeneration &+= 1
+        let generation = transcriptionGeneration
+        recordingVM.transcriptionTask = Task { @MainActor in
             Log.info("[HomeView startTranscription START] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
             Log.info("[HomeView] appLanguage=\(appLanguage) (OpenAITranscriber 自动检测语言,该参数当前忽略)", category: .ui)
             let transcribedTextOpt = await transcriber.transcribeAudio(fileURL: audioURL, localeIdentifier: appLanguage)
+            guard generation == transcriptionGeneration, !Task.isCancelled else {
+                Log.info("[HomeView transcriptionTask] stale/cancelled generation,放弃更新", category: .ui)
+                return
+            }
             // 文件被替换 / 删除时不更新 UI(保持原行为)。
             guard recordingVM.currentAudioFileName == fileName else {
                 Log.info("[HomeView transcriptionTask] 任务文件已改变,放弃更新", category: .ui)
@@ -1281,6 +1397,9 @@ struct HomeView: View {
 
         guard FileManager.default.fileExists(atPath: audioURL.path) else {
             Log.info("[HomeView playAudio] File NOT FOUND: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+            // **失败提示**:文件丢失走早返路径 — onPlayError 不会 fire,banner 不会显示。这里手动 set。
+            recordingVM.audioPlaybackError = NSLocalizedString("无法播放该录音,文件可能已损坏或丢失。",
+                                                                comment: "Audio playback failure banner")
             if recordingVM.currentAudioFileName == fileName { // 如果UI上显示的是这个不存在的文件
                  Log.info("[HomeView playAudio] Clearing SFCFN because file missing. Old SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
                  withAnimation(AnimationConfig.standardResponse) {
@@ -1293,6 +1412,8 @@ struct HomeView: View {
             }
             return
         }
+        // 新一次 play 成功就清掉旧错误 banner;onPlayError / missing-file path 会再 set。
+        recordingVM.audioPlaybackError = nil
 
         Log.info("[HomeView playAudio] File exists for: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
 
@@ -1302,23 +1423,15 @@ struct HomeView: View {
             Log.info("[HomeView playAudio] Controller stopped. Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
         }
 
-        Log.info("[HomeView playAudio] Calling controller.play for: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
-        audioPlaybackController.play(url: audioURL, fileName: fileName)
-        Log.info("[HomeView playAudio] Called controller.play. Controller isPlaying: \(audioPlaybackController.isPlaying), Controller file: \(audioPlaybackController.currentPlayingFileName ?? "nil"). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
-
-        if recordingVM.currentAudioFileName != fileName {
-            Log.info("[HomeView playAudio] SFCFN (\(recordingVM.currentAudioFileName ?? "nil")) != fileName (\(fileName)). Restoring SFCFN.", category: .ui)
-            withAnimation(AnimationConfig.standardResponse) {
-                 recordingVM.currentAudioFileName = fileName // SET FILENAME
-                 Log.info("[HomeView playAudio] Did set SFCFN to \(fileName). New SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
-            }
-        }
-
-        // **引用循环防护**：闭包存在 audioPlaybackController 身上、访问 recordingVM.currentAudioFileName，
-        // recordingVM 是 `@Observable` 引用类型，若闭包强捕获 recordingVM:
+        // **关键顺序**:callback 必须在 `play()` **之前**注册。AVAudioPlayer init 偶尔会同步抛
+        // (corrupt file / unsupported codec),controller.play 内 catch 后**同步** call onPlayError。
+        // 之前的顺序是 play → 设回调,这种同步错误就丢了 banner 不会显示。
+        //
+        // **引用循环防护**:闭包存在 audioPlaybackController 身上、访问 recordingVM.currentAudioFileName,
+        // recordingVM 是 `@Observable` 引用类型,若闭包强捕获 recordingVM:
         // closure → recordingVM → (nothing back) —— VM 不持 controller,不成环。
         // 但 HomeView 的 @StateObject 存储仍是引用语义,self-capture 仍有风险。
-        // 做法：抓 [weak audioPlaybackController, weak recordingVM]；不在闭包里提到 self。
+        // 做法:抓 [weak audioPlaybackController, weak recordingVM];不在闭包里提到 self。
         audioPlaybackController.onFinishPlaying = { [weak audioPlaybackController, weak recordingVM, capturedFileName = fileName] in
             Task { @MainActor in
                 guard let controller = audioPlaybackController else { return }
@@ -1337,6 +1450,9 @@ struct HomeView: View {
             Task { @MainActor in
                 guard let controller = audioPlaybackController else { return }
                 Log.error("[HomeView playAudio CB_Error] Playback error for \(capturedFileName): \(error.localizedDescription)", category: .ui)
+                // **失败提示**:之前只 log,用户感知不到。塞进 VM 让 banner 显示。
+                recordingVM?.audioPlaybackError = NSLocalizedString("无法播放该录音,文件可能已损坏或丢失。",
+                                                                    comment: "Audio playback failure banner")
                 if recordingVM?.currentAudioFileName == nil && capturedFileName == controller.currentPlayingFileName {
                     withAnimation(AnimationConfig.standardResponse) {
                         recordingVM?.currentAudioFileName = capturedFileName
@@ -1345,6 +1461,19 @@ struct HomeView: View {
                 if controller.currentPlayingFileName == capturedFileName {
                     controller.stopPlayback(clearCurrentFile: true)
                 }
+            }
+        }
+
+        // **真正调 play 在回调装好之后**,见上方注释。同步抛错时 onPlayError 已经能接到。
+        Log.info("[HomeView playAudio] Calling controller.play for: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+        audioPlaybackController.play(url: audioURL, fileName: fileName)
+        Log.info("[HomeView playAudio] Called controller.play. Controller isPlaying: \(audioPlaybackController.isPlaying), Controller file: \(audioPlaybackController.currentPlayingFileName ?? "nil"). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+
+        if recordingVM.currentAudioFileName != fileName {
+            Log.info("[HomeView playAudio] SFCFN (\(recordingVM.currentAudioFileName ?? "nil")) != fileName (\(fileName)). Restoring SFCFN.", category: .ui)
+            withAnimation(AnimationConfig.standardResponse) {
+                 recordingVM.currentAudioFileName = fileName // SET FILENAME
+                 Log.info("[HomeView playAudio] Did set SFCFN to \(fileName). New SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
             }
         }
         Log.info("[HomeView playAudio END] For: \(fileName). SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
@@ -1358,7 +1487,7 @@ struct HomeView: View {
 
     private func deleteEntry(_ entry: DiaryEntry) {
         // Check if the entry to be deleted is the currently selected one for navigation
-        if selectedEntry == entry {
+        if selectedEntry?.objectID == entry.objectID {
             selectedEntry = nil // Prevent navigation to a deleted item
         }
 
@@ -1367,29 +1496,25 @@ struct HomeView: View {
             self.audioPlaybackController.stopPlayback(clearCurrentFile: true)
         }
         
+        let imageFileNames = entry.imageFileNameArray
+        let audioFileName = entry.audioFileName
+
         // Perform deletion within a withAnimation block for smoother UI updates
         withAnimation {
-            // 先清磁盘附件（图片 + 音频），再 delete managed object——
-            // managed object 被 delete 之后访问 audioFileName / imageFileNames 会出脏数据。
-            entry.deleteAllImages()
-            entry.deleteAudioFile()
-
             viewContext.delete(entry)
             
             do {
                 try viewContext.save()
-                #if canImport(UIKit)
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                #endif
-                // 删除可能让当前固定周期从"已完成"变"未完成",通知逻辑要重新评估。
-                ReminderService.shared.requestReschedule()
-                // 删除 entry 后,pending 队列里引用此 entry 独有 tag 的 suggestion 变成孤儿,
-                // 后台扫一次清理掉。fire-and-forget。
-                Task { await ThemeAliasResolver.shared.cleanupOrphanedPending() }
+                HapticManager.shared.impact(.medium)
+                // 单删派生缓存清理统一走 EntryWipeOrchestrator(Reminder + Prompt + Insights + alias 孤儿清理)。
+                EntryWipeOrchestrator.performSingleDeleteCleanup()
+                Task.detached(priority: .utility) {
+                    deleteHomeEntryAttachmentFiles(imageFileNames: imageFileNames, audioFileName: audioFileName)
+                }
             } catch {
                 // Log the error appropriately
                 Log.error("[HomeView] 删除日记失败: \(error.localizedDescription)", category: .ui)
-                // Potentially show an error to the user
+                viewContext.rollback()
             }
         }
 
@@ -1397,26 +1522,6 @@ struct HomeView: View {
         // If this closure is part of an alert, ensure it's cleared
         // whether the operation succeeded or failed, to reset state.
         entryToDelete = nil
-    }
-    
-    // MARK: - Database Recreation Observer
-    
-    private func setupDatabaseRecreationObserver() {
-        databaseRecreationObserver = NotificationCenter.default.addObserver(
-            forName: .databaseRecreated,
-            object: nil,
-            queue: .main
-        ) { _ in
-            Log.info("[HomeView] Database recreated notification received", category: .ui)
-            handleDatabaseRecreation()
-        }
-    }
-    
-    private func removeDatabaseRecreationObserver() {
-        if let observer = databaseRecreationObserver {
-            NotificationCenter.default.removeObserver(observer)
-            databaseRecreationObserver = nil
-        }
     }
     
     private func handleDatabaseRecreation() {
@@ -1436,7 +1541,10 @@ struct HomeView: View {
         inputVM.moodValue = 0.5
 
         // Cancel any ongoing tasks
+        transcriptionGeneration &+= 1
         recordingVM.transcriptionTask?.cancel()
+        recordingVM.transcriptionTask = nil
+        recordingVM.isTranscribing = false
         
         // Force Core Data to refresh
         viewContext.refreshAllObjects()
@@ -1535,6 +1643,10 @@ extension HomeView {
             matching: .images
         )
         .onChange(of: photoVM.selectedPhotos) { _, newValue in
+            if photoVM.suppressNextPhotoSelectionReload {
+                photoVM.suppressNextPhotoSelectionReload = false
+                return
+            }
             // F1 fix:取消上一轮压缩任务。否则用户快速换选时,旧任务可能后完成
             // 覆盖掉新结果(stale write)。
             photoVM.photoLoadTask?.cancel()
@@ -1548,12 +1660,15 @@ extension HomeView {
             if recorder.isRecording {
                 Task { await handleStopRecording() }
             } else {
-                recorder.startRecording()
-                #if canImport(UIKit)
-                // 录音开始的第二记重一些的反馈,告诉用户"已经在录了" ——
-                // 不只是按下按钮,而是确认进入了录音状态。
-                HapticManager.shared.notification(.success)
-                #endif
+                // **只有真开始录才发 success haptic**:首次点录音 + 权限未定时 startRecording 只触发
+                // 授权 alert 立刻返 false,实际不录;此时发 success haptic 暗示"已开始"是误导。
+                // 用户授权完后还得再点一次才会真录起来 — 那次返 true 才发 haptic。
+                let didStart = recorder.startRecording()
+                if didStart {
+                    #if canImport(UIKit)
+                    HapticManager.shared.notification(.success)
+                    #endif
+                }
             }
         } label: {
             Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic")

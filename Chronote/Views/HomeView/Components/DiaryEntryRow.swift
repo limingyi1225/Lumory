@@ -14,86 +14,97 @@ struct DiaryEntryRow: View {
 
     /// 标题是否正在加载（summary为nil但text存在）
     private var isSummaryLoading: Bool {
-        entry.summary == nil && !(entry.text ?? "").isEmpty
+        guard entry.managedObjectContext != nil, !entry.isDeleted else { return false }
+        return entry.summary == nil && !(entry.text ?? "").isEmpty
+    }
+
+    private var hasAnalyzedMood: Bool {
+        abs(entry.moodValue - 0.5) > 0.0001 && abs(entry.moodValue) > 0.0001
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            // Date badge
-            dateBadge
+        Group {
+            if entry.managedObjectContext == nil || entry.isDeleted {
+                EmptyView()
+            } else {
+                HStack(alignment: .top, spacing: 16) {
+                    // Date badge
+                    dateBadge
 
-            // Content
-            VStack(alignment: .leading, spacing: 8) {
-                // Summary or text preview with loading animation
-                if isSummaryLoading {
-                    // 标题加载中 - 显示shimmer动画
-                    summaryLoadingView
-                } else {
-                    Text(entry.displayText)
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(.primary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
+                    // Content
+                    VStack(alignment: .leading, spacing: 8) {
+                        // Summary or text preview with loading animation
+                        if isSummaryLoading {
+                            // 标题加载中 - 显示shimmer动画
+                            summaryLoadingView
+                        } else {
+                            Text(entry.displayText)
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(.primary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                        }
+
+                        // Metadata row
+                        HStack(spacing: 12) {
+                            // Mood indicator — 0.5 是 neutral sentinel（当前默认值），0.0 是老版本的
+                            // Core Data 默认值（升级用户 / CloudKit 老记录可能带 0.0），两者都视作
+                            // "未分析"隐藏掉 indicator。AI 真实返回值落在开区间 (0,1)，精确命中
+                            // 0.0 或 0.5 的概率极低，作 sentinel 够用。浮点比较用 tolerance 防御桥接误差。
+                            if hasAnalyzedMood {
+                                MoodIndicator(value: entry.moodValue)
+                            }
+
+                            // Audio indicator
+                            if entry.audioFileName != nil {
+                                Label("", systemImage: "waveform")
+                                    .font(.caption)
+                                    .foregroundColor(.blue)
+                            }
+
+                            // Image indicator
+                            if !entry.imageFileNameArray.isEmpty {
+                                Label("\(entry.imageFileNameArray.count)", systemImage: "photo")
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                            }
+
+                            Spacer()
+
+                            // Time
+                            Text(timeString)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    // Thumbnail
+                    if let thumbnailImage {
+                        #if canImport(UIKit)
+                        Image(uiImage: thumbnailImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 40, height: 40)
+                            .clipped()
+                            .cornerRadius(8)
+                        #elseif canImport(AppKit)
+                        Image(nsImage: thumbnailImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 40, height: 40)
+                            .clipped()
+                            .cornerRadius(8)
+                        #endif
+                    } else if !entry.imageFileNameArray.isEmpty {
+                        // 只有"这条日记确实有图片、但还在加载"的时候才显示占位；
+                        // 根本没图的日记不再显示误导性的照片占位图。
+                        Image(systemName: "photo")
+                            .foregroundColor(.secondary)
+                            .frame(width: 40, height: 40)
+                            .background(Color.secondary.opacity(0.1))
+                            .cornerRadius(8)
+                    }
                 }
-                
-                // Metadata row
-                HStack(spacing: 12) {
-                    // Mood indicator — 0.5 是 neutral sentinel（当前默认值），0.0 是老版本的
-                    // Core Data 默认值（升级用户 / CloudKit 老记录可能带 0.0），两者都视作
-                    // "未分析"隐藏掉 indicator。AI 真实返回值落在开区间 (0,1)，精确命中
-                    // 0.0 或 0.5 的概率极低，作 sentinel 够用。
-                    if entry.moodValue != 0.5 && entry.moodValue != 0.0 {
-                        MoodIndicator(value: entry.moodValue)
-                    }
-                    
-                    // Audio indicator
-                    if entry.audioFileName != nil {
-                        Label("", systemImage: "waveform")
-                            .font(.caption)
-                            .foregroundColor(.blue)
-                    }
-                    
-                    // Image indicator
-                    if !entry.imageFileNameArray.isEmpty {
-                        Label("\(entry.imageFileNameArray.count)", systemImage: "photo")
-                            .font(.caption)
-                            .foregroundColor(.green)
-                    }
-                    
-                    Spacer()
-                    
-                    // Time
-                    Text(timeString)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            
-            // Thumbnail
-            if let thumbnailImage {
-                #if canImport(UIKit)
-                Image(uiImage: thumbnailImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 40, height: 40)
-                    .clipped()
-                    .cornerRadius(8)
-                #elseif canImport(AppKit)
-                Image(nsImage: thumbnailImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 40, height: 40)
-                    .clipped()
-                    .cornerRadius(8)
-                #endif
-            } else if !entry.imageFileNameArray.isEmpty {
-                // 只有"这条日记确实有图片、但还在加载"的时候才显示占位；
-                // 根本没图的日记不再显示误导性的照片占位图。
-                Image(systemName: "photo")
-                    .foregroundColor(.secondary)
-                    .frame(width: 40, height: 40)
-                    .background(Color.secondary.opacity(0.1))
-                    .cornerRadius(8)
             }
         }
         .padding()
@@ -165,14 +176,14 @@ struct DiaryEntryRow: View {
             Text(dayString)
                 .font(.system(size: 24, weight: .bold))
                 .foregroundColor(.primary)
-            
+
             Text(monthString)
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
         .frame(width: 50)
     }
-    
+
     // ** 静态缓存的 DateFormatter **：老实现每次 body eval 都 new 一次 DateFormatter，
     // scroll 500 条日记时每次 diff 触发数千次 ICU locale 加载。按 (kind, language) 缓存一次就够。
     private var dayString: String { Self.cachedFormatter(kind: .day, language: appLanguage).string(from: entry.wrappedDate) }
@@ -199,7 +210,8 @@ struct DiaryEntryRow: View {
     }
 
     private var thumbnailFileName: String? {
-        entry.imageFileNameArray.first
+        guard entry.managedObjectContext != nil, !entry.isDeleted else { return nil }
+        return entry.imageFileNameArray.first
     }
 
     @MainActor
@@ -227,19 +239,19 @@ struct DiaryEntryRow: View {
 // MARK: - Supporting Views
 struct MoodIndicator: View {
     let value: Double
-    
+
     var body: some View {
         HStack(spacing: 4) {
             Circle()
                 .fill(Color.moodSpectrum(value: value))
                 .frame(width: 8, height: 8)
-            
+
             Text(moodText)
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
     }
-    
+
     private var moodText: String {
         switch value {
         case 0..<0.2:

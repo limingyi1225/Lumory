@@ -141,10 +141,7 @@ struct DiaryPreviewView: View {
     }
 
     private func cleanedSummary(_ raw: String) -> String {
-        raw
-            .replacingOccurrences(of: ".", with: "")
-            .replacingOccurrences(of: "。", with: "")
-            .replacingOccurrences(of: "*", with: "")
-            .replacingOccurrences(of: "\"", with: "")
+        raw.trimmingCharacters(in: CharacterSet(charactersIn: "*\"“”'‘’ \n\t"))
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".。"))
     }
 }

@@ -44,4 +44,7 @@ final class HomeRecordingViewModel {
     /// 上次转写失败原因。nil 表示无错误,UI 不显示 banner。
     /// 重试成功 / 用户开始新录音时清零。
     var transcriptionError: TranscriptionFailure?
+
+    /// 音频播放失败的提示文案。nil 表示无错。播放重试 / 用户主动关 banner / 删除录音 → 清零。
+    var audioPlaybackError: String?
 }

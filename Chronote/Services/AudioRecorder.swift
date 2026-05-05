@@ -6,6 +6,14 @@ import SwiftUI
 final class AudioRecorder: NSObject, ObservableObject {
     @Published var isRecording = false
     @Published var amplitude: Float = 0 // 0.0 ~ 1.0 之间，代表当前音量大小
+    /// 中断 (电话 / Siri / 其他音频) 后被自动停下、且时长 ≥ 0.5s 已落盘的录音文件名。
+    /// HomeView observe 这个 @Published,把文件名接进 audioRecordings 让用户看到录到的段落,
+    /// 避免中断把已录的内容默默丢掉。HomeView 消费后置 nil。
+    @Published var interruptedRecordingFileName: String?
+    /// 标记当前是否在等待权限授权回调。**用 token 防 stale grant 误启**:用户点 mic → 弹 alert
+    /// → 在用户做选择之前 navigate 走 / 切 view → 老 grant 回调到 .granted 时,startRecording
+    /// 已经不该跑了。token 不一致就 abort。
+    private var pendingPermissionToken: Int = 0
     private var recorder: AVAudioRecorder?
     private var meterTimer: Timer?
     private var startTime: Date?
@@ -37,45 +45,80 @@ final class AudioRecorder: NSObject, ObservableObject {
         #endif
     }
 
-    func startRecording() {
+    /// 开始录音。返回 `true` iff 立即开始了录制。返回 `false` 表示:
+    ///   - 权限未定 → 弹系统 alert,用户允许后**自动续录**(token-guarded);拒绝 → 不录
+    ///   - 权限被拒 → 不录
+    ///   - 配置失败 → 不录
+    /// 调用方据此决定是否发"已开始录"的 success haptic — 这一刻没真开始就别发,
+    /// 后续 grant 后的自动续录由 isRecording @Published 自动驱动 UI(stop 图标 / 计时器 / 波形都跟 isRecording)。
+    @discardableResult
+    func startRecording() -> Bool {
         guard !isRecording else {
             Log.warning("[AudioRecorder] startRecording called while already recording — ignoring", category: .audio)
-            return
+            return false
         }
         #if !os(macOS)
-        let permission = AVAudioSession.sharedInstance().recordPermission
-        switch permission {
-        case .undetermined:
-            if #available(iOS 17.0, *) {
-                AVAudioApplication.requestRecordPermission { [weak self] granted in
-                    Task { @MainActor in
+        if #available(iOS 17.0, *) {
+            switch AVAudioApplication.shared.recordPermission {
+            case .undetermined:
+                pendingPermissionToken &+= 1
+                let myToken = pendingPermissionToken
+                AVAudioApplication.requestRecordPermission { granted in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        // token 不一致 = 用户在 alert 弹出后已经离开了"我要录音"的意图。
+                        guard self.pendingPermissionToken == myToken else {
+                            Log.info("[AudioRecorder] Late mic grant ignored (token stale)", category: .audio)
+                            return
+                        }
                         guard granted else {
                             Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
                             return
                         }
-                        self?.startRecording()
+                        Log.info("[AudioRecorder] Mic permission granted — auto-starting recording", category: .audio)
+                        self.startRecording()
                     }
                 }
-            } else {
-                AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
-                    Task { @MainActor in
-                        guard granted else {
-                            Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
-                            return
-                        }
-                        self?.startRecording()
-                    }
-                }
+                return false
+            case .denied:
+                Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
+                return false
+            case .granted:
+                break
+            @unknown default:
+                Log.warning("[AudioRecorder] Unknown microphone permission status", category: .audio)
+                return false
             }
-            return
-        case .denied:
-            Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
-            return
-        case .granted:
-            break
-        @unknown default:
-            Log.warning("[AudioRecorder] Unknown microphone permission status", category: .audio)
-            return
+        } else {
+            switch AVAudioSession.sharedInstance().recordPermission {
+            case .undetermined:
+                pendingPermissionToken &+= 1
+                let myToken = pendingPermissionToken
+                AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        guard self.pendingPermissionToken == myToken else {
+                            Log.info("[AudioRecorder] Late mic grant ignored (token stale)", category: .audio)
+                            return
+                        }
+                        guard granted else {
+                            Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
+                            return
+                        }
+                        Log.info("[AudioRecorder] Mic permission granted — auto-starting recording", category: .audio)
+                        self.startRecording()
+                    }
+                }
+                return false
+            case .denied:
+                Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
+                return false
+            case .granted:
+                break
+            @unknown default:
+                Log.warning("[AudioRecorder] Unknown microphone permission status", category: .audio)
+                return false
+            }
         }
         #endif
         do {
@@ -127,8 +170,10 @@ final class AudioRecorder: NSObject, ObservableObject {
 
             isRecording = true
             Log.info("[AudioRecorder] Recording started. File URL: \(url.path)", category: .audio)
+            return true
         } catch {
             Log.error("[AudioRecorder] Could not start recording: \(error)", category: .audio)
+            return false
         }
     }
 
@@ -189,8 +234,14 @@ final class AudioRecorder: NSObject, ObservableObject {
         case .began:
             // 中断开始：停止录音、把已录的段落保留给用户
             if isRecording {
-                _ = stopRecording()
-                Log.info("[AudioRecorder] Interruption began — stopped recording", category: .audio)
+                let filename = stopRecording()
+                if let filename {
+                    // **关键**:把 filename 透出给 HomeView。stopRecording 内部已经处理 < 0.5s 删文件
+                    // 返 nil 的 case;非 nil 表示文件留在磁盘上,UI 必须能 surface 出来,否则用户的
+                    // 录音段落就丢了。HomeView 消费后置 nil。
+                    interruptedRecordingFileName = filename
+                }
+                Log.info("[AudioRecorder] Interruption began — stopped recording (file=\(filename ?? "nil"))", category: .audio)
             }
         case .ended:
             // 中断结束不自动续录；让用户自己决定是否再开一段
@@ -234,11 +285,8 @@ final class AudioRecorder: NSObject, ObservableObject {
         } else {
             elapsed = duration
         }
-        // Update published properties on main thread
-        Task { @MainActor in
-            self.amplitude = level
-            self.duration = elapsed
-        }
+        amplitude = level
+        duration = elapsed
     }
 
     deinit {

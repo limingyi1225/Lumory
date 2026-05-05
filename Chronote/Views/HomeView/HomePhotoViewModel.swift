@@ -30,6 +30,9 @@ final class HomePhotoViewModel {
     /// 上一次的 photo 压缩任务,选择变化时取消,防止旧任务回来覆盖新结果(F1 race fix)。
     var photoLoadTask: Task<Void, Never>?
 
+    /// 压缩完成后会把 `selectedPhotos` 剪枝到成功项;这次程序性写回不应再次触发压缩。
+    var suppressNextPhotoSelectionReload = false
+
     /// 压缩成功后的 JPEG Data + 稳定 UI identity,和 selectedPhotos 严格等长、同序。
     var selectedImageItems: [SelectedImage] = []
 
@@ -38,4 +41,8 @@ final class HomePhotoViewModel {
         get { selectedImageItems.map(\.data) }
         set { selectedImageItems = newValue.map { SelectedImage(data: $0) } }
     }
+
+    /// 上一次压缩中失败的张数;非 0 时 HomeView 显示 inline toast 让用户知道有多少张被吞了。
+    /// 用户主动关掉 / 重新选 → 清零。
+    var compressionFailureCount: Int = 0
 }

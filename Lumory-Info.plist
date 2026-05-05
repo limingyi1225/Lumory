@@ -16,6 +16,8 @@
 	<false/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Lumory uses the microphone to record voice notes for your diary. Recordings are sent through Lumory's backend to OpenAI for transcription and are not retained by either service after processing.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Lumory uses Face ID to lock your diary. You can turn this off in Settings.</string>
 	<!-- 自定义 key — 客户端共享密钥。值由 Xcode build settings 的 APP_SHARED_SECRET 替换，
 	     该变量由 Lumory.local.xcconfig（gitignored）注入。AppSecrets.swift 在运行时读取本键。
 	     如果 build settings 没设这个变量，下面字符串会保留 "$(APP_SHARED_SECRET)" 字面量，

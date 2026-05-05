@@ -23,6 +23,8 @@ struct ChronoteApp: App {
     let persistenceController = PersistenceController.shared
     @StateObject private var importService = CoreDataImportService()
     @StateObject private var syncMonitor = CloudKitSyncMonitor(container: PersistenceController.shared.container)
+    @ObservedObject private var appLockService = AppLockService.shared
+    @ObservedObject private var milestoneService = StreakMilestoneService.shared
     @Environment(\.scenePhase) private var scenePhase
     // **App Group store** —— widget 跟主 App 共享同一份 `appLanguage`,主 App 切语言 widget 跟着走。
     // 读取链在 `LocalizationHelper.appLanguageBundle`,有 standard 回退,不会因 App Group 暂不可用而崩。
@@ -38,6 +40,8 @@ struct ChronoteApp: App {
     @State private var remoteChangeObserver: NSObjectProtocol?
     @State private var memoryWarningObserver: NSObjectProtocol?
     @State private var storeLoadErrorMessage: String?
+    private static let deleteCacheCompatibilityDoneKey = "lumory.compatibility.20260504.deleteCacheCleanup.done"
+
     init() {
         #if canImport(UIKit)
         UITableView.appearance().separatorStyle = .none
@@ -99,6 +103,11 @@ struct ChronoteApp: App {
         // Cleanup old backups periodically
         DatabaseRecoveryService.shared.cleanupOldBackups()
 
+        // 老版本单条删除没有完整清理所有派生缓存。Core Data 里的日记本身已经删除,
+        // 但首页/AskPast 提示缓存、widget snapshot、theme alias pending 可能仍引用已删主题。
+        // 升级后跑一次轻量 cleanup:不扫正文、不删真实 entry,只丢可再生缓存并让 widget 重投影当前数据库。
+        runDeleteCacheCompatibilityCleanup()
+
         // wordCount 回填：每次启动扫一遍 wordCount=0 的条目。
         // 没有 flag，因为 CloudKit 后续 pull 进来的老条目也需要补算——
         // fetchCount 有命中才真执行，代价只是一条 SQL count。本地计算、不走网络，
@@ -128,6 +137,24 @@ struct ChronoteApp: App {
         // 结论：不自动跑。v3→v4 用户首次升级后主动去 Settings 点一次"一键重建索引"，
         // 流程清晰、进度 UI 真实反映网络问题、失败可重试。之后要加 auto 需要先把 service
         // 换成 actor-safe 的 lifecycle 管理。
+    }
+
+    private func runDeleteCacheCompatibilityCleanup() {
+        guard !persistenceController.isInMemory else { return }
+
+        let defaults = AppGroup.userDefaults
+        let doneKey = Self.deleteCacheCompatibilityDoneKey
+        guard !defaults.bool(forKey: doneKey) else { return }
+
+        let persistence = persistenceController
+        Task { @MainActor in
+            PromptSuggestionEngine.shared.clearCache()
+            await WidgetSnapshotService.shared.clear()
+            await ThemeAliasResolver.shared.cleanupOrphanedPending()
+            await WidgetSnapshotService.shared.requestRefresh(persistence: persistence, bypassDebounce: true)
+            defaults.set(true, forKey: doneKey)
+            Log.info("[ChronoteApp] Delete cache compatibility cleanup finished", category: .persistence)
+        }
     }
     
     // Pre-warm animations for better performance
@@ -168,32 +195,65 @@ struct ChronoteApp: App {
     }
     
     private func migrateExistingImagesToiCloud() {
-        // 启动时不阻塞主线程：一次性把旧日记的图片迁进 CloudKit sync 字段。
+        // 启动时不阻塞主线程：把旧日记的图片迁进 CloudKit sync 字段。
+        // 不加一次性 done flag：CloudKit / restore 可能在首次空扫描之后才拉到旧条目，幂等重扫更安全。
         // 走后台 context，所有对 managed object 属性的读写都在其专属 queue 上进行。
+
         Task.detached(priority: .utility) {
             let bg = PersistenceController.shared.container.newBackgroundContext()
             await bg.perform {
                 let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+                request.predicate = NSPredicate(
+                    format: "imageFileNames != nil AND imageFileNames != '' AND imagesData == nil"
+                )
+                request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: true)]
+                request.fetchBatchSize = 50
                 guard let entries = try? bg.fetch(request) else { return }
+                guard !entries.isEmpty else { return }
 
                 var migrated = 0
-                for entry in entries where !entry.imageFileNameArray.isEmpty && entry.imagesData == nil {
-                    let images = entry.imageFileNameArray.compactMap { entry.loadImageData(fileName: $0) }
-                    guard !images.isEmpty else { continue }
+                var scanned = 0
+                var saveFailed = false
+
+                for entry in entries {
+                    scanned += 1
+                    let fileNames = entry.imageFileNameArray
+                    let images = fileNames.compactMap { DiaryEntry.loadImageData(fileName: $0) }
+                    guard !images.isEmpty, images.count == fileNames.count else {
+                        continue
+                    }
 
                     let compressed = images.map { DiaryEntry.compressImageData($0) }
-                    if let data = try? NSKeyedArchiver.archivedData(withRootObject: compressed, requiringSecureCoding: false) {
+                    if let data = try? NSKeyedArchiver.archivedData(withRootObject: compressed, requiringSecureCoding: true) {
                         entry.imagesData = data
                         migrated += 1
                     }
+
+                    if scanned % 50 == 0, bg.hasChanges {
+                        do {
+                            try bg.save()
+                        } catch {
+                            bg.rollback()
+                            saveFailed = true
+                            Log.error("[ChronoteApp] Failed to save image migration batch: \(error)", category: .ui)
+                            break
+                        }
+                    }
                 }
 
-                if migrated > 0, bg.hasChanges {
+                if !saveFailed, bg.hasChanges {
                     do {
                         try bg.save()
-                        Log.info("[ChronoteApp] Migrated images for \(migrated) entries to sync data", category: .ui)
                     } catch {
+                        bg.rollback()
+                        saveFailed = true
                         Log.error("[ChronoteApp] Failed to save image migration: \(error)", category: .ui)
+                    }
+                }
+
+                if !saveFailed {
+                    if migrated > 0 {
+                        Log.info("[ChronoteApp] Migrated images for \(migrated) entries to sync data", category: .ui)
                     }
                 }
             }
@@ -213,8 +273,26 @@ struct ChronoteApp: App {
                     SplashView()
                         .transition(.opacity)
                 }
+
+                // Streak milestone celebration — 命中 7/14/30/60/100/(+100) 时盖一个 overlay,
+                // ~3s 自动 fade。比 LockScreen zIndex 低,锁屏时不会同时弹出。
+                if let milestone = milestoneService.pendingMilestone {
+                    StreakMilestoneCelebration(milestone: milestone) {
+                        milestoneService.dismiss()
+                    }
+                    .transition(.opacity)
+                    .zIndex(50)
+                }
+
+                // App lock — 启用 + 锁定时盖在所有内容(含 splash + milestone)上,确保任何状态都看不到日记。
+                if appLockService.isEnabled && appLockService.isLocked {
+                    LockScreenView()
+                        .transition(.opacity)
+                        .zIndex(100)
+                }
             }
             .animation(.easeInOut(duration: 0.8), value: showSplash)
+            .animation(.easeInOut(duration: 0.25), value: appLockService.isLocked)
             .environment(\.managedObjectContext, persistenceController.container.viewContext)
             .environment(\.aiService, OpenAIService.shared)
             .environmentObject(importService)
@@ -278,6 +356,16 @@ struct ChronoteApp: App {
                 }
                 #endif
             }
+            .onDisappear {
+                if let remoteChangeObserver {
+                    NotificationCenter.default.removeObserver(remoteChangeObserver)
+                    self.remoteChangeObserver = nil
+                }
+                if let memoryWarningObserver {
+                    NotificationCenter.default.removeObserver(memoryWarningObserver)
+                    self.memoryWarningObserver = nil
+                }
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 handleScenePhaseChange(newPhase)
             }
@@ -314,6 +402,8 @@ struct ChronoteApp: App {
                     Log.error("[ChronoteApp] scenePhase=background — save failed: \(error)", category: .ui)
                 }
             }
+            // App lock:进 background 锁。但 inactive 也得锁(见下方 .inactive 分支)。
+            AppLockService.shared.lockOnBackground()
         case .active:
             // 重新上前台：触发一次 CloudKit 状态检查,顺带把远端变更拉下来。
             // `checkCloudKitStatus()` 内部有 30s 冷却(see CloudKitSyncMonitor),频繁
@@ -325,7 +415,10 @@ struct ChronoteApp: App {
             // task cancel + replace,频繁 active/background 切换不会堆 task。
             ReminderService.shared.requestReschedule()
         case .inactive:
-            break
+            // **必须在 inactive 锁,不能等 background**:iOS 在 .inactive 阶段就给 app switcher
+            // 截屏。如果到 .background 才锁,multitasking 预览能看到日记 timeline。
+            // 在 .inactive 立刻 set isLocked → SwiftUI 一帧渲染 LockScreenView → 系统截到锁屏画面。
+            AppLockService.shared.lockOnBackground()
         @unknown default:
             break
         }

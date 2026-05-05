@@ -7,3 +7,6 @@
 
 /* 麦克风使用权限描述 */
 "NSMicrophoneUsageDescription" = "Lumory 使用麦克风为您录制语音日记。录音会通过 Lumory 后端发送给 OpenAI 进行转写，转写完成后双方均不留存。";
+
+/* Face ID 使用权限描述 */
+"NSFaceIDUsageDescription" = "Lumory 用 Face ID 给你的日记上锁。可在设置里关闭。";

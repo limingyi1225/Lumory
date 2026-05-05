@@ -7,3 +7,6 @@
 
 /* Microphone Usage Description */
 "NSMicrophoneUsageDescription" = "Lumory uses the microphone to record voice notes for your diary. Recordings are sent through Lumory's backend to OpenAI for transcription and are not retained by either service after processing.";
+
+/* Face ID Usage Description */
+"NSFaceIDUsageDescription" = "Lumory uses Face ID to lock your diary. You can turn this off in Settings.";

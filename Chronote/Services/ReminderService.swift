@@ -187,6 +187,7 @@ final class ReminderService: ObservableObject {
     /// 单条挂完 fire 一次后就再无 reminder 了。挂未来 N 条 → 用户即使连续 N 个 cycle 不开 App
     /// 仍能收到 reminder。N=8 的覆盖能力:daily 8 天 / 3-day 24 天 / weekly 8 周。
     /// reschedule 时 `identifierPrefix` 前缀 cancel 全清,然后重新挂,保证幂等。
+    /// identifier 会带上 generation,防止 stale reschedule task add 完成后误删新一代通知。
     private let identifierCycleEndPrefix = "lumory.reminder.cycleEnd"
     /// 未来 cycle-end 通知挂多少条。iOS UN 限 64 pending/app,8 是安全又够用的折中。
     private let maxFutureFallbacks = 8
@@ -471,6 +472,67 @@ final class ReminderService: ObservableObject {
         await applyComputedInfo(info)
     }
 
+    /// "下次提醒"时间。Settings UI 显示用。
+    ///
+    /// **不读 UNUserNotificationCenter pending list** —— 那条路径有竞态:用户切 frequency picker 时,
+    /// `updateFrequency` 调 `requestReschedule()` 是 fire-and-forget Task,**还没跑完**。
+    /// SettingsView `.onChange(of: reminderService.frequency)` 同帧 fire,如果这一刻 peek 读 pending list,
+    /// 拿到的还是上一个 frequency 的 stale 通知,UI 显示一个错的"下次时间"且来回拨 picker 会漂。
+    ///
+    /// 改成 **纯函数**:基于当前 `frequency` / `hour` / `minute` / `anchorDate` 直接算。这跟 schedule
+    /// 路径用同一份 `cycleBounds`,语义一致但不依赖异步 reschedule 完成。
+    func peekNextFireDate() -> Date? {
+        guard isEnabled else { return nil }
+        return Self.nextFireDate(
+            isEnabled: true,
+            frequency: frequency,
+            hour: hour,
+            minute: minute,
+            anchor: anchorDate,
+            referenceDate: Date(),
+            calendar: Calendar.current
+        )
+    }
+
+    /// 纯函数版本 — 给 UI 同步算 + 给单测注入 referenceDate / calendar。
+    /// 对单测的 fixture 必须用 `nonisolated static`,这里给统一入口。
+    ///
+    /// **算法**:从 referenceDate 所在的 cycle 起,逐 cycle 找一个 fireTime > referenceDate。
+    /// fireTime = "cycle 最后一天" hour:minute(因为 cycleEnd 是 exclusive 上界,真正"该日"是 end-1)。
+    /// **不查 wroteCurrentCycle** —— 那个状态会因为 reschedule 异步而 stale,且用户在 Settings 看到
+    /// "下次提醒 周三 21:00"是个 *计划* 而非保证,跟实际"今天写过就 skip"的 schedule 行为有 1-cycle 偏差是
+    /// 可接受的(用户期望的是 picker 立刻反映新值)。
+    nonisolated static func nextFireDate(
+        isEnabled: Bool,
+        frequency: ReminderFrequency,
+        hour: Int,
+        minute: Int,
+        anchor: Date,
+        referenceDate: Date,
+        calendar: Calendar
+    ) -> Date? {
+        guard isEnabled else { return nil }
+        var bounds = cycleBounds(referenceDate: referenceDate, anchor: anchor, frequency: frequency, calendar: calendar)
+        // 安全 cap:理论上当前 cycle fireTime 不行就跳到下个 cycle 必然 fire(同 hour:minute 在未来必定大于 now)。
+        // cap 32 防 calendar.date 失败时死循环。
+        for _ in 0..<32 {
+            let lastDay = calendar.date(byAdding: .day, value: -1, to: bounds.end) ?? bounds.end
+            var comps = calendar.dateComponents([.year, .month, .day], from: lastDay)
+            comps.hour = hour
+            comps.minute = minute
+            if let fire = calendar.date(from: comps), fire > referenceDate {
+                return fire
+            }
+            // 该 cycle 的 fireTime 已过 → 跳到下一个 cycle
+            guard
+                let nextStart = calendar.date(byAdding: .day, value: frequency.cycleDays, to: bounds.start),
+                let nextEnd = calendar.date(byAdding: .day, value: frequency.cycleDays, to: nextStart)
+            else { return nil }
+            bounds = (nextStart, nextEnd)
+        }
+        return nil
+    }
+
     // MARK: - Reschedule core
 
     private func doReschedule(gen: Int) async {
@@ -525,8 +587,9 @@ final class ReminderService: ObservableObject {
             if let fireTime = calendar.date(from: todayComps), fireTime > now {
                 await scheduleOneShot(
                     at: fireTime,
-                    identifier: identifierToday,
-                    daysSilent: info.daysSinceLastEntry
+                    identifier: generationScopedIdentifier(identifierToday, gen: gen),
+                    daysSilent: info.daysSinceLastEntry,
+                    gen: gen
                 )
                 guard gen == currentRescheduleGen else { return }
             }
@@ -568,8 +631,9 @@ final class ReminderService: ObservableObject {
                 }()
                 await scheduleOneShot(
                     at: fireTime,
-                    identifier: "\(identifierCycleEndPrefix).\(scheduledCount)",
-                    daysSilent: daysSilent
+                    identifier: "\(generationScopedIdentifier(identifierCycleEndPrefix, gen: gen)).\(scheduledCount)",
+                    daysSilent: daysSilent,
+                    gen: gen
                 )
                 scheduledCount += 1
                 guard gen == currentRescheduleGen else { return }
@@ -590,8 +654,9 @@ final class ReminderService: ObservableObject {
         )
     }
 
-    private func scheduleOneShot(at fireTime: Date, identifier: String, daysSilent: Int?) async {
+    private func scheduleOneShot(at fireTime: Date, identifier: String, daysSilent: Int?, gen: Int) async {
         #if canImport(UserNotifications)
+        guard gen == currentRescheduleGen else { return }
         let center = UNUserNotificationCenter.current()
         let content = UNMutableNotificationContent()
         content.title = NSLocalizedString("Lumory", comment: "Reminder title")
@@ -616,10 +681,17 @@ final class ReminderService: ObservableObject {
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
         do {
             try await center.add(request)
+            if gen != currentRescheduleGen {
+                center.removePendingNotificationRequests(withIdentifiers: [identifier])
+            }
         } catch {
             Log.error("[ReminderService] schedule failed (\(identifier)): \(error)", category: .general)
         }
         #endif
+    }
+
+    private func generationScopedIdentifier(_ base: String, gen: Int) -> String {
+        "\(base).gen\(gen)"
     }
 
     /// 通知文案根据 frequency + daysSilent 动态化。
@@ -717,7 +789,7 @@ final class ReminderService: ObservableObject {
 
     /// 获取最近一篇 entry 的日期。**date 上限 cap 在 now**(防御 codex P1 #2:
     /// 用户导入或手动编辑造成的未来日期会让 wroteCurrentCycle 误判)。
-    /// nil = 没有任何 entry 或 fetch 失败。
+    /// nil = 没有任何 entry;fetch 失败会 log 后保守返回 nil。
     private func fetchLastEntryDate() async -> Date? {
         await PersistenceController.shared.container.performBackgroundTask { context in
             let request: NSFetchRequest<NSDictionary> = NSFetchRequest(entityName: "DiaryEntry")
@@ -727,8 +799,14 @@ final class ReminderService: ObservableObject {
             request.propertiesToFetch = ["date"]
             request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
             request.fetchLimit = 1
-            guard let rows = try? context.fetch(request),
-                  let row = rows.first,
+            let rows: [NSDictionary]
+            do {
+                rows = try context.fetch(request)
+            } catch {
+                Log.warning("[ReminderService] fetchLastEntryDate failed: \(error)", category: .general)
+                return nil
+            }
+            guard let row = rows.first,
                   let date = row["date"] as? Date else { return nil }
             return date
         }

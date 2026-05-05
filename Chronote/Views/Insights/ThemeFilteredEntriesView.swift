@@ -15,6 +15,8 @@ struct ThemeFilteredEntriesView: View {
     let onMerged: ((_ message: String) -> Void)?
     /// 父视图回调,处理删除主题后的 toast / 关 sheet。
     let onDeleted: ((_ name: String) -> Void)?
+    /// 父视图回调,处理 sheet 内单删 entry 后的聚合刷新。
+    let onEntryDeleted: (() -> Void)?
 
     @State private var entries: [DiaryEntry] = []
     /// merge sheet 的 trigger。`.sheet(item:)` 比 `.sheet(isPresented:)` 抗父级 reload —
@@ -23,6 +25,8 @@ struct ThemeFilteredEntriesView: View {
     @State private var mergeSubject: InsightsEngine.Theme?
     @State private var showDeleteAlert = false
     @State private var deleteFailureMessage: String?
+    /// 单删 entry confirmation。从 swipeAction / contextMenu 触发,跟 HomeView 同 pattern。
+    @State private var entryToDelete: DiaryEntry?
 
     var body: some View {
         NavigationStack {
@@ -46,6 +50,21 @@ struct ThemeFilteredEntriesView: View {
                             .listRowBackground(Color.clear)
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                            // 二级列表跟 HomeView 主时间线一致 — 左划删 / 长按弹菜单。
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    entryToDelete = entry
+                                } label: {
+                                    Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
+                                }
+                            }
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    entryToDelete = entry
+                                } label: {
+                                    Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
+                                }
+                            }
                         }
                     }
                     .listStyle(.plain)
@@ -55,6 +74,8 @@ struct ThemeFilteredEntriesView: View {
                     }
                 }
             }
+            .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.listContentMaxWidth)
+            .accessibilityIdentifier("themeFilteredEntriesContent")
             .navigationTitle(theme.name)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -84,8 +105,27 @@ struct ThemeFilteredEntriesView: View {
                     .accessibilityLabel(NSLocalizedString("更多操作", comment: "More actions"))
                 }
             }
-            .onAppear(perform: fetch)
-            .sheet(item: $mergeSubject) { subject in
+            .task { await fetch() }
+            .alert(
+                NSLocalizedString("删除日记", comment: "Delete entry"),
+                isPresented: Binding(
+                    get: { entryToDelete != nil },
+                    set: { if !$0 { entryToDelete = nil } }
+                )
+            ) {
+                Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
+                    if let entry = entryToDelete {
+                        deleteEntry(entry)
+                    }
+                    entryToDelete = nil
+                }
+                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {
+                    entryToDelete = nil
+                }
+            } message: {
+                Text(NSLocalizedString("此操作无法撤销。", comment: "Delete confirmation message"))
+            }
+            .lumoryAdaptiveModal(item: $mergeSubject) { subject in
                 ThemeMergeIntoSheet(
                     source: subject,
                     candidates: allThemes.filter { $0.id != subject.id }
@@ -162,12 +202,51 @@ struct ThemeFilteredEntriesView: View {
         }
     }
 
-    private func fetch() {
-        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
-        // UUID 不符合 CVarArg；需要桥接成 NSArray 让 Core Data 正确匹配每个 UUID。
-        // 旧代码 `as [CVarArg]` 在运行时会抛 "Could not cast value of type 'UUID' to 'CVarArg'"。
-        request.predicate = NSPredicate(format: "id IN %@", theme.entryIds as NSArray)
-        request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
-        entries = (try? viewContext.fetch(request)) ?? []
+    @MainActor
+    /// 单条删除走五件套 orchestrator(跟 HomeView / DiaryDetailView 同 pattern)。失败 rollback +
+    /// 显示 banner;成功后从本地 entries 列表移除避免动画抽搐。
+    private func deleteEntry(_ entry: DiaryEntry) {
+        let imageFileNames = entry.imageFileNameArray
+        let audioFileName = entry.audioFileName
+
+        viewContext.delete(entry)
+        do {
+            try viewContext.save()
+            HapticManager.shared.impact(.medium)
+            EntryWipeOrchestrator.performSingleDeleteCleanup()
+            withAnimation { entries.removeAll { $0.objectID == entry.objectID } }
+            onEntryDeleted?()
+            // attachment 清理走 fire-and-forget(跟 Home/Detail 同 idiom)
+            Task.detached(priority: .utility) {
+                for fn in imageFileNames {
+                    do { try DiaryEntry.deleteImageFromDocuments(fn) } catch { Log.error("[ThemeFiltered] image cleanup: \(error)", category: .ui) }
+                }
+                if let af = audioFileName, !af.isEmpty {
+                    DiaryEntry.deleteAudioFromDocuments(af)
+                }
+            }
+        } catch {
+            viewContext.rollback()
+            Log.error("[ThemeFilteredEntriesView] 删除日记失败: \(error)", category: .ui)
+            deleteFailureMessage = (error as NSError).localizedDescription
+        }
+    }
+
+    @MainActor
+    private func fetch() async {
+        let entryIds = theme.entryIds
+        // 走 keywordHits idiom:bg fetch [NSManagedObjectID] → main `existingObject`。
+        // theme.entryIds 可能 100+,主线程 `id IN %@` fetch 在 sheet 进入动画里会有感。
+        let objectIDs: [NSManagedObjectID] = await PersistenceController.shared.container
+            .performBackgroundTask { context in
+                let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+                // UUID 不符合 CVarArg；需要桥接成 NSArray 让 Core Data 正确匹配每个 UUID。
+                request.predicate = NSPredicate(format: "id IN %@", entryIds as NSArray)
+                request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+                request.propertiesToFetch = ["id"]
+                guard let rows = try? context.fetch(request) else { return [] }
+                return rows.map { $0.objectID }
+            }
+        entries = objectIDs.compactMap { try? viewContext.existingObject(with: $0) as? DiaryEntry }
     }
 }

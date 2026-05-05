@@ -11,6 +11,9 @@ struct DiaryExportView: View {
     
     @State private var isExporting = false
     @State private var showExportError = false
+    /// 持有当前 export task,Cancel 按钮调 `cancel()` 让 task 尽快收手并跳过弹 share sheet。
+    /// 否则 dismiss 后 task 仍跑完,弹出来的 ActivityVC 会浮在(已 dismissed 的)父 view 之上。
+    @State private var exportTask: Task<Void, Never>?
     
     private var dateRange: String {
         guard !entries.isEmpty else { return NSLocalizedString("无日记", comment: "No entries") }
@@ -70,12 +73,32 @@ struct DiaryExportView: View {
                 Text(NSLocalizedString("导出后将生成一个文本文件，包含所有日记的日期、心情和内容。", comment: "Export description"))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                
+
+                // Progress indicator —— 大库 1-2s 之前 button-only spinner 像挂死;给中央条 + 文案明确"在导出"。
+                if isExporting {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                        Text(String(format: NSLocalizedString("正在导出 %d 条日记…", comment: "Export progress"), entries.count))
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color(.secondarySystemBackground))
+                    )
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
                 Spacer()
                 
                 // Buttons
                 HStack {
                     Button(NSLocalizedString("取消", comment: "Cancel")) {
+                        exportTask?.cancel()
+                        exportTask = nil
                         dismiss()
                     }
                     .foregroundColor(.primary)
@@ -109,16 +132,25 @@ struct DiaryExportView: View {
     
     private func performExport() {
         isExporting = true
-        
-        Task {
+
+        exportTask = Task {
             // Generate content
             let entriesArray = Array(entries)
             let content = DiaryExportService.generateExportContent(from: entriesArray)
-            
+            // 用户 Cancel 按钮 → cancel 这个 task。share sheet 不弹,文件不创建。
+            if Task.isCancelled { return }
+
             // Create file
             if let fileURL = DiaryExportService.createExportFile(content: content) {
+                // 用户在 createExportFile 写完盘 → 弹 share sheet 之间 cancel 了 → 文件已经落到磁盘。
+                // 这里删掉,避免 export tmp 文件孤儿。share sheet 不弹。
+                if Task.isCancelled {
+                    try? FileManager.default.removeItem(at: fileURL)
+                    return
+                }
                 await MainActor.run {
                     isExporting = false
+                    exportTask = nil
                     #if canImport(UIKit)
                     HapticManager.shared.click()
                     // 直接弹出分享菜单
@@ -130,6 +162,7 @@ struct DiaryExportView: View {
                 // 弹个 alert 让用户知道出了问题，可以重试。
                 await MainActor.run {
                     isExporting = false
+                    exportTask = nil
                     showExportError = true
                 }
             }

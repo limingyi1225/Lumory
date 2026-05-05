@@ -73,7 +73,9 @@ struct ThemeMergeIntoSheet: View {
                             .padding(.bottom, 24)
                         }
                     }
+                    .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.formContentMaxWidth)
                 }
+                .accessibilityIdentifier("themeMergeScrollView")
 
                 // 合并 in-flight 时全屏 dim + 中央 success animation,~0.6s 后 dismiss
                 if let target = confirmingTarget {

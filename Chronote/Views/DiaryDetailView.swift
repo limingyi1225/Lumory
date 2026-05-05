@@ -5,6 +5,19 @@ import CoreData
 import UIKit
 #endif
 
+private func deleteDiaryDetailAttachmentFiles(imageFileNames: [String], audioFileName: String?) {
+    for fileName in imageFileNames {
+        do {
+            try DiaryEntry.deleteImageFromDocuments(fileName)
+        } catch {
+            Log.error("[DiaryDetailView] 删除图片附件失败 \(fileName): \(error)", category: .ui)
+        }
+    }
+    if let audioFileName, !audioFileName.isEmpty {
+        DiaryEntry.deleteAudioFromDocuments(audioFileName)
+    }
+}
+
 struct DiaryDetailView: View {
     @ObservedObject var entry: DiaryEntry
     var startInEditMode: Bool = false
@@ -51,6 +64,29 @@ struct DiaryDetailView: View {
             // 钳位避免 grid 上点最后一张但 loaded 不够长时，TabView 抓不到 tag 显示空白 + "5 / 3" 这种乱数。
             selectedImageIndex = min(max(index, 0), loaded.count - 1)
             showImageViewer = true
+        }
+    }
+
+    private func deleteEntry() {
+        audioPlaybackController.stopPlayback(clearCurrentFile: true)
+
+        let imageFileNames = entry.imageFileNameArray
+        let audioFileName = entry.audioFileName
+        viewContext.delete(entry)
+
+        do {
+            try viewContext.save()
+            HapticManager.shared.impact(.medium)
+            // 单删派生缓存清理统一走 EntryWipeOrchestrator。
+            EntryWipeOrchestrator.performSingleDeleteCleanup()
+            Task.detached(priority: .utility) {
+                deleteDiaryDetailAttachmentFiles(imageFileNames: imageFileNames, audioFileName: audioFileName)
+            }
+            dismiss()
+        } catch {
+            viewContext.rollback()
+            Log.error("[DiaryDetailView] 删除日记失败: \(error)", category: .ui)
+            saveError = (error as NSError).localizedDescription
         }
     }
     
@@ -166,32 +202,7 @@ struct DiaryDetailView: View {
             }
             .alert(NSLocalizedString("确认删除此日记？", comment: "Delete diary confirmation"), isPresented: $showDeleteAlert) {
                 Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
-                    // Stop audio and perform deletion
-                    audioPlaybackController.stopPlayback(clearCurrentFile: true)
-
-                    // 在 Core Data delete 之前先清磁盘文件——delete 之后 entry 的属性访问不可靠。
-                    entry.deleteAllImages()
-                    entry.deleteAudioFile()
-
-                    // Delete the entry
-                    viewContext.delete(entry)
-                    
-                    // Save and dismiss immediately
-                    do {
-                        try viewContext.save()
-                        #if canImport(UIKit)
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        #endif
-                        // 删除 entry 可能让当前固定周期从"已完成"变"未完成",提醒逻辑要重新评估。
-                        ReminderService.shared.requestReschedule()
-                        // 同时清理 pending 队列里指向此 entry 独有 tag 的孤儿建议。
-                        Task { await ThemeAliasResolver.shared.cleanupOrphanedPending() }
-                    } catch {
-                        Log.error("[DiaryDetailView] 删除日记失败: \(error)", category: .ui)
-                    }
-
-                    // Dismiss immediately after deletion
-                    dismiss()
+                    deleteEntry()
                 }
                 Button(NSLocalizedString("取消", comment: "Cancel button"), role: .cancel) { }
             } message: {
@@ -262,10 +273,13 @@ struct DiaryDetailView: View {
 
     /// 主题来自 AI 自动抽取（写入/编辑后台流水线里 extractThemes），
     /// 用户手动编辑主题容易污染聚合结果 —— 只做只读展示，非空才渲染。
+    /// 主题 chip 和 AI sparkles 都用**当天 mood 颜色**,跟页面顶部日期 / 主题左边的 mood accent 保持
+    /// 视觉统一(accent color 是 system 蓝,跟 mood 色脱节,看起来像两个色系)。
     @ViewBuilder
     private var themesSection: some View {
         let themes = entry.themeArray
         if !themes.isEmpty {
+            let moodTint = Color.moodSpectrum(value: entry.moodValue)
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     Text(NSLocalizedString("主题", comment: "Themes label"))
@@ -273,7 +287,8 @@ struct DiaryDetailView: View {
                         .fontWeight(.semibold)
                     Image(systemName: "sparkles")
                         .font(.caption2)
-                        .foregroundStyle(.secondary.opacity(0.6))
+                        .foregroundStyle(moodTint.opacity(0.85))
+                        .symbolRenderingMode(.hierarchical)
                         .accessibilityLabel(NSLocalizedString("AI 自动提取", comment: "AI auto-extracted tag"))
                 }
                 FlowLayout(spacing: 8) {
@@ -282,7 +297,7 @@ struct DiaryDetailView: View {
                             .font(.footnote)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .liquidGlassCapsule(tint: Color.accentColor)
+                            .liquidGlassCapsule(tint: moodTint)
                     }
                 }
             }
@@ -558,10 +573,8 @@ struct DiaryDetailView: View {
         withAnimation(AnimationConfig.gentleSpring) {
             isEditing = true
         }
-        
-        #if canImport(UIKit)
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        #endif
+
+        HapticManager.shared.impact(.light)
     }
     
     private func cancelEditing() {
@@ -585,6 +598,7 @@ struct DiaryDetailView: View {
         // Ask Past 的语义检索会继续用旧内容的索引）。先捕获对比值，再写 Core Data。
         let textChanged = entry.wrappedText != editedText
         let dateChanged = entry.date != editedDate
+        let moodChanged = entry.moodValue != editedMoodValue
         let entryObjectID = entry.objectID
 
         entry.summary = editedSummary.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -604,6 +618,22 @@ struct DiaryDetailView: View {
             // 进而改变 wroteCurrentCycle → reminder 要重排。
             if dateChanged {
                 ReminderService.shared.requestReschedule()
+            }
+
+            // **改 date 还可能改变 streak 算法的全 unique-days 集合** —— widget cheap fingerprint 仅看
+            // (count, latestDate, latestMood, prompt),改老 entry 的 date 不在 fingerprint 范围内,
+            // 短路会让 widget streak 不更新。改 mood 也类似(若改的是非最新 entry 的 mood,fingerprint 也不变,
+            // 但实际 widget 头像色不受影响 — 只 latest mood 决定;留个保险)。invalidate 让下次 refresh
+            // 强制 full path 重抓。NSManagedObjectContextDidSave observer 会 schedule 下一次 refresh。
+            if dateChanged || moodChanged {
+                Task { await WidgetSnapshotService.shared.invalidateCaches() }
+            }
+
+            if dateChanged {
+                StreakMilestoneService.shared.evaluateAfterSave(
+                    persistence: PersistenceController.shared,
+                    latestEntryMood: editedMoodValue
+                )
             }
 
             // 顺序优化(修保存掉帧):
@@ -629,7 +659,7 @@ struct DiaryDetailView: View {
                 // 便于测试 / Preview 通过 `.environment(\.aiService, MockAIService())` 替换。
                 let textSnapshot = editedText
                 let ai = aiService
-                Task.detached(priority: .utility) {
+                Task(priority: .utility) {
                     await Self.refreshAIIndex(for: entryObjectID, newText: textSnapshot, ai: ai)
                 }
             }

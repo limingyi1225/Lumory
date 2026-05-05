@@ -144,7 +144,7 @@ struct MarkdownText: View {
     // MARK: Parsing
 
     /// 行扫描式 parser。性能：O(行数)。为 AI 流式响应优化——不抛错，容忍未闭合的 ```块。
-    static func parse(_ input: String) -> [Block] {
+    nonisolated static func parse(_ input: String) -> [Block] {
         let raw = input.replacingOccurrences(of: "\r\n", with: "\n")
         let lines = raw.components(separatedBy: "\n")
 
@@ -235,7 +235,7 @@ struct MarkdownText: View {
         return blocks
     }
 
-    private static func parseHeading(_ line: String) -> (Int, String)? {
+    nonisolated private static func parseHeading(_ line: String) -> (Int, String)? {
         if line.hasPrefix("### ") {
             return (3, String(line.dropFirst(4)))
         }
@@ -250,7 +250,7 @@ struct MarkdownText: View {
 
     /// 行内 markdown → AttributedString：粗体、斜体、`code`、[link](url)。
     /// 使用 Foundation 的 markdown 解析，带 fallback。
-    static func inlineAttributed(_ text: String) -> AttributedString {
+    nonisolated static func inlineAttributed(_ text: String) -> AttributedString {
         var options = AttributedString.MarkdownParsingOptions()
         options.interpretedSyntax = .inlineOnlyPreservingWhitespace
         options.failurePolicy = .returnPartiallyParsedIfPossible

@@ -18,14 +18,21 @@ struct ImageViewerView: View {
     @State private var scale: CGFloat = 1.0
     @State private var offset: CGSize = .zero
     @State private var dragOffset: CGSize = .zero
+    /// 下滑关闭手势的整张 viewer 偏移。scale==1 时跟随手指,松手 height>100 dismiss、否则 spring 回 0。
+    @State private var dismissDragOffset: CGSize = .zero
+    /// 标记当前是否在跑下滑关闭手势 — 让 onEnded 时区分"跨 page 横滑"vs"竖向 dismiss"。
+    @State private var isDismissDragging: Bool = false
     @Environment(\.dismiss) private var dismiss
+
+    /// 距离阈值,松手高度超过这个就 dismiss
+    private static let dismissThreshold: CGFloat = 100
 
     var body: some View {
         ZStack {
-            // Background
+            // Background — 下滑过程逐渐透明,viewer 跟着 offset 走。
             Color.black
                 .ignoresSafeArea()
-                .opacity(0.95)
+                .opacity(backgroundOpacity)
                 .onTapGesture {
                     isPresented = false
                 }
@@ -106,6 +113,58 @@ struct ImageViewerView: View {
                 dragOffset = .zero
             }
         }
+        .onChange(of: scale) { _, newScale in
+            // **scale 切走 1 时清 dismiss drag 状态** — gesture inclusion 会随 scale 重新挂,
+            // 旧 in-flight drag 的 onEnded 可能不 fire,留非 0 offset。这里兜底 reset。
+            if newScale != 1, dismissDragOffset != .zero {
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                    dismissDragOffset = .zero
+                }
+                isDismissDragging = false
+            }
+        }
+        // **下滑关闭** — 跟 Apple Photos / iMessage 的肌肉记忆一致。仅 scale == 1 时激活;
+        // scale > 1 时 inner ImageViewerPage 的 dragGesture 拦截走 pan,不会触发到这里。
+        .offset(y: dismissDragOffset.height)
+        .simultaneousGesture(dismissDragGesture, including: scale == 1 ? .all : .subviews)
+    }
+
+    private var backgroundOpacity: Double {
+        // 0.95 起始,height 0~200 区间线性减到 0.5,给"在 dismiss"的反馈但不至于看不到图。
+        let h = abs(dismissDragOffset.height)
+        let progress = min(h / 200, 1)
+        return 0.95 - 0.45 * progress
+    }
+
+    private var dismissDragGesture: some Gesture {
+        DragGesture(minimumDistance: 20)
+            .onChanged { value in
+                // 只接竖向 — 水平由 TabView 自己消费翻 page。第一次 onChanged 拍板方向后,
+                // 后续都跟 isDismissDragging 走避免抖动。
+                if !isDismissDragging {
+                    if abs(value.translation.height) > abs(value.translation.width),
+                       value.translation.height > 0 {
+                        isDismissDragging = true
+                    } else {
+                        return
+                    }
+                }
+                dismissDragOffset = CGSize(width: 0, height: max(0, value.translation.height))
+            }
+            .onEnded { value in
+                guard isDismissDragging else {
+                    dismissDragOffset = .zero
+                    return
+                }
+                isDismissDragging = false
+                if value.translation.height > Self.dismissThreshold {
+                    isPresented = false
+                } else {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        dismissDragOffset = .zero
+                    }
+                }
+            }
     }
 }
 
@@ -128,6 +187,7 @@ private struct ImageViewerPage: View {
     #endif
     @State private var didFailDecode = false
     @State private var decodeTask: Task<Void, Never>?
+    @State private var magnificationBaseScale: CGFloat?
 
     var body: some View {
         GeometryReader { geometry in
@@ -158,7 +218,9 @@ private struct ImageViewerPage: View {
                     fallbackView
                         .frame(width: geometry.size.width, height: geometry.size.height)
                 } else {
-                    Color.clear
+                    // 加载期不再用 `Color.clear` 等成黑屏 —— 给 ProgressView 让用户看到"在加载",
+                    // 大图(iCloud 拉过来未在本地或 12MP 慢解码)有几百 ms 等待。
+                    loadingView
                         .frame(width: geometry.size.width, height: geometry.size.height)
                 }
             }
@@ -189,14 +251,22 @@ private struct ImageViewerPage: View {
     // MARK: Gestures (preserved verbatim from original implementation)
 
     private var magnificationGesture: some Gesture {
-        MagnificationGesture()
+        MagnifyGesture()
             .onChanged { value in
-                scale = value
+                let base = magnificationBaseScale ?? scale
+                if magnificationBaseScale == nil {
+                    magnificationBaseScale = base
+                }
+                scale = max(1, min(base * value.magnification, 3))
             }
             .onEnded { _ in
                 withAnimation(.spring()) {
                     scale = max(1, min(scale, 3))
+                    if scale == 1 {
+                        offset = .zero
+                    }
                 }
+                magnificationBaseScale = nil
             }
     }
 
@@ -232,7 +302,7 @@ private struct ImageViewerPage: View {
         }
     }
 
-    // MARK: Fallback
+    // MARK: Fallback / Loading
 
     private var fallbackView: some View {
         VStack(spacing: 12) {
@@ -243,6 +313,13 @@ private struct ImageViewerPage: View {
                 .font(.system(size: 14))
                 .foregroundColor(.white.opacity(0.7))
         }
+    }
+
+    private var loadingView: some View {
+        ProgressView()
+            .progressViewStyle(.circular)
+            .tint(.white.opacity(0.85))
+            .scaleEffect(1.2)
     }
 
     // MARK: Decode

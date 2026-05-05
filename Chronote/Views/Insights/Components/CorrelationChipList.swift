@@ -77,10 +77,9 @@ struct CorrelationChip: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.primary.opacity(0.04))
-        )
+        // 跟 CitationEntryCard 同 idiom,Insights 内部所有"信息卡片"都走 liquidGlass,不再用 flat fill
+        // 形成"glass 大卡 + 内嵌灰色平卡"的视觉割裂。
+        .liquidGlassCard(cornerRadius: 12, interactive: false)
         .accessibilityElement(children: .combine)
     }
 

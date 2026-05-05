@@ -33,6 +33,7 @@ struct InsightsView: View {
     @State private var deleteFailureMessage: String?
     @State private var themeToMerge: InsightsEngine.Theme?
     @State private var selectedPoint: InsightsEngine.MoodPoint?
+    @State private var selectedPointBucket: InsightsEngine.Bucket = .day
 
     /// 合并/删除 完成后的 transient toast(底部 capsule,3s 后自动消失)。
     @State private var toastMessage: String?
@@ -58,13 +59,17 @@ struct InsightsView: View {
                             points: moodPoints,
                             bucket: range.chartBucket,
                             isLoading: isLoadingCharts,
-                            onTapPoint: { point in selectedPoint = point }
+                            onTapPoint: { point in
+                                selectedPointBucket = range.chartBucket
+                                selectedPoint = point
+                            }
                         )
                         .padding(.horizontal, 16)
 
                         CalendarMonthModule(cells: dailyCells) { date in
                             let day = Calendar.current.startOfDay(for: date)
                             guard let cell = dailyCells.first(where: { Calendar.current.isDate($0.date, inSameDayAs: day) }) else { return }
+                            selectedPointBucket = .day
                             selectedPoint = InsightsEngine.MoodPoint(
                                 date: day,
                                 mood: cell.mood,
@@ -95,6 +100,7 @@ struct InsightsView: View {
                             .padding(.bottom, 32)
                     }
                 }
+                .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.insightsContentMaxWidth)
             }
             .scrollIndicators(.hidden)
             .navigationTitle(NSLocalizedString("洞察", comment: "Insights"))
@@ -127,14 +133,11 @@ struct InsightsView: View {
                     moodHint: stats.avgMood
                 )
             }
-            .sheet(isPresented: $showAskPast) {
+            .lumoryAdaptiveModal(isPresented: $showAskPast, interactiveDismissDisabled: true) {
                 AskPastView()
                     .environment(\.managedObjectContext, viewContext)
-                    // "回顾"里用户阅读长文 + 点引用 + 在输入框打字，下滑手势常被误触当做
-                    // 页面滚动或失焦，不小心把整个对话关掉就丢了思路。强制必须点"关闭"按钮退出。
-                    .interactiveDismissDisabled(true)
             }
-            .sheet(item: $themeFilter) { theme in
+            .lumoryAdaptiveModal(item: $themeFilter) { theme in
                 ThemeFilteredEntriesView(
                     theme: theme,
                     allThemes: themes,
@@ -143,12 +146,21 @@ struct InsightsView: View {
                     },
                     onDeleted: { name in
                         showToast(message: String(format: NSLocalizedString("已删除主题「%@」", comment: "Delete toast"), name))
+                    },
+                    onEntryDeleted: {
+                        reloadAfterChildEntryDelete()
                     }
                 )
                 .environment(\.managedObjectContext, viewContext)
             }
-            .sheet(item: $selectedPoint) { point in
-                PointDetailSheet(point: point)
+            .lumoryAdaptiveModal(item: $selectedPoint) { point in
+                PointDetailSheet(
+                    point: point,
+                    bucket: selectedPointBucket,
+                    onEntryDeleted: {
+                        reloadAfterChildEntryDelete()
+                    }
+                )
                     .environment(\.managedObjectContext, viewContext)
                     .presentationDetents([.medium, .large])
             }
@@ -185,7 +197,7 @@ struct InsightsView: View {
             } message: {
                 Text(deleteFailureMessage ?? "")
             }
-            .sheet(item: $themeToMerge) { source in
+            .lumoryAdaptiveModal(item: $themeToMerge) { source in
                 ThemeMergeIntoSheet(
                     source: source,
                     candidates: themes.filter { $0.id != source.id }
@@ -266,7 +278,9 @@ struct InsightsView: View {
         let outcome = await ThemeManagementService.shared.deleteTheme(canonical: theme.name)
         if outcome.succeeded {
             Log.info("[InsightsView] deleted theme \(theme.name), affected entries=\(outcome.affected)", category: .ui)
-            // ThemeManagementService 已 post .themeAliasMapDidChange,InsightsView 自己监听会 reload。
+            InsightsResultCache.shared.clear()
+            dailyCellsCache.removeAll()
+            await reload()
         } else {
             // CoreData save 失败 —— 用户看到主题没消失会困惑,显式提示。
             deleteFailureMessage = String(
@@ -294,9 +308,7 @@ struct InsightsView: View {
         .labelsHidden()
         .accessibilityLabel(NSLocalizedString("时间范围", comment: "Time range picker"))
         .onChange(of: range) { _, _ in
-            #if canImport(UIKit)
-            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-            #endif
+            HapticManager.shared.impact(.soft)
         }
     }
 
@@ -304,9 +316,7 @@ struct InsightsView: View {
 
     private var narrativeCTA: some View {
         Button {
-            #if canImport(UIKit)
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            #endif
+            HapticManager.shared.impact(.medium)
             showNarrative = true
         } label: {
             HStack(spacing: 12) {
@@ -410,6 +420,12 @@ struct InsightsView: View {
         )
     }
 
+    private func reloadAfterChildEntryDelete() {
+        dailyCellsCache.removeAll()
+        InsightsResultCache.shared.clear()
+        Task { await reload() }
+    }
+
     private func fetchDailyCells(in range: DateInterval, lookbackDays: Int = 140) async -> [DailyCell] {
         // 同一份 cells 喂给两个组件:
         // - WritingHeatmap 想要恒定 140 天滚窗(视觉稳定,无论 TimeRange 怎么切都能填满)
@@ -425,7 +441,7 @@ struct InsightsView: View {
         let start = min(lookbackStart, rangeStart)
         let end = max(today, rangeEnd)
         let fetchRange = DateInterval(start: start, end: end)
-        let cacheKey = "\(Int(start.timeIntervalSinceReferenceDate))-\(Int(end.timeIntervalSinceReferenceDate))"
+        let cacheKey = "\(Int(start.timeIntervalSinceReferenceDate)):\(Int(end.timeIntervalSinceReferenceDate))"
 
         // 函数 @MainActor 隐式继承,直接读 cache。
         if let cached = dailyCellsCache[cacheKey] {
@@ -479,10 +495,17 @@ struct InsightsView: View {
         if !Task.isCancelled {
             dailyCellsCache[cacheKey] = cells
             if dailyCellsCache.count > 6 {
-                dailyCellsCache.removeValue(forKey: dailyCellsCache.keys.min() ?? cacheKey)
+                let evictionKey = dailyCellsCache.keys.min { lhs, rhs in
+                    Self.dailyCellsCacheStart(lhs) < Self.dailyCellsCacheStart(rhs)
+                } ?? cacheKey
+                dailyCellsCache.removeValue(forKey: evictionKey)
             }
         }
         return cells
+    }
+
+    private static func dailyCellsCacheStart(_ key: String) -> Int {
+        Int(key.split(separator: ":").first.map(String.init) ?? "") ?? Int.min
     }
 }
 

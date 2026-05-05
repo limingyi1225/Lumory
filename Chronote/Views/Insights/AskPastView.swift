@@ -33,6 +33,8 @@ struct AskPastView: View {
     @State private var messages: [Message] = []
     @State private var inputText: String = ""
     @State private var activeTask: Task<Void, Never>?
+    @State private var activeTaskID: UUID?
+    @State private var showResetConfirmation: Bool = false
     @FocusState private var inputFocused: Bool
 
     // 引用卡展开状态（按 message id 记录）
@@ -61,6 +63,7 @@ struct AskPastView: View {
                             presetGrid
                         }
                         .padding(20)
+                        .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.chatContentMaxWidth)
                     }
                     .scrollDismissesKeyboard(.interactively)
                 } else {
@@ -76,25 +79,42 @@ struct AskPastView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(NSLocalizedString("关闭", comment: "Close")) {
                         activeTask?.cancel()
+                        activeTask = nil
+                        activeTaskID = nil
                         dismiss()
                     }
                 }
                 if !messages.isEmpty {
                     ToolbarItem(placement: .primaryAction) {
                         Button {
-                            reset()
+                            showResetConfirmation = true
                         } label: {
                             Image(systemName: "trash.slash")
                         }
                     }
                 }
             }
+            .confirmationDialog(
+                NSLocalizedString("清空当前对话？", comment: "Reset chat confirmation title"),
+                isPresented: $showResetConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button(NSLocalizedString("清空", comment: "Reset chat confirm"), role: .destructive) {
+                    reset()
+                }
+                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }
+            } message: {
+                Text(NSLocalizedString("清空后,本次问答和已展开的参考记录都会丢失,无法恢复。", comment: "Reset chat confirmation message"))
+            }
             .task {
                 await loadPresetsIfNeeded()
             }
             .onDisappear {
                 activeTask?.cancel()
+                activeTask = nil
+                activeTaskID = nil
                 backgroundRefreshTask?.cancel()
+                backgroundRefreshTask = nil
             }
         }
     }
@@ -185,6 +205,7 @@ struct AskPastView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
+                .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.chatContentMaxWidth)
             }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: messages.last?.id) { _, id in
@@ -246,6 +267,11 @@ struct AskPastView: View {
                 .padding(.vertical, 10)
                 .padding(.horizontal, 14)
                 .liquidGlassCapsule()
+                // 软键盘 Return 在 axis=.vertical 上仍是换行(SwiftUI 这是 by-design,onSubmit 不 fire)。
+                // .submitLabel(.send) 只换键盘上 Return 按钮的字面 — 视觉提示用户"这条按下能发"。
+                // 真正的"按 Return 发送"需要监听 inputText 变化里的 \n,这条会让粘贴多行也误触发,
+                // 不上;hardware keyboard / iPad 用户走下面 send button 上的 Cmd+Return 快捷键。
+                .submitLabel(.send)
 
                 Button {
                     if isStreaming {
@@ -260,6 +286,10 @@ struct AskPastView: View {
                 }
                 .buttonStyle(.glassProminent)
                 .disabled(!canSubmit && !isStreaming)
+                // **Cmd+Return 双语义**:idle 时发送当前 inputText;streaming 时按一下 = 停止流(因为
+                // 这同一个按钮在 streaming 时切到 stop.fill 图标 + cancel 路径)。这是有意的 — 硬件键盘
+                // 用户 streaming 中能用 Cmd+Return 中断,跟 Send 是同位 hot key。
+                .keyboardShortcut(.return, modifiers: .command)
                 .accessibilityLabel(
                     isStreaming
                     ? NSLocalizedString("停止", comment: "Stop streaming")
@@ -269,6 +299,7 @@ struct AskPastView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
         }
+        .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.chatContentMaxWidth)
     }
 
     private var canSubmit: Bool {
@@ -288,14 +319,14 @@ struct AskPastView: View {
         guard !question.isEmpty, !isStreaming, activeTask == nil else { return }
         inputText = ""
         inputFocused = false
-        #if canImport(UIKit)
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        #endif
+        HapticManager.shared.impact(.light)
 
         messages.append(Message(role: .user, text: question, citedEntryIds: [], isStreaming: false))
         let aiMessageID = UUID()
         messages.append(Message(id: aiMessageID, role: .ai, text: "", citedEntryIds: [], isStreaming: true))
 
+        let taskID = UUID()
+        activeTaskID = taskID
         activeTask = Task {
             var pendingText = ""
             var lastFlushAt = Date()
@@ -351,8 +382,11 @@ struct AskPastView: View {
                     }
                     msg.isStreaming = false
                 }
-                // 清掉 activeTask，下一次 submit 才能通过 guard
-                activeTask = nil
+                // 清掉 activeTask，下一次 submit 才能通过 guard；stale 旧 task 不得清掉新 task。
+                if activeTaskID == taskID {
+                    activeTask = nil
+                    activeTaskID = nil
+                }
             }
         }
     }
@@ -366,6 +400,8 @@ struct AskPastView: View {
 
     private func reset() {
         activeTask?.cancel()
+        activeTask = nil
+        activeTaskID = nil
         messages = []
         inputText = ""
         expandedCitations = []
@@ -388,7 +424,7 @@ struct AskPastView: View {
             presets = cached.askPastPresets
             isLoadingPresets = false
             backgroundRefreshTask?.cancel()
-            backgroundRefreshTask = Task.detached(priority: .utility) {
+            backgroundRefreshTask = Task(priority: .utility) {
                 await PromptSuggestionEngine.shared.refreshIfNeeded()
             }
             return

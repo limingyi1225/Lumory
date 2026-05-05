@@ -541,10 +541,16 @@ struct ThemeAliasManagementView: View {
             guard let entries = try? context.fetch(request) else { return [CitationSnapshot]() }
             return entries.compactMap { entry -> CitationSnapshot? in
                 guard let id = entry.id else { return nil }
-                let body = (entry.summary?.isEmpty == false ? entry.summary! : (entry.text ?? ""))
+                let body: String
+                if let summary = entry.summary, !summary.isEmpty {
+                    body = summary
+                } else {
+                    body = entry.text ?? ""
+                }
+                let normalizedBody = body
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .replacingOccurrences(of: "\n", with: " ")
-                let snippet = String(body.prefix(50)) + (body.count > 50 ? "…" : "")
+                let snippet = String(normalizedBody.prefix(50)) + (normalizedBody.count > 50 ? "…" : "")
                 return CitationSnapshot(id: id, date: entry.date ?? Date(), snippet: snippet)
             }
         }

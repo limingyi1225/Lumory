@@ -22,6 +22,7 @@ struct NarrativeReader: View {
     @State private var trailingParagraph: String = ""
     @State private var isStreaming: Bool = false
     @State private var streamTask: Task<Void, Never>?
+    @State private var streamRunID: UUID?
     /// 流被中断但已产出部分内容 —— UI 显示提示条,禁止把半截当完整叙事。
     @State private var isIncomplete: Bool = false
     /// 截断原因 (本地化后的一句话),不一定展示,留给 debug 或未来的 toast。
@@ -69,6 +70,8 @@ struct NarrativeReader: View {
         .onAppear(perform: start)
         .onDisappear {
             streamTask?.cancel()
+            streamTask = nil
+            streamRunID = nil
         }
     }
 
@@ -158,6 +161,8 @@ struct NarrativeReader: View {
 
     private func start() {
         guard streamTask == nil else { return }
+        let runID = UUID()
+        streamRunID = runID
         isStreaming = true
         completedParagraphs = []
         trailingParagraph = ""
@@ -168,6 +173,7 @@ struct NarrativeReader: View {
             for await event in engine.streamNarrativeEvents(in: range) {
                 if Task.isCancelled { break }
                 await MainActor.run {
+                    guard streamRunID == runID else { return }
                     switch event {
                     case .chunk(let text):
                         appendNarrativeChunk(text)
@@ -183,7 +189,10 @@ struct NarrativeReader: View {
                 }
             }
             await MainActor.run {
+                guard streamRunID == runID else { return }
                 isStreaming = false
+                streamTask = nil
+                streamRunID = nil
             }
         }
     }
@@ -191,6 +200,7 @@ struct NarrativeReader: View {
     private func regenerate() {
         streamTask?.cancel()
         streamTask = nil
+        streamRunID = nil
         isIncomplete = false
         incompleteReason = ""
         start()
@@ -198,6 +208,8 @@ struct NarrativeReader: View {
 
     private func closeTapped() {
         streamTask?.cancel()
+        streamTask = nil
+        streamRunID = nil
         dismiss()
     }
 

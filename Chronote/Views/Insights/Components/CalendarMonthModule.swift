@@ -157,6 +157,7 @@ struct CalendarMonthModule: View {
         .disabled(!hasEntry || isFuture)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel(for: date, mood: mood, isToday: isToday))
+        .accessibilityIdentifier(hasEntry && !isFuture ? "calendarEntryDay" : "calendarDay")
         .accessibilityAddTraits(isToday ? [.isSelected] : [])
     }
 

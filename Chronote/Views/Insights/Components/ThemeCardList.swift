@@ -225,6 +225,7 @@ private struct ThemeCardPreview: View {
         // 取最近 3 条 —— 长按 preview 不需要全部
         let candidateIDs = ThemeCardList.previewCandidateEntryIDs(from: theme.entryIds)
         guard !candidateIDs.isEmpty else {
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 self.isLoading = false
             }
@@ -251,6 +252,7 @@ private struct ThemeCardPreview: View {
                 )
             }
         }
+        guard !Task.isCancelled else { return }
         await MainActor.run {
             self.snippets = fetched
             self.isLoading = false

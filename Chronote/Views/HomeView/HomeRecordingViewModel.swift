@@ -10,9 +10,8 @@ import Foundation
 ///    `objectWillChange` 依赖 `@StateObject` 的 property-wrapper 安装。
 /// 2. `@Observable` 宏只跟踪 VM 自身 stored properties 的读取;把一个 ObservableObject 当
 ///    `let` 存进来,SwiftUI 收不到内部 `@Published` 的变化——`recorder.isRecording` /
-///    `controller.isPlaying` 的改动不会再触发 body 重评,symbol 动画、录音计时、播放进度
-///    条全哑。
-/// 3. 原 HomeView 到处用 `recorder.isRecording` / `recorder.duration` / `audioPlaybackController.xxx`
+///    `controller.isPlaying` 的改动不会再触发 body 重评,symbol 动画、播放进度条全哑。
+/// 3. 原 HomeView 到处用 `recorder.isRecording` / `audioPlaybackController.xxx`
 ///    直接读取驱动 UI,改到 VM 就要新增大量 `@ObservedObject` 转接,违反"不要改变任何业务
 ///    行为"的底线。
 ///

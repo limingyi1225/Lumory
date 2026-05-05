@@ -5,91 +5,144 @@ import SwiftUI
 // **P1-Home-1 录音电平可视化**。把 `AudioRecorder.amplitude`(0~1)映射成 N 根 Capsule 高度,
 // 形成"实时音量条"。
 //
-// **2026-05-05 重写**:之前用 `[Float]` array + ForEach `id: \.self` + height withAnimation 的实现
-// 视觉上是"12 根 bar 高度同步切换",不是"波从右往左流"。SwiftUI 把 `idx 0` 当成"同一 view"在
-// 同一物理位置只换 height,bar 不滑动 — 用户实测在 16 Pro 仍感觉卡,因为不是性能问题,是 visual
-// model 错(离散 array shift 没法表达"流过"动画)。
+// **2026-05-05 重写**:之前用 HStack + ForEach + transition 每 0.05s insert/remove 一根 bar。
+// 这种做法会让 SwiftUI 每 tick 都做 layout transition,旁边的计时 Text / toolbar 也会被拖着重排,
+// 观感像"一格一格跳"。现在改成固定尺寸 Canvas:
+// - sample 仍按 10Hz 进入 history;
+// - TimelineView 在两次 sample 中间按帧推进 x offset;
+// - Canvas 只画 path,不 insert/remove SwiftUI 子树,所以移动连续且成本稳定。
 //
-// 现在用 `[Sample]` (Sample 含 stable UUID id)+ ForEach `id: \.id` + `.transition(.move)`:
-// - removeFirst:最左 sample 离开 → SwiftUI 触发 `.move(edge: .leading)` 滑出左边
-// - append:新 sample 进入 → `.move(edge: .trailing)` 从右边滑入
-// - 中间 N-2 sample id stable → SwiftUI 自动 layout 它们整体左移 1 格,**真"流"过去**
-//
-// 不接 `recorder.amplitude` 的 ObservableObject 直接观察,而是让 caller 传 `amplitude: Float` —
-// 解耦,测试可以注入静态值。
+// 不接 `recorder.amplitude` 的 ObservableObject 直接观察,而是让 caller 传 snapshot —
+// 解耦,也避免整页被高频 objectWillChange 拖着重绘。
 //
 // 用法:
-//   AudioMeterBar(amplitude: recorder.amplitude, isActive: recorder.isRecording)
+//   AudioMeterBar(amplitude: level, sampleID: tick, isActive: true)
 
 struct AudioMeterBar: View {
     /// 当前实时电平,0~1。caller 从 AudioRecorder.amplitude 拿。
     let amplitude: Float
-    /// 是否在录音 — 决定 history 是否更新(停录后历史保留 ~1s 衰减后归零)。
+    /// 每次采样递增一次。即便 amplitude 连续相同,波形也继续平滑流动。
+    let sampleID: Int
+    /// 是否在录音 — 决定 history 是否更新；停录时由父视图移除并清空 history。
     let isActive: Bool
-
-    /// 单个采样,带 stable UUID 让 SwiftUI ForEach 能 track "同一 sample 在移动"。
-    private struct Sample: Identifiable, Equatable {
-        let id = UUID()
-        let level: Float
-    }
 
     /// 可视化参数 — 12 根 bar,每根 3pt 宽,bar 间 2pt 间距 = 总宽 ~58pt(在 inline toolbar 里舒适)。
     private static let barCount: Int = 12
+    private static let historyCount: Int = 14
     private static let barWidth: CGFloat = 3
     private static let barSpacing: CGFloat = 2
+    private static let sampleStride: CGFloat = barWidth + barSpacing
     private static let minBarHeight: CGFloat = 3
     private static let maxBarHeight: CGFloat = 18
+    private static let sampleInterval: TimeInterval = 0.1
+    private static let totalWidth: CGFloat = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barSpacing
 
-    @State private var samples: [Sample] = (0..<AudioMeterBar.barCount).map { _ in Sample(level: 0) }
+    @State private var samples: [Float] = Array(repeating: 0, count: AudioMeterBar.historyCount)
+    @State private var lastSampleDate = Date()
 
     var body: some View {
-        HStack(spacing: Self.barSpacing) {
-            ForEach(Array(samples.enumerated()), id: \.element.id) { idx, sample in
-                let height = Self.minBarHeight + CGFloat(sample.level) * (Self.maxBarHeight - Self.minBarHeight)
-                // 越靠右 alpha 越高(idx N-1 = 最新最亮 1.0,idx 0 = 即将滑出最旧 0.4)。
-                // alpha 跟 idx 走,sample 移动时它的 alpha 也跟着变 — 自然"褪色出场"效果。
-                let alpha = 0.4 + 0.6 * (Double(idx) / Double(max(1, Self.barCount - 1)))
-                Capsule()
-                    .fill(Color.red.opacity(alpha))
-                    .frame(width: Self.barWidth, height: height)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .trailing).combined(with: .opacity),
-                        removal: .move(edge: .leading).combined(with: .opacity)
-                    ))
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isActive)) { timeline in
+            Canvas { context, size in
+                drawBars(in: &context, size: size, date: timeline.date)
             }
         }
-        .frame(height: Self.maxBarHeight)
+        .frame(width: Self.totalWidth, height: Self.maxBarHeight)
+        .clipped()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(NSLocalizedString("录音电平", comment: "Audio meter level"))
         .accessibilityValue(String(format: "%.0f%%", Double(amplitude) * 100))
-        .onChange(of: amplitude) { _, newValue in
+        .onAppear {
+            resetSamples()
+            if isActive {
+                pushSample(amplitude)
+            }
+        }
+        .onChange(of: sampleID) { _, _ in
             guard isActive else { return }
-            pushSample(newValue)
+            pushSample(amplitude)
         }
         .onChange(of: isActive) { _, active in
             if !active {
-                // 停录后清空 — 给每个 slot fresh UUID 让所有现存 bar 一起 fade 出。
-                withAnimation(.easeOut(duration: 0.25)) {
-                    samples = (0..<Self.barCount).map { _ in Sample(level: 0) }
-                }
+                resetSamples()
+            } else {
+                pushSample(amplitude)
             }
         }
     }
 
+    private func drawBars(in context: inout GraphicsContext, size: CGSize, date: Date) {
+        let progress = isActive ? sampleProgress(at: date) : 0
+        let cornerRadius = Self.barWidth / 2
+
+        for index in samples.indices {
+            let age = CGFloat(samples.count - 1 - index) + progress
+            let x = size.width - Self.barWidth - age * Self.sampleStride
+            guard x > -Self.barWidth, x < size.width else { continue }
+
+            let level = max(0, min(1, CGFloat(samples[index])))
+            let height = Self.minBarHeight + level * (Self.maxBarHeight - Self.minBarHeight)
+            let y = (size.height - height) / 2
+            let alphaProgress = max(0, min(1, (x + Self.barWidth) / max(size.width, 1)))
+            let alpha = 0.35 + 0.65 * Double(alphaProgress)
+            let rect = CGRect(x: x, y: y, width: Self.barWidth, height: height)
+            let path = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).path(in: rect)
+            context.fill(path, with: .color(Color.red.opacity(alpha)))
+        }
+    }
+
+    private func sampleProgress(at date: Date) -> CGFloat {
+        let elapsed = date.timeIntervalSince(lastSampleDate)
+        return CGFloat(max(0, min(1, elapsed / Self.sampleInterval)))
+    }
+
     private func pushSample(_ level: Float) {
-        // **真"流"动画**:withAnimation 包一次 array 重组(removeFirst + append),SwiftUI 看到
-        // 12 个 sample id 中 11 个 stable + 1 个 leave + 1 个 enter,自动给 leaving 跑 .move(.leading)、
-        // 给 entering 跑 .move(.trailing)、给中间 11 个跑 layout transition 整体左移。
-        // .linear(0.05) 跟 AudioRecorder 的 0.05s publish 间隔严格对齐 — bar 上一帧刚到位,下一个
-        // sample 到达,新 transition 接上,无 in-flight 堆叠。
-        withAnimation(.linear(duration: 0.05)) {
-            samples.removeFirst()
-            samples.append(Sample(level: level))
+        samples.removeFirst()
+        samples.append(max(0, min(1, level)))
+        lastSampleDate = Date()
+    }
+
+    private func resetSamples() {
+        samples = Array(repeating: 0, count: Self.historyCount)
+        lastSampleDate = Date()
+    }
+}
+
+@MainActor
+struct RecordingLiveStatusView: View {
+    let recorder: AudioRecorder
+
+    @State private var amplitude: Float = 0
+    @State private var elapsed: TimeInterval = 0
+    @State private var sampleID: Int = 0
+
+    var body: some View {
+        HStack(spacing: 8) {
+            AudioMeterBar(amplitude: amplitude, sampleID: sampleID, isActive: true)
+            Text(formattedDuration(currentTime: elapsed, totalDuration: 0))
+                .font(.footnote.weight(.medium).monospacedDigit())
+                .foregroundColor(.red)
+        }
+        .task {
+            await refreshWhileRecording()
+        }
+        .onDisappear {
+            amplitude = 0
+            elapsed = 0
+            sampleID &+= 1
+        }
+    }
+
+    private func refreshWhileRecording() async {
+        while !Task.isCancelled, recorder.isRecording {
+            amplitude = recorder.amplitude
+            elapsed = recorder.duration
+            sampleID &+= 1
+            try? await Task.sleep(for: .milliseconds(100))
         }
     }
 }
 
 #Preview {
-    AudioMeterBar(amplitude: 0.5, isActive: true)
+    AudioMeterBar(amplitude: 0.5, sampleID: 0, isActive: true)
         .padding()
 }

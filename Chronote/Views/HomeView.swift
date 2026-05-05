@@ -1782,14 +1782,8 @@ extension HomeView {
     @ViewBuilder
     private var recordingTimerInline: some View {
         if recorder.isRecording {
-            HStack(spacing: 8) {
-                // P1-Home-1 实时电平条 — 用户在沙发 / 走路录音时能立刻看到"麦在拾音",
-                // 不再 30s 录完转写失败才发现没拾到。
-                AudioMeterBar(amplitude: recorder.amplitude, isActive: recorder.isRecording)
-                Text(formattedDuration(currentTime: recorder.duration, totalDuration: 0))
-                    .font(.footnote.weight(.medium).monospacedDigit())
-                    .foregroundColor(.red)
-            }
+            // P1-Home-1 实时电平条 — 高频刷新隔离在小控件内部,避免整页跟着 20Hz 重绘。
+            RecordingLiveStatusView(recorder: recorder)
             .transition(.opacity)
         }
     }

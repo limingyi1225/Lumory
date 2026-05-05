@@ -5,7 +5,9 @@ import SwiftUI
 @MainActor
 final class AudioRecorder: NSObject, ObservableObject {
     @Published var isRecording = false
-    @Published var amplitude: Float = 0 // 0.0 ~ 1.0 之间，代表当前音量大小
+    // 高频电平/时长不走 @Published：录音时 20Hz 广播会让整个 HomeView 跟着重绘，
+    // 视觉上反而卡。录音状态条用自己的轻量刷新循环读取这两个值。
+    private(set) var amplitude: Float = 0 // 0.0 ~ 1.0 之间，代表当前音量大小
     /// 中断 (电话 / Siri / 其他音频) 后被自动停下、且时长 ≥ 0.5s 已落盘的录音文件名。
     /// HomeView observe 这个 @Published,把文件名接进 audioRecordings 让用户看到录到的段落,
     /// 避免中断把已录的内容默默丢掉。HomeView 消费后置 nil。
@@ -17,7 +19,7 @@ final class AudioRecorder: NSObject, ObservableObject {
     private var recorder: AVAudioRecorder?
     private var meterTimer: Timer?
     private var startTime: Date?
-    @Published var duration: TimeInterval = 0
+    private(set) var duration: TimeInterval = 0
 
     // Thread safety
     private let recorderLock = NSLock()
@@ -157,9 +159,8 @@ final class AudioRecorder: NSObject, ObservableObject {
             // 改成手动 init + 单次 RunLoop.add(.common)：原来的 scheduledTimer 已经自动
             // 注册到 .default mode，再 add(.common) 会被双重注册，造成每 tick 双触发。
             timerLock.lock()
-            // 0.03 → 0.05(33Hz → 20Hz)— 用户实测 33Hz publish 让 AudioMeterBar 的 SwiftUI
-            // animation merge 不过来导致卡顿。Voice Memos 实测也是 ~16-20Hz 更新视觉已经流畅,
-            // 没必要给 SwiftUI 推 33Hz 那么频繁。layout pass 直接砍 1/3。
+            // 0.03 → 0.05(33Hz → 20Hz)。这里仍保持录音电平采样灵敏；UI 侧不再用 @Published
+            // 订阅这个频率，而是只让录音小控件自己拉取当前 snapshot。
             let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     self?.handleMeterUpdate()
@@ -269,8 +270,7 @@ final class AudioRecorder: NSObject, ObservableObject {
         return documentsPath.appendingPathComponent(fileName)
     }
 
-    /// 更新音量表读数（闭包版 Timer 调用）。顺手把 duration 也推一下，
-    /// 否则 UI 里绑 `recorder.duration` 的录音时长只会在停止时才更新一次。
+    /// 更新音量表读数（闭包版 Timer 调用）。这里只更新本地 snapshot，不触发 objectWillChange。
     private func handleMeterUpdate() {
         recorderLock.lock()
         guard let recorder = recorder else {

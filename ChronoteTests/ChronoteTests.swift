@@ -214,6 +214,31 @@ struct TimeRangeTests {
     }
 }
 
+// MARK: - LumoryAdaptivePresentation
+
+struct LumoryAdaptivePresentationTests {
+    @Test func iPad_usesExpandedModalEvenInCompactSplit() {
+        #expect(LumoryAdaptivePresentation.shouldUseExpandedModal(
+            isPad: true,
+            horizontalSizeClassIsRegular: false
+        ))
+    }
+
+    @Test func regularWidth_usesExpandedModal() {
+        #expect(LumoryAdaptivePresentation.shouldUseExpandedModal(
+            isPad: false,
+            horizontalSizeClassIsRegular: true
+        ))
+    }
+
+    @Test func phoneCompact_keepsSheetPresentation() {
+        #expect(!LumoryAdaptivePresentation.shouldUseExpandedModal(
+            isPad: false,
+            horizontalSizeClassIsRegular: false
+        ))
+    }
+}
+
 // MARK: - CorrelationFactGenerator
 
 struct CorrelationFactGeneratorTests {
@@ -836,6 +861,36 @@ struct PromptCacheFreshnessTests {
     }
 }
 
+// MARK: - PromptSuggestionEngine.clearCache
+
+struct PromptCacheClearTests {
+    @MainActor
+    @Test func clearCache_removesProtectedDiskCacheAndLegacyDefaults() throws {
+        let url = try #require(PromptSuggestionEngine.cacheFileURLForTesting)
+        let fm = FileManager.default
+        try? fm.removeItem(at: url)
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+
+        let bundle = SuggestionBundle(
+            askPastPresets: ["What changed?"],
+            homePlaceholders: ["Write now"],
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            fingerprint: "stale-after-delete",
+            language: "en"
+        )
+        let data = try JSONEncoder().encode(bundle)
+        try data.write(to: url)
+        UserDefaults.standard.set(data, forKey: PromptSuggestionEngine.cacheKeyForTesting)
+
+        #expect(fm.fileExists(atPath: url.path))
+        let engine = PromptSuggestionEngine(ai: ThemeAliasAITestDouble())
+        engine.clearCache()
+
+        #expect(!fm.fileExists(atPath: url.path))
+        #expect(UserDefaults.standard.data(forKey: PromptSuggestionEngine.cacheKeyForTesting) == nil)
+    }
+}
+
 // MARK: - Test helpers
 
 private func makeDate(year: Int, month: Int, day: Int, hour: Int = 0, minute: Int = 0) -> Date {
@@ -1057,6 +1112,41 @@ struct SSEParserTests {
             events.append(event)
         }
         #expect(events == [Chunk(value: "a"), Chunk(value: "b")])
+    }
+
+    @Test func openAIStreamResponseAllowsFinishReasonWithoutDelta() async throws {
+        let lines = [
+            #"data: {"choices":[{"finish_reason":"stop"}]}"#,
+            "",
+            "data: [DONE]"
+        ]
+
+        var events: [OpenAIStreamResponse] = []
+        for try await event in SSEParser.parse(lines: lines, type: OpenAIStreamResponse.self, decoder: JSONDecoder()) {
+            events.append(event)
+        }
+
+        #expect(events.count == 1)
+        #expect(events[0].choices.count == 1)
+        #expect(events[0].choices[0].delta == nil)
+        #expect(events[0].hasTruncatedFinish == false)
+    }
+
+    @Test func openAIStreamResponseFlagsTruncatedFinishWithoutDelta() async throws {
+        let lines = [
+            #"data: {"choices":[{"finish_reason":"length"}]}"#,
+            "",
+            "data: [DONE]"
+        ]
+
+        var events: [OpenAIStreamResponse] = []
+        for try await event in SSEParser.parse(lines: lines, type: OpenAIStreamResponse.self, decoder: JSONDecoder()) {
+            events.append(event)
+        }
+
+        #expect(events.count == 1)
+        #expect(events[0].choices[0].delta == nil)
+        #expect(events[0].hasTruncatedFinish == true)
     }
 
     private func collectSSEEvents(_ lines: [String]) async throws -> [Chunk] {
@@ -2441,6 +2531,187 @@ struct ReminderCycleBoundsTests {
         // wroteCurrentCycle 的判断是 `lastEntry < cycleEnd`,所以 lastEntry == cycleEnd 应在下一 cycle。
         let bNext = ReminderService.cycleBounds(referenceDate: cycleEnd, anchor: anchor, frequency: .weekly, calendar: calendar)
         #expect(bNext.start == b.end)
+    }
+
+    // MARK: nextFireDate(纯函数) — Settings 显示"下次提醒"用
+
+    /// daily 频率,reference 在 21:00 之前 → 今天 21:00。
+    @Test func nextFireDate_daily_beforeFireTime_returnsToday() {
+        let anchor = makeUTCDate(year: 2026, month: 4, day: 1)
+        var comps = DateComponents(); comps.year = 2026; comps.month = 4; comps.day = 5; comps.hour = 10; comps.minute = 0
+        let now = calendar.date(from: comps)!
+        let next = ReminderService.nextFireDate(
+            isEnabled: true, frequency: .daily, hour: 21, minute: 0,
+            anchor: anchor, referenceDate: now, calendar: calendar
+        )
+        #expect(next != nil)
+        let nextComps = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: next!)
+        #expect(nextComps.day == 5 && nextComps.hour == 21 && nextComps.minute == 0)
+    }
+
+    /// daily,reference 在 21:00 之后 → 明天 21:00(本 cycle 已过 → 跳下一)。
+    @Test func nextFireDate_daily_afterFireTime_rollsToTomorrow() {
+        let anchor = makeUTCDate(year: 2026, month: 4, day: 1)
+        var comps = DateComponents(); comps.year = 2026; comps.month = 4; comps.day = 5; comps.hour = 22; comps.minute = 30
+        let now = calendar.date(from: comps)!
+        let next = ReminderService.nextFireDate(
+            isEnabled: true, frequency: .daily, hour: 21, minute: 0,
+            anchor: anchor, referenceDate: now, calendar: calendar
+        )
+        let nextComps = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: next!)
+        #expect(nextComps.day == 6 && nextComps.hour == 21)
+    }
+
+    /// every3Days,anchor=4/1,now=4/2 10:00 → 当前 cycle 末是 4/3,fire 在 4/3 21:00。
+    @Test func nextFireDate_every3Days_currentCycleEnd() {
+        let anchor = makeUTCDate(year: 2026, month: 4, day: 1)
+        var comps = DateComponents(); comps.year = 2026; comps.month = 4; comps.day = 2; comps.hour = 10
+        let now = calendar.date(from: comps)!
+        let next = ReminderService.nextFireDate(
+            isEnabled: true, frequency: .every3Days, hour: 21, minute: 0,
+            anchor: anchor, referenceDate: now, calendar: calendar
+        )
+        let nextComps = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: next!)
+        #expect(nextComps.day == 3 && nextComps.hour == 21)
+    }
+
+    /// every3Days,now 在 cycle 末 21:00 之后 → 跳到下一 cycle 末(4/6 21:00)。
+    @Test func nextFireDate_every3Days_pastCycleEnd_rollsForward() {
+        let anchor = makeUTCDate(year: 2026, month: 4, day: 1)
+        var comps = DateComponents(); comps.year = 2026; comps.month = 4; comps.day = 3; comps.hour = 22; comps.minute = 30
+        let now = calendar.date(from: comps)!
+        let next = ReminderService.nextFireDate(
+            isEnabled: true, frequency: .every3Days, hour: 21, minute: 0,
+            anchor: anchor, referenceDate: now, calendar: calendar
+        )
+        let nextComps = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: next!)
+        #expect(nextComps.day == 6 && nextComps.hour == 21)
+    }
+
+    /// weekly,anchor=4/1,now=4/3 → cycle 是 [4/1, 4/8),fire 在 4/7 21:00(end-1)。
+    @Test func nextFireDate_weekly_returnsCycleLastDay() {
+        let anchor = makeUTCDate(year: 2026, month: 4, day: 1)
+        var comps = DateComponents(); comps.year = 2026; comps.month = 4; comps.day = 3; comps.hour = 12
+        let now = calendar.date(from: comps)!
+        let next = ReminderService.nextFireDate(
+            isEnabled: true, frequency: .weekly, hour: 21, minute: 0,
+            anchor: anchor, referenceDate: now, calendar: calendar
+        )
+        let nextComps = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: next!)
+        #expect(nextComps.day == 7 && nextComps.hour == 21)
+    }
+
+    /// disabled → nil。
+    @Test func nextFireDate_disabled_returnsNil() {
+        let anchor = makeUTCDate(year: 2026, month: 4, day: 1)
+        let now = makeUTCDate(year: 2026, month: 4, day: 5)
+        let next = ReminderService.nextFireDate(
+            isEnabled: false, frequency: .daily, hour: 21, minute: 0,
+            anchor: anchor, referenceDate: now, calendar: calendar
+        )
+        #expect(next == nil)
+    }
+
+    /// **Race fixture** — 模拟用户来回拨 picker 时,显示的"下次提醒"必须**实时**反映当前 frequency,
+    /// 不能因为 reschedule 还没跑完就拿到 stale 值。这条直接锁住"纯函数,跟 frequency 同步"。
+    @Test func nextFireDate_switchingFrequency_immediatelyReflectsNew() {
+        let anchor = makeUTCDate(year: 2026, month: 4, day: 1)
+        var comps = DateComponents(); comps.year = 2026; comps.month = 4; comps.day = 5; comps.hour = 10
+        let now = calendar.date(from: comps)!
+
+        let daily = ReminderService.nextFireDate(
+            isEnabled: true, frequency: .daily, hour: 21, minute: 0,
+            anchor: anchor, referenceDate: now, calendar: calendar
+        )!
+        let every3 = ReminderService.nextFireDate(
+            isEnabled: true, frequency: .every3Days, hour: 21, minute: 0,
+            anchor: anchor, referenceDate: now, calendar: calendar
+        )!
+        let weekly = ReminderService.nextFireDate(
+            isEnabled: true, frequency: .weekly, hour: 21, minute: 0,
+            anchor: anchor, referenceDate: now, calendar: calendar
+        )!
+
+        // daily 今天就 fire(4/5 21:00)
+        // every3Days anchor=4/1,now=4/5 → cycle [4/4, 4/7) → fire 4/6 21:00
+        // weekly anchor=4/1,now=4/5 → cycle [4/1, 4/8) → fire 4/7 21:00
+        // 三个都不一样、都对得上 anchor + cycleDays + hour:minute 算式。
+        #expect(daily != every3)
+        #expect(every3 != weekly)
+        #expect(daily != weekly)
+    }
+}
+
+// MARK: - StreakMilestoneService.milestoneFor 纯函数
+
+@MainActor
+struct StreakMilestoneTests {
+    /// 7/14/30/60/100 是固定档位
+    @Test func milestoneFor_fixedTiers() {
+        #expect(StreakMilestoneService.milestoneFor(streak: 7) == 7)
+        #expect(StreakMilestoneService.milestoneFor(streak: 14) == 14)
+        #expect(StreakMilestoneService.milestoneFor(streak: 30) == 30)
+        #expect(StreakMilestoneService.milestoneFor(streak: 60) == 60)
+        #expect(StreakMilestoneService.milestoneFor(streak: 100) == 100)
+    }
+
+    /// 100 之后每加 100 一档(200 / 300 / 1000)
+    @Test func milestoneFor_centuryPlus() {
+        #expect(StreakMilestoneService.milestoneFor(streak: 200) == 200)
+        #expect(StreakMilestoneService.milestoneFor(streak: 300) == 300)
+        #expect(StreakMilestoneService.milestoneFor(streak: 500) == 500)
+        #expect(StreakMilestoneService.milestoneFor(streak: 1000) == 1000)
+        #expect(StreakMilestoneService.milestoneFor(streak: 2500) == 2500)
+    }
+
+    /// 非里程碑返回 nil(且 6 / 8 / 99 / 101 / 150 / 250 都不算)
+    @Test func milestoneFor_nonMilestoneReturnsNil() {
+        #expect(StreakMilestoneService.milestoneFor(streak: 0) == nil)
+        #expect(StreakMilestoneService.milestoneFor(streak: 1) == nil)
+        #expect(StreakMilestoneService.milestoneFor(streak: 6) == nil)
+        #expect(StreakMilestoneService.milestoneFor(streak: 8) == nil)
+        #expect(StreakMilestoneService.milestoneFor(streak: 99) == nil)
+        #expect(StreakMilestoneService.milestoneFor(streak: 101) == nil)
+        #expect(StreakMilestoneService.milestoneFor(streak: 150) == nil)
+        #expect(StreakMilestoneService.milestoneFor(streak: 250) == nil)
+        #expect(StreakMilestoneService.milestoneFor(streak: 999) == nil)
+    }
+
+    /// 已庆祝过的 milestone 不再 fire(防 streak 跌回再升时刷一遍)
+    @Test func handleStreak_dedupsByCelebratedSet() {
+        let service = StreakMilestoneService.shared
+        service.resetCelebratedForTesting()
+        service.dismiss()
+
+        service.evaluateForTesting(streak: 7, moodValue: 0.6)
+        #expect(service.pendingMilestone?.days == 7)
+
+        // 模拟用户 dismiss
+        service.dismiss()
+        #expect(service.pendingMilestone == nil)
+
+        // streak 7 再来一次 → 已 celebrated,不再 fire
+        service.evaluateForTesting(streak: 7, moodValue: 0.6)
+        #expect(service.pendingMilestone == nil)
+
+        service.resetCelebratedForTesting()
+    }
+
+    /// 不同档位 streak 各 fire 一次
+    @Test func handleStreak_independentMilestonesFireIndependently() {
+        let service = StreakMilestoneService.shared
+        service.resetCelebratedForTesting()
+        service.dismiss()
+
+        service.evaluateForTesting(streak: 7, moodValue: 0.5)
+        #expect(service.pendingMilestone?.days == 7)
+        service.dismiss()
+
+        service.evaluateForTesting(streak: 30, moodValue: 0.5)
+        #expect(service.pendingMilestone?.days == 30)
+        service.dismiss()
+
+        service.resetCelebratedForTesting()
     }
 }
 

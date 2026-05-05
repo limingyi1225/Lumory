@@ -89,7 +89,7 @@ grep -nE 'P1|backlog|TODO' CLAUDE.md 2>/dev/null | head -30
 |---|---|---|---|
 | Bug — 正确性 | code-reviewer | 逻辑错 / off-by-one / 边界 / null / 异常吞掉 | BUG |
 | Bug — 并发 | general-purpose | actor 隔离 / @MainActor 违反 / Sendable 漏标 / 取消语义 / 死锁 | BUG |
-| Bug — 安全 | code-reviewer | 注入 / 鉴权 / fail-open / 密钥泄漏 / SSE 错误处理 | BUG |
+| Bug — 安全(轻量) | code-reviewer | 仅看明显的:硬编码 secret / fail-open 鉴权倒退 / SSE 错误关闭。**不要**做正式的 OWASP 审计 / 不要展开成专项 slice —— Lumory 是单人 iOS 日记 App + 单 backend,过度安全审计 ROI 低 | BUG |
 | Bug — 数据 | **coredata-migration-reviewer** | CoreData schema / CloudKit 限制 / backfill 幂等性 | BUG |
 | Bug — SSE 管道 | **sse-pipeline-reviewer** | 服务端 res.destroy vs [DONE] / 客户端 SSEParser / NetworkRetryHelper | BUG |
 | Perf | general-purpose | 主线程 IO / N+1 fetch / 缓存缺失 / 内存泄漏 / 不必要重渲染 | OPT |
@@ -99,7 +99,8 @@ grep -nE 'P1|backlog|TODO' CLAUDE.md 2>/dev/null | head -30
 | 优化 — DX/构建 | general-purpose | 构建脚本脆 / CI 缺失 / 工具链漂移 | OPT |
 | API contract | code-reviewer | 后端 vs 客户端协议 / 错误码 / SSE 帧格式 | OPT/BUG |
 | **FEAT — 新功能** | **general-purpose** | **基于现有 model/service 自然延伸的功能(导出格式 / 新可视化 / 新交互)/ 用户已经在用但缺 affordance 的隐性需求** | **FEAT** |
-| **FEAT — UX/Polish** | **general-purpose** | **现在 work 但可以更好:loading 态缺失 / 错误提示糊 / 空态生硬 / 动效缺失 / 无障碍 / i18n 漏字符串 / 边角交互(键盘 / VoiceOver / iPad 适配)** | **FEAT** |
+| **FEAT — UI(视觉/布局)** | **general-purpose** | **liquidGlass / 间距 / 对齐 / 字号层级 / 颜色一致性 / 圆角阴影一致性 / 暗色模式表现 / iPad 布局 / Dynamic Island / 状态栏 / 跨 view 视觉风格漂移** | **FEAT** |
+| **FEAT — UX(交互/反馈)** | **general-purpose** | **loading 态缺失 / 错误提示糊 / 空态生硬 / 动效缺失或不统一 / haptic 缺失 / 转场动画 / 长按 / 滑动 / 键盘交互 / 触控热区 / 操作完成的确认感 / i18n 漏字符串 / 跨 view 交互模式不一致** | **FEAT** |
 | Style/约定 | code-reviewer | CLAUDE.md 约定 / 命名 / 日志 API 用法 | OPT |
 
 **切片 × 视角 = subagent**。一个 subagent 一组(slice, angle)。同一个 slice 可以被多个 angle 各看一次。
@@ -108,7 +109,9 @@ grep -nE 'P1|backlog|TODO' CLAUDE.md 2>/dev/null | head -30
 - `coredata-migration-reviewer` 看 Models/Persistence + 任何动 `DiaryEntry` schema 的服务
 - `sse-pipeline-reviewer` 看 AI/Network/SSE slice(项目自带 agent)
 - 死代码扫(整仓):反复要扫的场景
-- **FEAT — 新功能 + UX/Polish 至少各 1 个**(user 这次明确要求,以后默认带)
+- **FEAT — 新功能 + UI(视觉/布局)+ UX(交互/反馈)三条都要召唤,各至少 1 个**(user 明确要求重点关注 UI 和 UX,以后默认带)
+- **不要召唤"无障碍 / accessibility / VoiceOver / Dynamic Type"专项视角** —— user 明确不关注这块,reviewer 顺便提到也要主 agent 在 Step 4 核对时全部 drop
+- **不要把"安全"做成专项 slice** —— Lumory 不需要 OWASP 级审计;只让 code-reviewer 在看正确性的时候顺手扫一下硬编码 secret 和 SSE 错误关闭就够了
 
 ### Step 3 — **波次调度**召唤(关键改动:不能一次性全发)
 
@@ -119,9 +122,9 @@ grep -nE 'P1|backlog|TODO' CLAUDE.md 2>/dev/null | head -30
 - 波之间**不需要显式 sleep** —— `Agent` 调用本身是同步阻塞,每波回完都已经分钟级,自然错开。主 agent 一拿到 wave N 全部 result 就发 wave N+1,**别在 result 没回齐前预发下一波**(那等于绕过分波)。
 - Codex task 是 `--background`,不阻塞,**第一波就发**(让它边跑边等)
 - **Wave 1**:**强制视角 + Codex** —— `coredata-migration-reviewer`(Models/Persistence)、`sse-pipeline-reviewer`(AI/SSE)、整仓 dead code 扫、Codex bug audit。这一波最关键,先发。
-- **Wave 2**:bug 类剩余 angle —— 并发 / 安全 / API contract / Home VM stack 等
+- **Wave 2**:bug 类剩余 angle —— 并发 / API contract / Home VM stack 等(**安全不单独占 slot**,让 code-reviewer 在正确性视角里顺手扫硬编码 secret 即可)
 - **Wave 3**:OPT 类 —— 抽象 / 测试 / 性能 / DX
-- **Wave 4**(中大型仓库):FEAT 类 + 第二个 Codex task(产品/UX 视角,可以单独跑)。FEAT 放最后是因为它最不紧急,如果前面已经把 context 用满了可以从 4 波退回 3 波
+- **Wave 4**:FEAT 类 + 第二个 Codex task(产品/UI/UX 视角)。**这一波是重点之一,user 明确要看 UI 和 UX 改进**,所以即便仓库不大也要跑;只有在前 3 波 context 严重吃紧时才能砍掉,砍掉时主对话要主动说明"这次没跑 FEAT 视角"
 
 **示意结构**(伪代码,主 agent 实际照这个流程发):
 
@@ -136,7 +139,7 @@ grep -nE 'P1|backlog|TODO' CLAUDE.md 2>/dev/null | head -30
 
 # Wave 2 (单条消息内并行)
   Agent { subagent_type: "general-purpose", description: "Concurrency review on AI/Network", model: "opus", ... }
-  Agent { subagent_type: "code-reviewer", description: "Backend security", model: "opus", ... }
+  Agent { subagent_type: "code-reviewer", description: "Backend correctness (server/index.js)", model: "opus", ... }
   Agent { subagent_type: "general-purpose", description: "Home VM stack correctness", model: "opus", ... }
 
 # === 等 Wave 2 回完 ===
@@ -148,10 +151,11 @@ grep -nE 'P1|backlog|TODO' CLAUDE.md 2>/dev/null | head -30
 
 # === 等 Wave 3 回完 ===
 
-# Wave 4 (单条消息内并行) - FEAT
+# Wave 4 (单条消息内并行) - FEAT (UI + UX 是重点)
   Agent { subagent_type: "general-purpose", description: "FEAT: new feature opportunities", model: "opus", ... }
-  Agent { subagent_type: "general-purpose", description: "FEAT: UX polish & accessibility", model: "opus", ... }
-  Skill { skill: "codex:rescue", args: "--background --fresh Audit Lumory for product-side improvements: empty states, error UX, loading states, i18n gaps, accessibility, iPad adaptation. Read-only." }
+  Agent { subagent_type: "general-purpose", description: "FEAT: UI consistency (visual / layout / liquidGlass / 暗色模式 / iPad)", model: "opus", ... }
+  Agent { subagent_type: "general-purpose", description: "FEAT: UX polish (loading / empty / error / haptic / 动效 / 一致性)", model: "opus", ... }
+  Skill { skill: "codex:rescue", args: "--background --fresh Audit Lumory read-only for UI consistency and UX polish opportunities. NO accessibility/VoiceOver/Dynamic Type — skip those." }
 ```
 
 **每个 Opus subagent prompt 必须包含**:
@@ -186,7 +190,7 @@ Wave 1 Codex(bug-focused):
 ```
 Skill({
   skill: "codex:rescue",
-  args: "--background --fresh Audit the entire Lumory repository read-only. Do NOT edit any files. Find: latent bugs (concurrency, error handling, edge cases, security, data integrity) and high-ROI optimizations (perf hot paths, dead code, repeated logic). Focus on Chronote/Services and server/index.js first. Output a prioritized list with file:line evidence. Do not run builds or tests."
+  args: "--background --fresh Audit the entire Lumory repository read-only. Do NOT edit any files. Find: latent bugs (concurrency, error handling, edge cases, data integrity) and high-ROI optimizations (perf hot paths, dead code, repeated logic). Focus on Chronote/Services and server/index.js first. Skip security/OWASP analysis — only flag obvious things like hardcoded secrets or fail-open auth regressions. Output a prioritized list with file:line evidence. Do not run builds or tests."
 })
 ```
 
@@ -195,7 +199,7 @@ Wave 4 Codex(product/UX-focused,可选):
 ```
 Skill({
   skill: "codex:rescue",
-  args: "--background --fresh Audit Lumory read-only for product/UX improvements: empty states, error toasts, loading states, missing haptic feedback, accessibility (VoiceOver labels, Dynamic Type), i18n string gaps, iPad layout adaptation, keyboard shortcuts. Output as FEAT-HIGH/MID/LOW with file:line and a one-sentence user-benefit rationale."
+  args: "--background --fresh Audit Lumory read-only for UI consistency + UX polish opportunities. UI: visual / spacing / liquidGlass / 暗色模式 / iPad layout / 跨 view 风格漂移. UX: empty states, error toasts, loading states, missing haptic feedback, animation gaps or inconsistencies, i18n string gaps. **Skip accessibility entirely** — no VoiceOver, no Dynamic Type, no ARIA. Output as FEAT-HIGH/MID/LOW with file:line and a one-sentence user-benefit rationale."
 })
 ```
 
@@ -329,7 +333,7 @@ Skill({
 ```
 Skill({
   skill: "codex:rescue",
-  args: "--background --fresh Read the megareview report at CodeReview/megareview-<YYYYMMDD-HHmm>.md. Do NOT edit any files. Critique it: (1) Are any P0/P1/OPT-HIGH/FEAT-HIGH items mis-prioritized (too high or too low) given the actual codebase impact? (2) Are there obvious BUG / OPT / FEAT angles the report missed entirely (do a sanity grep across Chronote/ and server/ for things like force-unwraps, retained-cycle risks, unused public APIs, missing accessibility labels, hardcoded English in zh-Hans paths)? (3) Any duplicate findings that should be merged? (4) Any '已否决' items that were actually correct and should be reinstated? Output verdict per existing finding (KEEP / DOWNGRADE / UPGRADE / DROP) plus a list of missed findings. Read-only — do not modify the report file."
+  args: "--background --fresh Read the megareview report at CodeReview/megareview-<YYYYMMDD-HHmm>.md. Do NOT edit any files. Critique it: (1) Are any P0/P1/OPT-HIGH/FEAT-HIGH items mis-prioritized (too high or too low) given the actual codebase impact? (2) Are there obvious BUG / OPT / FEAT angles the report missed entirely (do a sanity grep across Chronote/ and server/ for things like force-unwraps, retained-cycle risks, unused public APIs, hardcoded English in zh-Hans paths, UI/UX inconsistencies across views)? (3) Any duplicate findings that should be merged? (4) Any '已否决' items that were actually correct and should be reinstated? **Skip accessibility entirely** (no VoiceOver / Dynamic Type / ARIA — user explicitly excluded this scope). **Skip OWASP-style security analysis** — only flag if you see hardcoded secrets or fail-open auth. Output verdict per existing finding (KEEP / DOWNGRADE / UPGRADE / DROP) plus a list of missed findings. Read-only — do not modify the report file."
 })
 ```
 
@@ -397,14 +401,16 @@ Skill({
 5. 跑核对(grep + Read + context7 + Lumory 清单)
 6. 写 `CodeReview/megareview-*.md` 第一版
 7. **Step 5: codex:rescue 二审报告**,根据 verdict 修订
-8. 主对话回:报告路径 + P0 数 + OPT-HIGH top-3 + **FEAT-HIGH top-3** + codex 二审摘要 + 一句话总结
+8. 主对话回:报告路径 + P0 数 + OPT-HIGH top-3 + **FEAT-HIGH top-3(分别列出 UI 类 / UX 类 / 新功能类各 1 条)** + codex 二审摘要 + 一句话总结
 
 ## 失败模式 / 别这么干
 
 - ❌ **一条消息发 10+ Agent call**:服务器并发限流,部分 subagent 直接挂或排队超时。必须分波。
 - ❌ 波次间不等当前波 result 回完就直接发下一波:等于没分波。同步 Agent 必须先全部回收,再发下一波。
 - ❌ **跳过 Step 5(codex 复审报告)**:主 agent 自己整合的 report 同样有 Opus 系统性偏弱,二审是质量保证,不是可选。
-- ❌ FEAT 视角省略 → 用户明确要求要看新功能/UX 改进点,这次默认要带
+- ❌ FEAT 视角省略 / UI + UX 只跑一条 → 用户明确要求两边都要看,FEAT 是这个 skill 的核心输出之一,不能省
+- ❌ reviewer 把"加 VoiceOver label / 支持 Dynamic Type / 增加色盲对比度"当 finding 写进 report → 必须在核对阶段 drop,user 明确不关注无障碍
+- ❌ 把"安全"做成专项 slice / 派一个独立的 backend security audit subagent → 过度审计;让 code-reviewer 在正确性视角顺手扫硬编码 secret 和 SSE 错误关闭就够
 - ❌ FEAT prompt 模糊("帮我想想还能加什么") → reviewer 会回一堆产品战略层级的空话。必须限定:小到中改动量 + 已存在功能的体验缺口 / 一致性补齐
 - ❌ 用 `/codex:review` 而不是 `codex:rescue`:diff 通常是空的,codex 会直接说"nothing to review"
 - ❌ 把所有 subagent 输出原样拼起来当报告 → 量化错误会被原样保留

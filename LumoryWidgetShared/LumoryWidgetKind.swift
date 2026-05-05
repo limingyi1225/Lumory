@@ -8,4 +8,7 @@ import Foundation
 /// 那会形成主 App → widget target 的反向依赖,Xcode 会拒绝编译。
 enum LumoryWidgetKind {
     static let quickWrite = "Mingyi.Lumory.QuickWrite"
+    /// 锁屏 streak widget(.accessoryCircular + .accessoryRectangular)。读同一份 WidgetSnapshot,
+    /// 只显示 effectiveStreak。tap 跳 `mingyi-lumory://compose` deeplink。
+    static let lockStreak = "Mingyi.Lumory.LockStreak"
 }

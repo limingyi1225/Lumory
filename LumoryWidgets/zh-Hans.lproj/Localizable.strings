@@ -12,3 +12,6 @@
 
 "widget.stats.streak" = "连续天数";
 "widget.stats.longest" = "最长";
+
+"widget.lockStreak.display_name" = "连续天数";
+"widget.lockStreak.description" = "锁屏一眼看到你的写日记连续天数。";

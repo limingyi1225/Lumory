@@ -5,5 +5,6 @@ import WidgetKit
 struct LumoryWidgetsBundle: WidgetBundle {
     var body: some Widget {
         QuickWriteWidget()
+        LockStreakWidget()
     }
 }

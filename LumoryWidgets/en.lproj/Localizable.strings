@@ -12,3 +12,6 @@
 
 "widget.stats.streak" = "Streak";
 "widget.stats.longest" = "Longest";
+
+"widget.lockStreak.display_name" = "Streak";
+"widget.lockStreak.description" = "Glance at your writing streak from the lock screen.";

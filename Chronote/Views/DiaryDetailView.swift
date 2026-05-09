@@ -176,6 +176,9 @@ struct DiaryDetailView: View {
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 18)
+                    // F7 — iPad 阅读宽度限定。日记正文 + summary + themes + 图片网格,720pt formContentMaxWidth
+                    // 是表单/单栏内容的舒适宽度,跟 Insights 的 narrative 760 / list 900 区分(详情更紧凑)
+                    .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.formContentMaxWidth)
                 }
                 // iOS 26 顶部边缘软渐隐 — 详情滚动到顶时跟 navigation chrome 自然过渡。
                 .scrollEdgeEffectStyle(.soft, for: .top)
@@ -457,8 +460,9 @@ struct DiaryDetailView: View {
                         RoundedRectangle(cornerRadius: 1.5)
                             .fill(entry.moodColor.opacity(0.8))
                             .frame(width: 3)
+                        // F9 — entry.summary 字号语义化(.title3 = 20pt baseline,detail 页 hero 元素最大;跟 row/preview 字号阶梯一致)
                         Text(summary)
-                            .font(.system(size: 18, weight: .medium))
+                            .font(.title3.weight(.medium))
                             .italic()
                             .foregroundStyle(.primary)
                             .lineSpacing(4)

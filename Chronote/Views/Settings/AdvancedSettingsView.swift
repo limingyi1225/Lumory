@@ -41,9 +41,9 @@ struct AdvancedSettingsView: View {
         #if !os(macOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .sheet(isPresented: $showDiagnosticSheet) {
+        // F8 — iPad fullScreenCover(同步诊断报告内容长,iPad formSheet 太窄)
+        .lumoryAdaptiveModal(isPresented: $showDiagnosticSheet) {
             SyncDiagnosticView(result: diagnosticResult)
-                .lumorySheetDecoration()
         }
         .alert(NSLocalizedString("数据库修复", comment: "Database repair alert title"), isPresented: $showDatabaseRecoveryAlert) {
             Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }

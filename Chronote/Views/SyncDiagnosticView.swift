@@ -168,10 +168,10 @@ struct SyncDiagnosticView: View {
             #endif
         }
         .frame(minWidth: 500, minHeight: 400)
-        .sheet(isPresented: $showingFullReport) {
+        // F8 — iPad fullScreenCover(全报告纯文本长,iPad formSheet 太窄)
+        .lumoryAdaptiveModal(isPresented: $showingFullReport) {
             if let result = result {
                 FullDiagnosticReportView(result: result)
-                    .lumorySheetDecoration()
             }
         }
     }

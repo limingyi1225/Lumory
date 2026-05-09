@@ -35,8 +35,9 @@ struct DiaryPreviewView: View {
                 }
 
                 if let summary = entry.wrappedSummary, !summary.isEmpty {
+                    // F9 — entry.summary 字号语义化(.headline = 17pt semibold baseline,preview 卡片场景跟 detail 一致)
                     Text(cleanedSummary(summary))
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(.headline)
                         .foregroundColor(.primary)
                         .lineLimit(3)
                         .multilineTextAlignment(.leading)

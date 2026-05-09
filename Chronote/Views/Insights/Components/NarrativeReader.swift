@@ -64,6 +64,9 @@ struct NarrativeReader: View {
                     }
                     .padding(.horizontal, 24)
                     .padding(.bottom, 40)
+                    // F7 — iPad / 大窗口阅读宽度限定。正文段落超过 ~720pt 太长会让眼睛跳行不舒服;
+                    // chatContentMaxWidth 760pt 是 narrative 长文最舒服的"书本"宽度。iPhone 上自然 < 760pt 不裁剪。
+                    .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.chatContentMaxWidth)
                 }
             }
         }

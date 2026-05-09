@@ -112,11 +112,11 @@ struct HomeView: View {
     @ViewBuilder
     private var iOSHomeView: some View {
         mainContentView
-            .sheet(isPresented: $isSettingsOpen) {
+            // F8 — iPad 上 Settings 走 fullScreenCover 而非 formSheet 浮卡(跟 Insights / AskPast 一致)
+            .lumoryAdaptiveModal(isPresented: $isSettingsOpen) {
                 SettingsView(isSettingsOpen: $isSettingsOpen)
                     .environmentObject(importService)
                     .environment(\.managedObjectContext, viewContext)
-                    .lumorySheetDecoration()
             }
             .onChange(of: importService.isImporting) { _, isImporting in
                 if isImporting {
@@ -339,6 +339,9 @@ struct HomeView: View {
                     .accessibilityLabel(NSLocalizedString("回到顶部", comment: "Scroll to top"))
                 }
             }
+            // F7 — iPad 时间线宽度限定。12.9" iPad 全宽会让每条 row 拉得很长(右侧大片空白),
+            // 900pt listContentMaxWidth 是 list 类内容的舒适宽度。iPhone < 900pt 不裁剪。
+            .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.listContentMaxWidth)
         }
     }
 
@@ -1291,8 +1294,9 @@ struct HomeView: View {
                 Spacer(minLength: 0)
             }
             if let summary = entry.summary, !summary.isEmpty {
+                // F9 — entry.summary 字号语义化(.subheadline = 15pt baseline,跟 row 字号阶梯一致)
                 Text(cleanedSummary(summary))
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundColor(.primary)
                     .lineLimit(2)
             }

@@ -91,16 +91,15 @@ struct SettingsView: View {
                 }
             }
             #endif
-            .sheet(isPresented: $showImportSheet) {
+            // F8 — iPad fullScreenCover(导入/导出有滚动列表+按钮组,formSheet 太窄)
+            .lumoryAdaptiveModal(isPresented: $showImportSheet) {
                 DiaryImportView()
                     .environmentObject(importService)
                     .environment(\.managedObjectContext, viewContext)
-                    .lumorySheetDecoration()
             }
-            .sheet(isPresented: $showExportSheet) {
+            .lumoryAdaptiveModal(isPresented: $showExportSheet) {
                 DiaryExportView()
                     .environment(\.managedObjectContext, viewContext)
-                    .lumorySheetDecoration()
             }
             .alert(NSLocalizedString("删除完成", comment: "Deletion complete"), isPresented: $showDeleteCompleteAlert) {
                 Button(NSLocalizedString("好", comment: "OK")) { isSettingsOpen = false }

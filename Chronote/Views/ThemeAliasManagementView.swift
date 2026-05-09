@@ -56,11 +56,12 @@ struct ThemeAliasManagementView: View {
         // P0-2 此页是 Settings 嵌套 sheet,2 层深 — root toast overlay 被 sheet 压住看不见,
         // 必须在这一层重挂,confirm 成功 toast 在用户当前可见层渲染。
         .lumoryToastOverlay()
-        .sheet(item: $customEditorTarget) { suggestion in
+        // F8 — iPad fullScreenCover(picker sheet 在 Settings → ThemeAlias → 自定义合并 3 层深;
+        // iPad formSheet 跟下方 Theme list 浮卡叠加视觉混乱)
+        .lumoryAdaptiveModal(item: $customEditorTarget) { suggestion in
             SuggestionTargetPickerSheet(suggestion: suggestion) { chosen in
                 confirm(suggestion, canonical: chosen)
             }
-            .lumorySheetDecoration()
         }
         .alert(
             groupPendingDeletion.map {

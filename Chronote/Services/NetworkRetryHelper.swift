@@ -117,7 +117,10 @@ struct NetworkRetryHelper {
         return false
     }
 
-    private static func delayBeforeRetry(for error: Error, attempt: Int, baseDelay: TimeInterval) -> TimeInterval {
+    /// `internal` 而非 `private`:`ChronoteTests/NetworkRetryHelperRetryableTests.swift` 直接调
+    /// 这条纯函数验 retry-after 解析 + 30s clamp + jitter,避免端到端 wall-clock sleep
+    /// (实测 30s clamp 走 `Task.sleep` 在 CI 抖动 ±2s 容易 flake)。**这是测试 seam,不是公开 API**。
+    internal static func delayBeforeRetry(for error: Error, attempt: Int, baseDelay: TimeInterval) -> TimeInterval {
         if let retryAfter = retryAfterDelay(from: error) {
             return min(retryAfter, maxRetryAfterDelay)
         }
@@ -126,7 +129,8 @@ struct NetworkRetryHelper {
         return min(base * Double.random(in: 0.75...1.25), maxRetryDelay)
     }
 
-    private static func retryAfterDelay(from error: Error) -> TimeInterval? {
+    /// `internal` 测试 seam — 同 `delayBeforeRetry` 注释。
+    internal static func retryAfterDelay(from error: Error) -> TimeInterval? {
         let nsError = error as NSError
         // 后端 / 上游 OpenAI 在 429 / 502 / 503 / 504 上都会附 Retry-After。`errorForStatus`
         // 已经把这些 status 上的 header 都塞进 userInfo,这里只读 429 会让 5xx 滑回指数回退,

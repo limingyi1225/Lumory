@@ -1,0 +1,329 @@
+//
+//  EntryCreationServiceTests.swift
+//  ChronoteTests
+//
+//  Phase 2 unit tests for `EntryCreationService` — Lumory 写日记落库 / AI writeback / 派生副作用
+//  的 service-level 契约。
+//
+//  **隔离策略**:
+//  - 每个 test 自起 `PersistenceController(inMemory: true)`(`cachedModel` 静态共享 NSManagedObjectModel
+//    防 Core Data ambiguity SIGABRT — CLAUDE.md 锁死)。
+//  - `aliasJudge` 走 `@MainActor` spy class(@Sendable 闭包不能 capture local var,Codex 建议)。
+//  - `requestReminderReschedule` 注入 `{}`,防 `ReminderService.fetchLastEntryDate()` 偷调
+//    `PersistenceController.shared.container`(CLAUDE.md 锁死)。
+//  - `MockAIService()` 走 AIService.swift 内置实现:summarize 取 prefix(50),extractThemes 关键词匹配,
+//    embed 返 16-D 归一化伪向量。
+//
+//  **不测的事**(已留 backlog):
+//  - `viewContext.save()` 失败路径(原方案 v3 的 `test_saveFailure_cleansUpOrphanImages`)。
+//    in-memory store 上稳定造 save throw 需要专门加 test seam,污染 production API → 跳过。
+//  - Reminder reschedule 副作用:UN center 不 mock,默认闭包注入成 no-op 即可,不验证 schedule 调度。
+//  - StreakMilestone 副作用:`evaluateAfterSave` 内部跑 detached Task 算 streak,异步且 fire-and-forget。
+//
+
+import Testing
+import Foundation
+import CoreData
+@testable import Lumory
+
+// MARK: - Spy
+
+/// `@MainActor` actor / class spy 记录 alias judge 调用 — Codex 提示 `@Sendable` 闭包对 local var
+/// capture 卡严,要走 actor / class。这里用 `@MainActor final class` + 同步 record(test 全程
+/// 在 main 上)。
+@MainActor
+final class AliasJudgeSpy {
+    private(set) var calls: [(UUID, [String])] = []
+    func record(id: UUID, tags: [String]) {
+        calls.append((id, tags))
+    }
+}
+
+// MARK: - Tests
+
+@MainActor
+struct EntryCreationServiceTests {
+
+    @Test func textOnly_happyPath_savesEntryWithFields() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let ai = MockAIService()
+
+        let result = await EntryCreationService.create(
+            .init(text: "Today was happy", audioFileName: nil, images: [], moodValue: 0.85),
+            in: persistence,
+            viewContext: context,
+            ai: ai,
+            aliasJudge: { _, _ in },
+            requestReminderReschedule: {}
+        )
+
+        guard case .saved(let entryID) = result else {
+            Issue.record("expected .saved, got \(result)")
+            return
+        }
+
+        // Fetch back and verify fields。`text/mood/date/wordCount` 全部走过 service 主线程写入。
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+        let entries = try context.fetch(request)
+        try #require(entries.count == 1)
+        let entry = entries[0]
+        #expect(entry.wrappedText == "Today was happy")
+        #expect(entry.moodValue == 0.85)
+        #expect(entry.wordCount > 0, "recomputeWordCount should have populated wordCount")
+        #expect(entry.summary == nil, "summary 暂时 nil(AI writeback fire-and-forget,test 不 await)")
+        #expect(entry.audioFileName == nil)
+        #expect((entry.imageFileNames ?? "").isEmpty)
+    }
+
+    @Test func imageAndAudio_persistsAttachmentMetadata() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let ai = MockAIService()
+
+        // 一张占位图(5x5 黑色 PNG-ish bytes;NSKeyedArchiver 不验证 PNG 格式,任何 Data 都能编)。
+        let image1 = Data(repeating: 0xAB, count: 64)
+        let image2 = Data(repeating: 0xCD, count: 128)
+        let audioFileName = "test_audio_\(UUID().uuidString).m4a"
+
+        defer {
+            // image 落盘到 Documents/LumoryImages,test tearDown 清。
+            // audio 没真实本地文件 → persistAudioOffMain iCloud 移动路径不会触发,无需清。
+            let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("LumoryImages")
+            if let entries = try? FileManager.default.contentsOfDirectory(atPath: docsURL.path) {
+                for name in entries where name.hasPrefix("img_") {
+                    try? FileManager.default.removeItem(at: docsURL.appendingPathComponent(name))
+                }
+            }
+        }
+
+        let result = await EntryCreationService.create(
+            .init(text: "with attachments", audioFileName: audioFileName, images: [image1, image2], moodValue: 0.5),
+            in: persistence,
+            viewContext: context,
+            ai: ai,
+            aliasJudge: { _, _ in },
+            requestReminderReschedule: {}
+        )
+
+        guard case .saved(let entryID) = result else {
+            Issue.record("expected .saved, got \(result)")
+            return
+        }
+
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+        let entries = try context.fetch(request)
+        try #require(entries.count == 1)
+        let entry = entries[0]
+
+        // audio:本地文件不存在,iCloud 移动没发生,但 service 仍把 fileName 落到 entry 上(给 audioURL 三层
+        // fallback 后续解析)。这是原 addEntry 同样的行为。
+        #expect(entry.audioFileName == audioFileName)
+
+        // images:imageFileNames 应有 2 个 CSV 项(`img_<entryID>_0.jpg`, `_1.jpg`),imagesData
+        // NSKeyedArchiver blob 非空。
+        let csv = entry.imageFileNames ?? ""
+        let parts = csv.split(separator: ",").map(String.init)
+        #expect(parts.count == 2, "expect 2 image filenames, got: \(csv)")
+        #expect(parts.allSatisfy { $0.hasPrefix("img_") && $0.hasSuffix(".jpg") })
+        #expect((entry.imagesData?.count ?? 0) > 0, "imagesData should be non-empty NSKeyedArchiver blob")
+    }
+
+    @Test func performAIWriteback_staleText_skipsCommitAndAliasJudge() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let ai = MockAIService()
+        let spy = AliasJudgeSpy()
+
+        // Seed:走 `create` 落一条 v1 entry。
+        let result = await EntryCreationService.create(
+            .init(text: "v1 工作很忙", audioFileName: nil, images: [], moodValue: 0.5),
+            in: persistence,
+            viewContext: context,
+            ai: ai,
+            aliasJudge: { id, tags in spy.record(id: id, tags: tags) },
+            requestReminderReschedule: {}
+        )
+        guard case .saved(let entryID) = result else {
+            Issue.record("seed expected .saved, got \(result)")
+            return
+        }
+
+        // 模拟用户在 AI 请求返回前编辑了 entry → text 变 v2。
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+        let seeded = try context.fetch(request)
+        try #require(seeded.count == 1)
+        seeded[0].text = "v2 这是修改后的内容"
+        try context.save()
+
+        // 用 v1 文本做 snapshot 调 writeback —— 模拟 AI 返回时 entry 已经是 v2。
+        let didCommit = await EntryCreationService.performAIWriteback(
+            entryID: entryID,
+            textSnapshot: "v1 工作很忙",
+            in: context,
+            ai: ai,
+            aliasJudge: { id, tags in spy.record(id: id, tags: tags) }
+        )
+
+        #expect(didCommit == false, "stale-write guard 必须丢弃 v1 结果")
+
+        // entry.summary 应仍是 nil(没写回),entry.text 仍是 v2(没被覆盖)。
+        let after = try context.fetch(request)
+        try #require(after.count == 1)
+        #expect(after[0].wrappedText == "v2 这是修改后的内容")
+        #expect(after[0].summary == nil, "stale 路径不应写 summary,否则 alias / Insights 引用 ghost 数据")
+
+        // alias judge 不应被调 —— 关键契约,防 ghost 别名建议(参考 codex review)。
+        #expect(spy.calls.isEmpty, "stale 路径必须跳过 aliasJudge,否则用户看到基于 v1 的 alias 建议")
+    }
+
+    /// 双 reviewer(coredata-migration-reviewer + codex)都独立 flag 的 gap:entry 在 AI 请求返回前
+    /// 已被删除 → `performAIWriteback` 内 fetch 拿不到 entry → 必须 no-op return false 且**不**调
+    /// aliasJudge。跟 stale-text guard 是同家族但走 `entry == nil` 早返路径,值得显式锁住契约。
+    @Test func performAIWriteback_entryDeleted_returnsNoOp_andSkipsAliasJudge() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let ai = MockAIService()
+        let spy = AliasJudgeSpy()
+
+        // Seed:落一条 entry。
+        let textSnapshot = "今天工作很忙"
+        let result = await EntryCreationService.create(
+            .init(text: textSnapshot, audioFileName: nil, images: [], moodValue: 0.5),
+            in: persistence,
+            viewContext: context,
+            ai: ai,
+            aliasJudge: { _, _ in },
+            requestReminderReschedule: {}
+        )
+        guard case .saved(let entryID) = result else {
+            Issue.record("seed expected .saved, got \(result)")
+            return
+        }
+
+        // 模拟用户立即删了这条 entry(走 viewContext.delete + save 的真实路径)。
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+        let seeded = try context.fetch(request)
+        try #require(seeded.count == 1)
+        context.delete(seeded[0])
+        try context.save()
+
+        // 现在调 writeback,fetch 拿不到 → 走 `return false` 早返路径,不应触碰 aliasJudge。
+        let didCommit = await EntryCreationService.performAIWriteback(
+            entryID: entryID,
+            textSnapshot: textSnapshot,
+            in: context,
+            ai: ai,
+            aliasJudge: { id, tags in spy.record(id: id, tags: tags) }
+        )
+
+        #expect(didCommit == false, "entry 已删 → writeback 必须 return false 不抛")
+        #expect(spy.calls.isEmpty, "entry 已删 → 不能调 aliasJudge(没有 entry 再让 alias 建议挂上)")
+    }
+
+    /// Codex 独立 flag 的 gap:`create` 收 attachments-only(empty text)时,**fire-and-forget AI
+    /// writeback Task 不应被 spawn**(`if !input.text.isEmpty { Task { ... } }` 早返)。锁住这条
+    /// 契约 — 防 future 把 guard 误删后 service 给空文本调 AI summarize / extractThemes 浪费 token。
+    @Test func create_attachmentsOnly_emptyText_skipsAIWriteback() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let ai = MockAIService()
+        let spy = AliasJudgeSpy()
+
+        let image = Data(repeating: 0xEE, count: 32)
+        defer {
+            let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("LumoryImages")
+            if let entries = try? FileManager.default.contentsOfDirectory(atPath: docsURL.path) {
+                for name in entries where name.hasPrefix("img_") {
+                    try? FileManager.default.removeItem(at: docsURL.appendingPathComponent(name))
+                }
+            }
+        }
+
+        let result = await EntryCreationService.create(
+            .init(text: "", audioFileName: nil, images: [image], moodValue: 0.5),
+            in: persistence,
+            viewContext: context,
+            ai: ai,
+            aliasJudge: { id, tags in spy.record(id: id, tags: tags) },
+            requestReminderReschedule: {}
+        )
+        guard case .saved(let entryID) = result else {
+            Issue.record("expected .saved for attachments-only, got \(result)")
+            return
+        }
+
+        // 给任何被错误 spawn 的 Task 一次跑的机会 — 如果 guard 误失效,这次 yield 后 spy 就会被填。
+        for _ in 0..<3 { await Task.yield() }
+
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+        let entries = try context.fetch(request)
+        try #require(entries.count == 1)
+        let entry = entries[0]
+
+        // 主线断言:attachment 落库正常,但 summary 仍 nil(AI Task 没被 spawn → 没人写)。
+        #expect(entry.summary == nil, "empty text 不应触发 AI writeback,summary 应保持 nil")
+        #expect(entry.themeArray.isEmpty, "empty text 不应触发 extractThemes,themes 应空")
+        #expect(spy.calls.isEmpty, "empty text 路径绝不应调 aliasJudge")
+
+        // 顺带验证 attachment metadata 仍写了。
+        let csv = entry.imageFileNames ?? ""
+        #expect(!csv.isEmpty, "attachment-only 路径仍应落 imageFileNames")
+        #expect((entry.imagesData?.count ?? 0) > 0, "attachment-only 路径仍应落 imagesData blob")
+    }
+
+    @Test func performAIWriteback_freshText_commitsAndCallsAliasJudge() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let ai = MockAIService()
+        let spy = AliasJudgeSpy()
+
+        // text 含 MockAIService.extractThemes 能命中的关键词("工作"/"健康"),保证 themes 非空触发 alias judge。
+        let textSnapshot = "今天工作很忙,健康也要注意"
+
+        let result = await EntryCreationService.create(
+            .init(text: textSnapshot, audioFileName: nil, images: [], moodValue: 0.6),
+            in: persistence,
+            viewContext: context,
+            ai: ai,
+            aliasJudge: { id, tags in spy.record(id: id, tags: tags) },
+            requestReminderReschedule: {}
+        )
+        guard case .saved(let entryID) = result else {
+            Issue.record("seed expected .saved, got \(result)")
+            return
+        }
+
+        // 直接调 writeback 用相同文本,模拟 AI 及时返回(非 stale)。
+        let didCommit = await EntryCreationService.performAIWriteback(
+            entryID: entryID,
+            textSnapshot: textSnapshot,
+            in: context,
+            ai: ai,
+            aliasJudge: { id, tags in spy.record(id: id, tags: tags) }
+        )
+
+        #expect(didCommit == true, "fresh 路径应写盘成功")
+
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+        let after = try context.fetch(request)
+        try #require(after.count == 1)
+        let entry = after[0]
+        #expect(entry.summary != nil, "summary should be written by AI")
+        #expect(!entry.themeArray.isEmpty, "MockAIService 关键词命中应有 themes(如 工作 / 健康)")
+        #expect(entry.embeddingVector != nil, "embedding vector should be written")
+
+        // alias judge 至少一次被调(可能不止一次:`create` 的 fire-and-forget 也会调一次,然后 explicit
+        // `performAIWriteback` 又调一次)。**最少**一次的契约是:fresh + non-empty themes 必须触发。
+        #expect(!spy.calls.isEmpty, "fresh 路径 + non-empty themes 必须触发 aliasJudge")
+        #expect(spy.calls.allSatisfy { $0.0 == entryID })
+    }
+}

@@ -63,8 +63,8 @@ struct HomeView: View {
     @State private var draftSaveTask: Task<Void, Never>?
     @Environment(\.scenePhase) private var scenePhase
 
-    private let cal = Calendar.current
-    @Environment(\.colorScheme) private var colorScheme
+    // `cal` / `colorScheme` 跟随 timelineCard / textInputArea 一起搬出去
+    // (`HomeTimelineCard` / `HomeComposerCard` 各自持本地 `@Environment(\.colorScheme)`)。
 
     // 简化的语言检测
     private static var defaultAppLanguage: String {
@@ -101,6 +101,44 @@ struct HomeView: View {
     /// List 顶部锚点 id,FAB 用 ScrollViewProxy.scrollTo 跳回这里。
     private let topAnchorID = "__lumory_top__"
     @State private var composerFocusRequestID: UUID?
+
+    // MARK: - Composer 回调粘合
+    //
+    // `HomeComposerCard` 是纯展示 + callback 边界,parent 这里把"按下文本变化 / mic 点击"
+    // 翻译成项目内的 task / debounce / haptic / 录音生命周期。
+    // 抽成方法是为了 `mainListContent` 的 init 不被 closure 字面量塞爆。
+
+    /// composer 文本变化:500ms debounce 写 AppGroup defaults;空白立即同步清(防 send 后 OOM 还原)。
+    private func handleInputTextChanged(_ newValue: String) {
+        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            draftSaveTask?.cancel()
+            draftSaveTask = nil
+            AppGroup.userDefaults.removeObject(forKey: "lumory.home.draft.text")
+        } else {
+            draftSaveTask?.cancel()
+            draftSaveTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled else { return }
+                Self.persistDraft(newValue)
+            }
+        }
+    }
+
+    /// Mic 按钮 tap:isRecording → 走 stop 路径(转写跟进);否则启录,真起录才发 success haptic。
+    /// 权限未定时 startRecording 触发授权 alert 后 return false,这种"假启动"不该 haptic 暗示已开始。
+    private func handleMicTap() {
+        if recorder.isRecording {
+            Task { await handleStopRecording() }
+        } else {
+            let didStart = recorder.startRecording()
+            if didStart {
+                #if canImport(UIKit)
+                HapticManager.shared.notification(.success)
+                #endif
+            }
+        }
+    }
 
     var body: some View {
         iOSHomeView
@@ -285,8 +323,33 @@ struct HomeView: View {
                 moodSliderSection
                     .id(topAnchorID)
 
-                // 输入框和录音功能容器 - Mac优化
-                inputSection
+                // 输入框和录音功能容器。视觉/交互拆到 `HomeComposerCard`(`Components/`),
+                // parent 这里负责 wire callbacks(send / 录音生命周期 / 草稿 debounce / 图片压缩任务)
+                // 把 composer 拉回到 List row 上下文 — listRow* 修饰器留外侧,内部不感知 list 结构。
+                HomeComposerCard(
+                    inputVM: inputVM,
+                    recordingVM: recordingVM,
+                    photoVM: photoVM,
+                    recorder: recorder,
+                    audioPlaybackController: audioPlaybackController,
+                    isInputFocused: $isInputFocused,
+                    inputPlaceholder: inputPlaceholder,
+                    onInputTextChanged: handleInputTextChanged,
+                    onSend: handleSendAction,
+                    onPlayRecording: { fileName in playAudio(fileName: fileName) },
+                    onRetryTranscription: retryTranscription,
+                    onMicTap: handleMicTap,
+                    onPhotoSelectionChanged: { newValue in
+                        // F1 fix:取消上一轮压缩任务。否则用户快速换选时,旧任务可能后完成
+                        // 覆盖掉新结果(stale write)。
+                        photoVM.photoLoadTask?.cancel()
+                        photoVM.photoLoadTask = Task { await loadPhotosWithCompression(newValue) }
+                    },
+                    onDeleteRecordingConfirmed: { target in deleteRecording(target) }
+                )
+                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 28, trailing: 16))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
 
                 // 日记条目内容 Sections
                 diaryContentSections
@@ -297,6 +360,15 @@ struct HomeView: View {
             .scrollDismissesKeyboard(.interactively)
             .refreshable {
                 await triggerManualSync()
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                // 进 background 时 cancel debounce + 同步 flush 草稿。
+                // 否则用户输入完立刻锁屏 / 切走,iOS 5s background grace 内 task 可能没跑完,丢草稿。
+                // 原来挂在 textInputArea 内部的 onChange,composer 拆出去后挪到 list 根上,作用范围一致。
+                if newPhase == .background {
+                    draftSaveTask?.cancel()
+                    Self.persistDraft(inputVM.inputText)
+                }
             }
             .onChange(of: composerFocusRequestID) { _, requestID in
                 guard requestID != nil else { return }
@@ -389,268 +461,15 @@ struct HomeView: View {
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
     }
     
-    @ViewBuilder
-    private var inputSection: some View {
-        // GlassEffectContainer 包 outer card glass + inner send button(.glassProminent),
-        // SwiftUI 合并渲染,给 .glassProminent 必要的 surface 上下文。
-        // 不保证视觉上有明显玻璃感 —— .glassProminent 在没有可折射 backdrop 时可能就是
-        // tinted 色块,原生就这样,算了。
-        GlassEffectContainer(spacing: 12) {
-            VStack(alignment: .leading, spacing: 10) {
-                textInputArea
-                recordingsSection
-                if !photoVM.selectedImageItems.isEmpty { photosSection }
-                if photoVM.compressionFailureCount > 0 { compressionFailureBanner }
-                // 卡内分隔线:把"内容区"和"动作区(工具栏)"隔开。
-                // P1-Dark-3 用 .separator system color — 暗色下系统自动算到约 0.20 alpha,
-                // 之前 primary.opacity(0.06) 在 OLED 暗色基本不可见,分隔线消失。
-                Capsule()
-                    .fill(Color(.separator))
-                    .frame(height: 1)
-                    .padding(.horizontal, 4)
-                // 工具栏:photo / mic / 计时 / 发送。
-                HStack(spacing: 18) {
-                    keyboardActionsBar
-                }
-                .padding(.top, 2)
-            }
-            .padding(16)
-            .liquidGlassCard(cornerRadius: 22)
-        }
-        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 28, trailing: 16))
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
-    }
-
-    @ViewBuilder
-    private var textInputArea: some View {
-        // 原生 SwiftUI TextField(axis:.vertical),不再走 UIKit 桥也不挂 .toolbar(.keyboard) ——
-        // 工具栏挪进了输入卡内部(横线下方),始终可见,不再依赖 keyboard accessory 协商。
-        // Prompt 颜色按色彩模式分:亮色 secondary 0.50(浅),暗色实 .secondary。
-        let promptColor: Color = colorScheme == .dark
-            ? Color.secondary
-            : Color.secondary.opacity(0.50)
-
-        // `@Observable` VM 拿 Binding 需要 `@Bindable` shadow —— iOS 17+ 标准写法。
-        @Bindable var inputVM = inputVM
-
-        TextField(
-            "",
-            text: $inputVM.inputText,
-            prompt: Text(inputPlaceholder)
-                .font(.system(size: 16))
-                .foregroundColor(promptColor),
-            axis: .vertical
-        )
-        .lineLimit(6...20)
-        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
-        .background(Color.clear)
-        .font(.system(size: 17))
-        .focused($isInputFocused)
-        // P1-Home-12 键盘 toolbar 加"完成"按钮 — 中文拼音输入法 candidate bar 占额外 36pt,
-        // 用户要看下方滚动区必须先关键盘。"keyboard.chevron.compact.down" 是系统标准 dismiss 图标。
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button {
-                    isInputFocused = false
-                } label: {
-                    Image(systemName: "keyboard.chevron.compact.down")
-                }
-                .accessibilityLabel(NSLocalizedString("收起键盘", comment: "Dismiss keyboard"))
-            }
-        }
-        .onChange(of: inputVM.inputText) { _, newValue in
-            // P1-Home-13 草稿持久化 — 用户切微信回来 OK,但 App 被 OOM 杀掉就丢了。
-            // 写到 AppGroup defaults 防进程被杀,但**500ms debounce**:用户每键写一次会让
-            // plist encode + KVO + AppGroup 跨进程 sync 累计可观,scrollback 时尤其明显;
-            // 改成静默 500ms 后再写,scenePhase=.background 时强 flush(见下面的 onChange)。
-            //
-            // **空白立即 sync clear,不 debounce** — `handleSendAction` 发完日记后会清空
-            // `inputText`,如果走 debounce 任务,500ms 内 App 被 kill / suspend,旧草稿仍在 AppGroup
-            // 里;下次启动会被 hydrate 回 composer,用户看到已发送的文本"还原"。空白立即清确保
-            // 发送/手动清都立即落盘。
-            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                draftSaveTask?.cancel()
-                draftSaveTask = nil
-                AppGroup.userDefaults.removeObject(forKey: "lumory.home.draft.text")
-            } else {
-                draftSaveTask?.cancel()
-                draftSaveTask = Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                    guard !Task.isCancelled else { return }
-                    Self.persistDraft(newValue)
-                }
-            }
-
-            // spectrum state 切换是即时 UI 反馈,不能 debounce
-            let hasContent = !trimmed.isEmpty
-            if hasContent && inputVM.spectrumDisplayState == .idle {
-                withAnimation(.easeInOut(duration: 1.0)) {
-                    inputVM.spectrumDisplayState = .analyzing
-                }
-            } else if !hasContent && inputVM.spectrumDisplayState == .analyzing {
-                withAnimation(.easeInOut(duration: 0.8)) {
-                    inputVM.spectrumDisplayState = .idle
-                }
-            }
-        }
-        .onChange(of: scenePhase) { _, newPhase in
-            // 进 background 时 cancel debounce + 同步 flush 草稿。
-            // 否则用户输入完立刻锁屏 / 切走,iOS 5s background grace 内 task 可能没跑完,丢草稿。
-            if newPhase == .background {
-                draftSaveTask?.cancel()
-                Self.persistDraft(inputVM.inputText)
-            }
-        }
-    }
-
     /// 草稿写盘的单点入口。空白 → remove key,非空 → set。
+    /// `HomeComposerCard.onInputTextChanged` 经 parent 内 debounce 调本函数;
+    /// scenePhase=background 强 flush 也走这里。
     private static func persistDraft(_ value: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             AppGroup.userDefaults.removeObject(forKey: "lumory.home.draft.text")
         } else {
             AppGroup.userDefaults.set(value, forKey: "lumory.home.draft.text")
-        }
-    }
-    
-    @ViewBuilder
-    private var recordingsSection: some View {
-        // alert(isPresented:) 要 Binding<Bool>,走 `@Bindable` shadow。
-        @Bindable var recordingVM = recordingVM
-        VStack(alignment: .leading, spacing: 8) {
-            if let rec = recordingVM.audioRecordings.first {
-                RecordingRow(
-                    recording: rec,
-                    controller: audioPlaybackController,
-                    isTranscribing: recordingVM.isTranscribing,
-                    onPlay: { playAudio(fileName: rec.fileName) },
-                    onDelete: {
-                        recordingVM.deleteTarget = rec.fileName
-                        recordingVM.showingDeleteAlert = true
-                    }
-                )
-                if let failure = recordingVM.transcriptionError {
-                    transcriptionErrorBanner(failure: failure)
-                }
-                if let playbackError = recordingVM.audioPlaybackError {
-                    audioPlaybackErrorBanner(message: playbackError)
-                }
-            }
-        }
-        .frame(height: recordingVM.audioRecordings.isEmpty ? 0 : nil)
-        .alert(NSLocalizedString("删除录音？", comment: "Delete recording confirmation"), isPresented: $recordingVM.showingDeleteAlert) {
-            Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
-                if let target = recordingVM.deleteTarget {
-                    deleteRecording(target)
-                }
-            }
-            Button(NSLocalizedString("取消", comment: "Cancel button"), role: .cancel) {
-                recordingVM.deleteTarget = nil
-            }
-        }
-    }
-
-    /// 音频播放失败 inline banner。playAudio 的 onPlayError 把文案塞 VM,这里渲染。点 X 清。
-    @ViewBuilder
-    private func audioPlaybackErrorBanner(message: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .font(.footnote)
-            Text(message)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-            Button {
-                recordingVM.audioPlaybackError = nil
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel(NSLocalizedString("关闭", comment: "Dismiss"))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline))
-    }
-
-    /// 图片压缩 / 加载失败 inline banner。9 张选 7 成功 → "2 张图片处理失败" 提醒,跟 transcription
-    /// banner 同 visual idiom。用户点 "知道了" 清。photoVM.compressionFailureCount = 0 不显示。
-    @ViewBuilder
-    private var compressionFailureBanner: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .font(.footnote)
-            Text(String(
-                format: NSLocalizedString("有 %d 张图片处理失败", comment: "Photo compression failure banner"),
-                photoVM.compressionFailureCount
-            ))
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-            Button {
-                photoVM.compressionFailureCount = 0
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel(NSLocalizedString("关闭", comment: "Dismiss"))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline))
-    }
-
-    @ViewBuilder
-    private func transcriptionErrorBanner(failure: TranscriptionFailure) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .font(.footnote)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(transcriptionErrorMessage(for: failure))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                if failure.isRetryable {
-                    Button {
-                        retryTranscription()
-                    } label: {
-                        Text(NSLocalizedString("transcription.retry", comment: "Retry transcription button"))
-                            .font(.footnote.weight(.medium))
-                    }
-                    .buttonStyle(.borderless)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline))
-    }
-
-    private func transcriptionErrorMessage(for failure: TranscriptionFailure) -> String {
-        switch failure {
-        case .networkFailed:
-            return NSLocalizedString("transcription.error.network", comment: "Network failure during transcription")
-        case .audioTooLarge:
-            return NSLocalizedString("transcription.error.audioTooLarge", comment: "Audio file too large")
-        case .audioReadFailed:
-            return NSLocalizedString("transcription.error.audioRead", comment: "Could not read audio file")
-        case .serverError(let code):
-            return String(
-                format: NSLocalizedString("transcription.error.server", comment: "Transcription server error"),
-                code
-            )
-        case .sharedSecretMissing:
-            return NSLocalizedString("transcription.error.config", comment: "App config error")
         }
     }
     
@@ -847,10 +666,23 @@ struct HomeView: View {
                 Log.info("[HomeView SendButton] Mood revealed: \(finalMoodValue)", category: .ui)
             }
 
-            // 4. 把落库和 2 秒光谱动画并行跑 —— 保存不再被动画白白拖 2 秒，
+            // 4. 把落库和 2 秒光谱动画并行跑 —— 保存不再被动画白白拖 2 秒,
             //    动画也不会被慢网络/磁盘 I/O 拖过 2 秒。
+            // **service 边界**:`EntryCreationService.create` 一手包办附件 I/O + Core Data save +
+            // Reminder reschedule + StreakMilestone + fire-and-forget AI writeback(stale-guard 在
+            // service 内部)。HomeView 只 await Result.didSave 控 UI 状态机。
             let saveTask = Task {
-                await addEntry(text: textToSend, audioFileName: audioToSend, moodValue: finalMoodValue, images: imagesToSend)
+                return await EntryCreationService.create(
+                    .init(
+                        text: textToSend,
+                        audioFileName: audioToSend,
+                        images: imagesToSend,
+                        moodValue: finalMoodValue
+                    ),
+                    in: PersistenceController.shared,
+                    viewContext: viewContext,
+                    ai: aiService
+                ).didSave
             }
 
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -909,203 +741,11 @@ struct HomeView: View {
         }
     }
     
-    @ViewBuilder
-    private var photosSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "photo.stack")
-                    .foregroundColor(.blue)
-                Text(photoCountLabel)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
-            }
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    // 用压缩完成时分配的 UUID 作 id。不要用 Data 自身作 id:
-                    // SwiftUI 每次 diff 都会 hash 图片 payload,选 9 张图后输入会被拖慢。
-                    ForEach(photoVM.selectedImageItems) { item in
-                        InputPhotoThumbnail(
-                            data: item.data,
-                            dataID: item.id,
-                            onRemove: {
-                                withAnimation(AnimationConfig.stiffSpring) {
-                                    // 按稳定 id 查当前 index —— closure 捕获的 index 在
-                                    // selectedImageItems 被其他事件改过后会过期。
-                                    if let idx = photoVM.selectedImageItems.firstIndex(where: { $0.id == item.id }) {
-                                        photoVM.selectedImageItems.remove(at: idx)
-                                        if idx < photoVM.selectedPhotos.count {
-                                            photoVM.selectedPhotos.remove(at: idx)
-                                        }
-                                    }
-                                }
-                            }
-                        )
-                    }
-                }
-                .padding(.horizontal, 4)
-            }
-            .frame(height: 88)
-        }
-    }
-    
     // MARK: - Core Data 操作
-    
-    private func addEntry(text: String, audioFileName: String?, moodValue: Double? = nil, images: [Data] = []) async -> Bool {
-        // 立即保存日记（不等待标题生成），标题异步生成
-        let finalMoodValue = moodValue ?? 0.5
-        let entryID = UUID()
-        var savedEntryID: UUID?
-        var didSave = false
-
-        // 把磁盘 I/O、CloudKit blob 编码全部挪到非主线程，主线程只做 Core Data 字段赋值 + save。
-        // 之前这些都挤在 `await MainActor.run { ... }` 里，附件多一点 UI 就会卡。
-        async let preparedAudio: String? = Self.persistAudioOffMain(audioFileName: audioFileName)
-        async let preparedImages: [String] = Self.persistImagesOffMain(images: images, entryID: entryID)
-        async let preparedSyncBlob: Data? = Self.encodeImagesForSyncOffMain(images: images)
-
-        let (audioName, imageFileNames, syncBlob) = await (preparedAudio, preparedImages, preparedSyncBlob)
-
-        await MainActor.run {
-            let newEntry = DiaryEntry(context: viewContext)
-            newEntry.id = entryID
-            newEntry.date = Date()
-            newEntry.text = text
-            newEntry.moodValue = finalMoodValue
-            newEntry.summary = nil  // 标题稍后异步生成
-            newEntry.recomputeWordCount()  // Phase 3: 本地计算，供统计使用
-
-            if let audioName = audioName {
-                newEntry.audioFileName = audioName
-            }
-
-            if !imageFileNames.isEmpty {
-                newEntry.imageFileNames = imageFileNames.joined(separator: ",")
-                Log.info("[HomeView addEntry] Set imageFileNames: \(newEntry.imageFileNames ?? "")", category: .ui)
-            }
-            if let syncBlob = syncBlob {
-                newEntry.imagesData = syncBlob
-            }
-
-            do {
-                try viewContext.save()
-                savedEntryID = entryID
-                didSave = true
-                Log.info("[HomeView] 日记已保存，标题稍后生成", category: .ui)
-            } catch {
-                Log.error("[HomeView] 保存日记失败: \(error)", category: .ui)
-                // 已落盘的 image 文件孤儿清理 —— entry save 失败时这些文件已经被 persistImagesOffMain
-                // 写到 Documents/LumoryImages,无人引用就是 storage leak,长期累积。best-effort 删,失败静默。
-                // (audio 暂不清:persistAudioOffMain 已把本地副本搬到 iCloud,iCloud 路径由 entry.audioURL 三层
-                // fallback 解析,这个 catch 分支拿不到 entry 实例 / 也不该重新做一遍 lookup,留给后续策略处理。)
-                for fileName in imageFileNames {
-                    try? DiaryEntry.deleteImageFromDocuments(fileName)
-                }
-            }
-        }
-
-        guard didSave else { return false }
-
-        // 智能 reminder reschedule:任何成功 save(含纯录音 / 纯图片 entry)都可能 fulfill
-        // 当前固定周期(cycle-based),在 !text.isEmpty 之外触发。requestReschedule 是
-        // task cancel + replace,多入口并发安全。
-        ReminderService.shared.requestReschedule()
-
-        // Streak milestone 庆祝。fire-and-forget — 内部跑后台 fetch 算 streak,命中 7/14/30/60/100/(+100)
-        // 且之前没庆祝过 → set pendingMilestone,ChronoteApp ZStack 顶层 overlay 自动渲染。
-        // 用最新 entry 的 mood 作 overlay 配色。
-        StreakMilestoneService.shared.evaluateAfterSave(
-            persistence: PersistenceController.shared,
-            latestEntryMood: moodValue ?? 0.5
-        )
-
-        // 异步生成摘要、主题、embedding（Phase 3 × Phase 2 融合）
-        // **Stale-write guard**：用户可能在 AI 请求返回前就打开这条日记编辑了，
-        // 那时 `entry.text` 已经是 v2，但我们手上的结果是基于 v1 算出来的——
-        // 直接写回就把 v2 的 summary/themes/embedding 污染成 v1 的。
-        // 比较 `entry.wrappedText == text`（我们入参的快照），不匹配就丢弃结果，
-        // 等 DiaryDetailView.refreshAIIndex 按 v2 重算。
-        if let entryID = savedEntryID, !text.isEmpty {
-            let textSnapshot = text
-            Task {
-                async let summaryTask = aiService.summarize(text: textSnapshot)
-                async let themesTask = aiService.extractThemes(text: textSnapshot)
-                async let embeddingTask = aiService.embed(text: textSnapshot)
-                let (summary, themes, embedding) = await (summaryTask, themesTask, embeddingTask)
-
-                // 把"writeback 是否真的提交了"flag 跨出 MainActor.run —— 关键!
-                // 否则即使 stale guard 丢弃了写入,我们仍会把 themes 喂给 alias judge,
-                // 给一个**根本没保存这些 themes 的 entry** 入队 alias 建议(用户后续看到的
-                // "「X」是不是 Y?" 是基于 ghost 数据生成的,极易 confusing)。
-                let didCommitThemes: Bool = await MainActor.run {
-                    let fetchRequest: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
-                    fetchRequest.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
-                    guard let entry = try? viewContext.fetch(fetchRequest).first else { return false }
-                    // 跟 DiaryDetailView.refreshAIIndex 同一套 stale-write guard：
-                    // 当前 entry.text 已经被更新就跳过这次写入。
-                    guard entry.wrappedText == textSnapshot else {
-                        Log.info("[HomeView] 文本已被更新，丢弃 stale AI 结果（v1 不覆盖 v2）", category: .ai)
-                        return false
-                    }
-                    entry.summary = summary
-                    entry.setThemes(themes)
-                    if let vector = embedding {
-                        entry.setEmbedding(vector)
-                    }
-                    do {
-                        try viewContext.save()
-                        Log.info("[HomeView] 摘要+主题+索引已更新: themes=\(themes.count), hasEmbedding=\(embedding != nil)", category: .ai)
-                        return true
-                    } catch {
-                        Log.error("[HomeView] AI 写回保存失败: \(error)", category: .ai)
-                        return false
-                    }
-                }
-
-                // Theme alias judge —— 仅在 themes 真的写到 entry 上时才跑。否则 alias 建议是
-                // 基于 ghost 数据(参考 codex review)。
-                if didCommitThemes, !themes.isEmpty {
-                    await ThemeAliasJudgeService.shared.judgeAfterWrite(
-                        entryID: entryID,
-                        newTags: themes
-                    )
-                }
-            }
-        }
-        return true
-    }
-
-    // MARK: - addEntry helpers (off-main I/O)
-
-    /// 在后台线程把本地录音拷贝到 iCloud 容器，并删掉本地副本。返回最终落库用的文件名。
-    /// 非 @MainActor：磁盘读写、FileManager、Data(contentsOf:) 都没必要卡主线程。
-    private static func persistAudioOffMain(audioFileName: String?) async -> String? {
-        guard let audioFileName = audioFileName else { return nil }
-        return await Task.detached(priority: .userInitiated) { () -> String? in
-            let localURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent(audioFileName)
-
-            if FileManager.default.fileExists(atPath: localURL.path),
-               let audioData = try? Data(contentsOf: localURL),
-               let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-                let audioDir = iCloudURL.appendingPathComponent("Documents/LumoryAudio")
-                let iCloudAudioURL = audioDir.appendingPathComponent(audioFileName)
-                do {
-                    if !FileManager.default.fileExists(atPath: audioDir.path) {
-                        try FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
-                    }
-                    try audioData.write(to: iCloudAudioURL, options: .atomic)
-                    try? FileManager.default.removeItem(at: localURL)
-                    Log.info("[HomeView] Saved audio to iCloud: \(audioFileName)", category: .ui)
-                } catch {
-                    Log.error("[HomeView] Audio iCloud write failed, keeping local copy \(audioFileName): \(error)", category: .ui)
-                }
-            }
-
-            return audioFileName
-        }.value
-    }
+    //
+    // 写日记落库 + 附件 I/O + AI writeback 整段搬到 `EntryCreationService`(`Services/`),
+    // `handleSendAction` 直接 `await EntryCreationService.create(...).didSave` 控 UI 状态机。
+    // 单测覆盖 service 入口(`ChronoteTests/EntryCreationServiceTests.swift`)。
 
     private static func resolvedAudioURL(fileName: String) -> URL? {
         let fm = FileManager.default
@@ -1128,234 +768,39 @@ struct HomeView: View {
         return nil
     }
 
-    /// 后台线程把图片逐一落到 documents 目录并返回文件名列表。
-    private static func persistImagesOffMain(images: [Data], entryID: UUID) async -> [String] {
-        guard !images.isEmpty else { return [] }
-        return await Task.detached(priority: .userInitiated) { () -> [String] in
-            var names: [String] = []
-            names.reserveCapacity(images.count)
-            for (index, imageData) in images.enumerated() {
-                let fileName = "img_\(entryID.uuidString)_\(index).jpg"
-                do {
-                    let saved = try DiaryEntry.saveImageToDocuments(imageData, fileName: fileName)
-                    names.append(saved)
-                    Log.info("[HomeView addEntry] Saved image \(index + 1)/\(images.count): \(saved)", category: .ui)
-                } catch {
-                    Log.error("[HomeView] 保存图片失败: \(error)", category: .ui)
-                }
-            }
-            return names
-        }.value
-    }
-
-    /// 后台线程把已压缩的图片 NSKeyedArchiver 编码成 Data，落库时直接赋给 `imagesData`。
-    /// 替代原来 `saveImagesForSync`（同步版）在 MainActor 里跑的重活。
-    private static func encodeImagesForSyncOffMain(images: [Data]) async -> Data? {
-        guard !images.isEmpty else { return nil }
-        do {
-            let encoded = try NSKeyedArchiver.archivedData(withRootObject: images, requiringSecureCoding: true)
-            Log.info("[HomeView] Encoded \(images.count) images for sync, total size: \(encoded.count) bytes", category: .ui)
-            return encoded
-        } catch {
-            Log.error("[HomeView] 图片编码失败: \(error)", category: .ui)
-            return nil
-        }
-    }
-
-    // 时间线列表：竖直连接线 + 彩色节点 + 卡片。不再按日分组 —— 每行自带相对日期标签。
+    // 时间线列表:竖直连接线 + 彩色节点 + 卡片。不再按日分组 —— 每行自带相对日期标签。
+    // 真实渲染由 `HomeTimelineList` / `HomeTimelineEmptyState` / `HomeTimelineRow` /
+    // `HomeTimelineCard` 拆分承担(`Views/HomeView/Components/`)。这里只做 entries.isEmpty 的
+    // 分支调度 + parent state 回调 wiring。
     @ViewBuilder
     private var diaryContentSections: some View {
         if entries.isEmpty {
-            // 冷启动首帧 `@FetchRequest` 还没把 SQLite 读完就返空，emptyState 会闪一下。
-            // 等 `hasLoadedOnce` 置位后（.onAppear 里设）再允许显示空态。
+            // 冷启动首帧 `@FetchRequest` 还没把 SQLite 读完就返空,emptyState 会闪一下。
+            // 等 `hasLoadedOnce` 置位后(.task 里设)再允许显示空态。
             if hasLoadedOnce {
-                emptyStateSection
+                HomeTimelineEmptyState()
             }
         } else {
-            entriesListSection
-        }
-    }
-
-    @ViewBuilder
-    private var emptyStateSection: some View {
-        Section {
-            // 用项目共享的 EmptyStateView 替代单行 placeholder —— 第一次打开 App 看到的就是这块,
-            // 给图标 + 标题 + 提示三层信息,引导用户走录音 / 文字两条入口。
-            EmptyStateView(
-                systemImage: "book.closed",
-                title: NSLocalizedString("暂无日记，快去记录吧～", comment: "Empty timeline title"),
-                // P1-Home-7 修正"长按麦克风"→"或点下麦克风" — 当前实际交互是 tap toggle 不是
-                // hold-to-talk(P1-Home-2 落地后再改回长按文案)。让首次用户跟着提示能真触发录音。
-                message: NSLocalizedString("点下方输入框写一句,或点下麦克风录一段语音。",
-                                            comment: "Empty timeline subtitle")
-            )
-            .frame(minHeight: 320)
-        }
-        .listRowSeparator(.hidden)
-        .listSectionSeparator(.hidden)
-        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
-        .listRowBackground(Color.clear)
-    }
-
-    @ViewBuilder
-    private var entriesListSection: some View {
-        // 用 objectID 作稳定 identity，List 能识别单行 delete 播原生 row-removal 动画；
-        // 同时 `@FetchRequest` 已关 animation，`deleteEntry` 里的 `withAnimation` 独立生效，
-        // 不再和 FetchRequest 内建动画打架。500 条日记 shuffle 时子视图 @State（如图片 thumbnail 解码）
-        // 也不会因索引重排而整列重建。
-        let firstID = entries.first?.objectID
-        let lastID = entries.last?.objectID
-        ForEach(entries, id: \.objectID) { entry in
-            timelineRow(
-                entry: entry,
-                isFirst: entry.objectID == firstID,
-                isLast: entry.objectID == lastID
+            HomeTimelineList(
+                entries: Array(entries),
+                appLanguage: appLanguage,
+                onTap: { entry in
+                    // 上次长按"编辑"后 onDisappear 还没跑完就再次点击,`shouldStartEditing` 残留 true,
+                    // 这次普通点击也会进编辑模式。显式清掉。
+                    shouldStartEditing = false
+                    selectedEntry = entry
+                },
+                onEdit: { entry in
+                    shouldStartEditing = true
+                    selectedEntry = entry
+                },
+                onDelete: { entry in
+                    deleteEntry(entry)
+                }
             )
         }
     }
 
-    @ViewBuilder
-    private func timelineRow(entry: DiaryEntry, isFirst: Bool, isLast: Bool) -> some View {
-        Button {
-            // P1-T5 主入口 haptic — 日记卡 tap 是高频主入口,之前完全没反馈 vs 二级主题卡 tap
-            // 反而有,主次颠倒。规则见 CLAUDE.md:自定义 Button-shape 进 detail 卡 = .light impact。
-            #if canImport(UIKit)
-            HapticManager.shared.impact(.light)
-            #endif
-            // 原先只设 selectedEntry，若上次长按"编辑"后 onDisappear 还没跑完就再次点击，
-            // `shouldStartEditing` 残留 true，这次普通点击也会进编辑模式。显式清掉。
-            shouldStartEditing = false
-            selectedEntry = entry
-        } label: {
-            timelineCard(for: entry)
-                .contentShape(
-                    .contextMenuPreview,
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                )
-                .padding(.bottom, 10)
-                .contentShape(Rectangle())
-        }
-        // P1-T6 PressableScaleButtonStyle — 主时间线日记卡之前 plain,无任何按下反馈。
-        // 规则见 CLAUDE.md:自定义 Button-shape 卡片(日记 / 主题 / Settings 自定义 row)统一套这个。
-        .buttonStyle(PressableScaleButtonStyle())
-        .contextMenu {
-            Button {
-                shouldStartEditing = true
-                selectedEntry = entry
-            } label: {
-                Label(NSLocalizedString("编辑", comment: "Edit"), systemImage: "pencil")
-            }
-            // 删除直接执行 — 4 秒撤销 toast 替代了 confirmation alert。
-            Button(role: .destructive) {
-                deleteEntry(entry)
-            } label: {
-                Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
-            }
-        } preview: {
-            DiaryPreviewView(entry: entry, appLanguage: appLanguage) {
-                shouldStartEditing = false
-                selectedEntry = entry
-            }
-        }
-        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-            // 删除直接执行 — 4 秒撤销 toast 替代了 confirmation alert。
-            Button(role: .destructive) {
-                deleteEntry(entry)
-            } label: {
-                Label(NSLocalizedString("删除", comment: "Delete"), systemImage: "trash")
-            }
-            Button {
-                HapticManager.shared.click()
-                shouldStartEditing = true
-                selectedEntry = entry
-            } label: {
-                Label(NSLocalizedString("编辑", comment: "Edit"), systemImage: "pencil")
-            }
-            .tint(.blue)
-        }
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
-    }
-
-    @ViewBuilder
-    private func timelineCard(for entry: DiaryEntry) -> some View {
-        let cornerRadius: CGFloat = 16
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(relativeDateLabel(entry.date))
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.primary)
-                    .textCase(.uppercase)
-                    .tracking(0.4)
-                Text(timeLabel(entry.date))
-                    .font(.caption2)
-                    .foregroundColor(.secondary.opacity(0.7))
-                Spacer(minLength: 0)
-            }
-            if let summary = entry.summary, !summary.isEmpty {
-                // F9 — entry.summary 字号语义化(.subheadline = 15pt baseline,跟 row 字号阶梯一致)
-                Text(cleanedSummary(summary))
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.primary)
-                    .lineLimit(2)
-            }
-            if let text = entry.text, !text.isEmpty {
-                Text(text)
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-                    .lineLimit(2)
-                    .lineSpacing(2)
-            }
-        }
-        .padding(.init(top: 12, leading: 18, bottom: 12, trailing: 14))
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlassCard(cornerRadius: cornerRadius, interactive: true)
-        .moodAccentBar(entry.moodColor, cornerRadius: cornerRadius)
-        .accessibilityElement(children: .combine)
-    }
-
-    // 每行都 new 一个 DateFormatter 是主线程热路径浪费——List 每次 diff 刷新，N 行 × 2 个格式
-    // = 2N 次 alloc + ICU 查表。 weekday / monthDay 按 `appLanguage` 锁定语言,走
-    // `LumoryDateFormatters` 的共享 cache;HH:mm 是 locale-independent 数字格式,本地保留。
-    private static let timeOnlyFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
-
-    private var photoCountLabel: String {
-        if photoVM.selectedImageItems.count == 1 {
-            return NSLocalizedString("1张照片", comment: "")
-        }
-        return String(format: NSLocalizedString("%d张照片", comment: ""), photoVM.selectedImageItems.count)
-    }
-
-    private func relativeDateLabel(_ date: Date?) -> String {
-        guard let date else { return "" }
-        if cal.isDateInToday(date) { return NSLocalizedString("今天", comment: "Today") }
-        if cal.isDateInYesterday(date) { return NSLocalizedString("昨天", comment: "Yesterday") }
-        let days = cal.dateComponents([.day], from: cal.startOfDay(for: date), to: cal.startOfDay(for: Date())).day ?? 0
-        return Self.relativeDateString(for: date, days: days, language: appLanguage)
-    }
-
-    private static func relativeDateString(for date: Date, days: Int, language: String) -> String {
-        let formatter = days < 7
-            ? LumoryDateFormatters.weekdayFull(language: language)
-            : LumoryDateFormatters.monthDay(language: language)
-        return formatter.string(from: date)
-    }
-
-    private func timeLabel(_ date: Date?) -> String {
-        guard let date else { return "" }
-        return Self.timeOnlyFormatter.string(from: date)
-    }
-
-    private func cleanedSummary(_ raw: String) -> String {
-        raw.trimmingCharacters(in: CharacterSet(charactersIn: "*\"“”'‘’ \n\t"))
-            .trimmingCharacters(in: CharacterSet(charactersIn: ".。"))
-    }
-    
     @MainActor
     func handleStopRecording() async {
         Log.info("[HomeView handleStopRecording START] Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
@@ -1720,171 +1165,6 @@ struct HomeView: View {
     }
 }
 
-// MARK: - Keyboard Accessory Toolbar
-
-extension HomeView {
-    @ViewBuilder
-    var keyboardActionsBar: some View {
-        // `.photosPicker(isPresented:)` / `.photosPicker(selection:)` 要 Binding,走 `@Bindable` shadow。
-        @Bindable var photoVM = photoVM
-
-        // 关键 fix 1(tap 串):PhotosPicker 当 button 用时 hit area 在 HStack 里和邻居
-        // 按钮串,点照片偶尔触发录音。改成普通 Button + `.photosPicker(isPresented:)` ——
-        // 走 SwiftUI 标准的 sheet 模态,完全独立按钮,绝不和 mic 串。
-        // 关键 fix 2(玻璃):每个 tappable 显式 `.frame(44, 36) + .contentShape(Rectangle())`,
-        // tap 区独立。
-
-        Button {
-            #if canImport(UIKit)
-            HapticManager.shared.click()
-            #endif
-            photoVM.photosPickerPresented = true
-        } label: {
-            Image(systemName: "photo")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(Color.primary.opacity(0.85))
-                .frame(width: 44, height: 36)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(photoVM.selectedImageItems.count >= 9)
-        // 跟 mic disabled tap 教育对齐 — 9 张满槽时用户不知道为什么 photo 按钮灰着。
-        // overlay tap 在 disabled 时仍接收事件,弹 toast 解释。
-        .overlay {
-            if photoVM.selectedImageItems.count >= 9 {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        LumoryToastCenter.shared.show(
-                            NSLocalizedString("已选 9 张,要再加请先删一张", comment: "Photo slot full"),
-                            severity: .info
-                        )
-                    }
-            }
-        }
-        .accessibilityLabel(NSLocalizedString("添加照片", comment: "Add photos"))
-        .accessibilityIdentifier("home.keyboard.photo")
-        .photosPicker(
-            isPresented: $photoVM.photosPickerPresented,
-            selection: $photoVM.selectedPhotos,
-            maxSelectionCount: 9,
-            matching: .images
-        )
-        .onChange(of: photoVM.selectedPhotos) { _, newValue in
-            if photoVM.suppressNextPhotoSelectionReload {
-                photoVM.suppressNextPhotoSelectionReload = false
-                return
-            }
-            // F1 fix:取消上一轮压缩任务。否则用户快速换选时,旧任务可能后完成
-            // 覆盖掉新结果(stale write)。
-            photoVM.photoLoadTask?.cancel()
-            photoVM.photoLoadTask = Task { await loadPhotosWithCompression(newValue) }
-        }
-
-        Button {
-            #if canImport(UIKit)
-            HapticManager.shared.click()
-            #endif
-            if recorder.isRecording {
-                Task { await handleStopRecording() }
-            } else {
-                // **只有真开始录才发 success haptic**:首次点录音 + 权限未定时 startRecording 只触发
-                // 授权 alert 立刻返 false,实际不录;此时发 success haptic 暗示"已开始"是误导。
-                // 用户授权完后还得再点一次才会真录起来 — 那次返 true 才发 haptic。
-                let didStart = recorder.startRecording()
-                if didStart {
-                    #if canImport(UIKit)
-                    HapticManager.shared.notification(.success)
-                    #endif
-                }
-            }
-        } label: {
-            // .buttonStyle(.plain) 不应用系统默认的 disabled dim,所以同色 mic 在 disabled 时
-            // 视觉上跟 enabled 完全一样,用户每次都得点一下才知道(reviewer Wave-C BUG-P2)。
-            // 显式 opacity 让"已有录音"态可见。
-            let isMicDisabled = recordingVM.audioRecordings.count >= 1 && !recorder.isRecording
-            Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(recorder.isRecording ? .red : Color.primary.opacity(0.85))
-                .opacity(isMicDisabled ? 0.4 : 1.0)
-                .symbolEffect(.bounce, value: recorder.isRecording)
-                .frame(width: 44, height: 36)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(recordingVM.audioRecordings.count >= 1 && !recorder.isRecording)
-        // P1-Home-14 disabled tap 教育 — 录音卡只能存一条,用户不知道为什么 mic 灰着。
-        // overlay tap 在 disabled 时仍接收事件,弹 toast 解释。
-        .overlay {
-            if recordingVM.audioRecordings.count >= 1 && !recorder.isRecording {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        LumoryToastCenter.shared.show(
-                            NSLocalizedString("已有录音,删除当前录音才能重录", comment: "Recording slot occupied"),
-                            severity: .info
-                        )
-                    }
-            }
-        }
-        .accessibilityLabel(recorder.isRecording
-            ? NSLocalizedString("停止录音", comment: "Stop recording")
-            : NSLocalizedString("开始录音", comment: "Start recording"))
-        .accessibilityIdentifier("home.keyboard.mic")
-
-        recordingTimerInline
-
-        Spacer()
-
-        // 原生 `.buttonStyle(.glassProminent)` + accent tint。
-        // Apple 文档说这是"the most prominent action"用的 Liquid Glass style。
-        // 在 GlassEffectContainer 里 + 外层 liquidGlassCard 提供 surface 上下文。
-        // 渲染成什么样交给 SwiftUI,不手绘装饰。
-        Button {
-            // 用户反馈:点的瞬间没触觉 = 不知道按到了 — 之前为了消三连 haptic 把入口的 click() 删了,
-            // 现在补回 .light impact(只这一处,不再加 reveal milestone 那条)。完成时仍走 success。
-            #if canImport(UIKit)
-            HapticManager.shared.impact(.light)
-            #endif
-            handleSendAction()
-        } label: {
-            if inputVM.sendButtonState == .sending {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .bold))
-            }
-        }
-        .buttonStyle(.glassProminent)
-        .tint(Color.accentColor)
-        .disabled(!hasSendableContent || inputVM.sendButtonState != .idle)
-        .accessibilityLabel(NSLocalizedString("发送", comment: "Send"))
-        .accessibilityIdentifier("home.keyboard.send")
-    }
-
-    @ViewBuilder
-    private var recordingTimerInline: some View {
-        if recorder.isRecording {
-            // P1-Home-1 实时电平条 — 高频刷新隔离在小控件内部,避免整页跟着 20Hz 重绘。
-            RecordingLiveStatusView(recorder: recorder)
-            .transition(.opacity)
-        }
-    }
-
-    var hasSendableContent: Bool {
-        // `!isSending` 是重发双点防护：`handleSendAction` 把 isSending flip 到 true 的是
-        // 在第一个 `await MainActor.run` 里（本身是 sync block），所以 flip 发生在 Task 创建后
-        // 至少一个调度点之后——这个窗口里用户再点一下发送按钮，`hasSendableContent`
-        // 仍为 true，就会进来第二次 `handleSendAction`，snapshot 的都是旧内容，并行写两条重复日记。
-        // 把 `isSending` 纳入 `hasSendableContent` 做 UI 级互斥，handleSendAction 开头再加一层
-        // guard 兜底，双重保险。
-        (!inputVM.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !recordingVM.audioRecordings.isEmpty
-            || !photoVM.selectedImageItems.isEmpty) && !recordingVM.isTranscribing && !inputVM.isSending
-    }
-}
-
 // MARK: - Inline search
 
 extension HomeView {
@@ -1917,7 +1197,7 @@ extension HomeView {
                         shouldStartEditing = false
                         selectedEntry = entry
                     } label: {
-                        timelineCard(for: entry)
+                        HomeTimelineCard(entry: entry, appLanguage: appLanguage)
                             .padding(.bottom, 10)
                             .contentShape(Rectangle())
                     }

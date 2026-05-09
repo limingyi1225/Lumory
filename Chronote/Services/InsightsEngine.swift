@@ -331,6 +331,101 @@ final class InsightsEngine {
         }
     }
 
+    // MARK: - 5a. Semantic search(F1)
+    //
+    // 跟 `ask` 同走两阶段检索 + cosine 排名,但**只返 NSManagedObjectID**,UI 自行 materialize 成
+    // `DiaryEntry`(SwiftUI cell 直接吃 NSManagedObject,不用先转 DiaryEntryData)。跟 `retrieve()`
+    // 不同的是这里**不**给"未索引保留槽":搜索用户想要的是按相关度排,新写的未索引日记夹在中间会
+    // confusion;改成把 `indexCoverage` 透出来,UI 在覆盖率 < 95% 时显示"索引不完整"banner +
+    // 引导用户去 Settings 一键重建。
+    //
+    // 失败路径:
+    //   - query 空 → 空结果,coverage=1.0
+    //   - 网络错(embed 返 nil)→ ids=空,coverage 仍正确(给 UI fallback 到关键词搜索的机会)
+    //   - 全语料 0 embedding → ids=空,coverage=0
+    //
+    // 性能:1500 维 × 1000-2000 entries cosine ≈ 30-80ms 后台 actor;主线程零阻塞。
+    // 调用方在 `.searchable` submit 时触发(用户按 return 键),不需要 typing debounce。
+
+    /// 返回类型:跨 actor 边界,所有字段 Sendable。
+    struct SemanticSearchResult: Sendable {
+        /// 按相关度降序的 entry objectIDs(最多 topK 条)。空 = 没结果(可能因为 embed 失败或 0 索引覆盖)。
+        let ids: [NSManagedObjectID]
+        /// 已建索引日记数 / 总日记数。`< 0.95` UI 应该提示"索引不完整"。空库时为 1.0。
+        let indexCoverage: Double
+        /// 数据库里日记总数(给 UI 算"没在结果里的占比")。
+        let totalCount: Int
+        /// query embed 是否成功。false → 网络/认证问题,UI 应该 fallback 关键词搜索 / 显示重试。
+        let queryEmbedded: Bool
+    }
+
+    /// F1 语义搜索入口。AI service 要返回 query 向量(embed 失败时 `queryEmbedded=false`,
+    /// 调用方自行 fallback)。
+    func searchSemantic(query: String, topK: Int = 20) async -> SemanticSearchResult {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return SemanticSearchResult(ids: [], indexCoverage: 1.0, totalCount: 0, queryEmbedded: false)
+        }
+
+        let qVec = await ai.embed(text: trimmed)
+        let queryEmbedded = qVec != nil
+
+        return await persistence.container.performBackgroundTask { context -> SemanticSearchResult in
+            // Phase A: 轻量扫(只 prefetch embedding + date,不 hydrate text 等大字段)
+            // 复用 retrieve() 同款策略,见 `InsightsEngine.swift` 那条注释。
+            let scanRequest: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            scanRequest.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+            scanRequest.returnsObjectsAsFaults = true
+            scanRequest.includesPropertyValues = true
+            scanRequest.propertiesToFetch = ["embedding", "date"]
+            guard let scanned = try? context.fetch(scanRequest), !scanned.isEmpty else {
+                return SemanticSearchResult(ids: [], indexCoverage: 1.0, totalCount: 0, queryEmbedded: queryEmbedded)
+            }
+            let totalCount = scanned.count
+            guard topK > 0 else {
+                return SemanticSearchResult(ids: [], indexCoverage: 0.0, totalCount: totalCount, queryEmbedded: queryEmbedded)
+            }
+
+            // 无 query 向量 → 直接返空(让 UI 决定 fallback 策略,不偷偷返"最近 K 条"假装是相关结果)
+            guard let qVec = qVec else {
+                let withVecCount = scanned.filter { $0.embedding != nil }.count
+                let coverage = Double(withVecCount) / Double(max(1, totalCount))
+                return SemanticSearchResult(ids: [], indexCoverage: coverage, totalCount: totalCount, queryEmbedded: false)
+            }
+
+            // 跟 retrieve() 同款 bounded heap(insertion sort),内存 O(K) 而非 O(N)。
+            var topHeap: [(id: NSManagedObjectID, score: Float)] = []
+            topHeap.reserveCapacity(topK)
+            var withoutVecCount = 0
+            for entry in scanned {
+                guard let vec = entry.embeddingVector else {
+                    withoutVecCount += 1
+                    continue
+                }
+                let score = Self.cosineSimilarity(qVec, vec)
+                if topHeap.count < topK {
+                    let insertAt = topHeap.firstIndex(where: { $0.score < score }) ?? topHeap.count
+                    topHeap.insert((entry.objectID, score), at: insertAt)
+                } else if let last = topHeap.last, score > last.score {
+                    topHeap.removeLast()
+                    let insertAt = topHeap.firstIndex(where: { $0.score < score }) ?? topHeap.count
+                    topHeap.insert((entry.objectID, score), at: insertAt)
+                }
+            }
+
+            let withVecCount = totalCount - withoutVecCount
+            let coverage = Double(withVecCount) / Double(max(1, totalCount))
+            // 注意:**不**保留 unindexed 槽位 — 搜索是按相关度排,不是 AI grounding。
+            // 覆盖率不足时 UI 显示 banner 让用户主动去 Settings 重建。
+            return SemanticSearchResult(
+                ids: topHeap.map { $0.id },
+                indexCoverage: coverage,
+                totalCount: totalCount,
+                queryEmbedded: true
+            )
+        }
+    }
+
     // MARK: - 5. Ask Your Past (RAG)
 
     func ask(_ question: String, topK: Int = 8) -> AsyncStream<AnswerChunk> {

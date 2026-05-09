@@ -384,12 +384,57 @@ struct AskPastView: View {
                     }
                     msg.isStreaming = false
                 }
-                // 清掉 activeTask，下一次 submit 才能通过 guard；stale 旧 task 不得清掉新 task。
+                // 清掉 activeTask,下一次 submit 才能通过 guard;stale 旧 task 不得清掉新 task。
                 if activeTaskID == taskID {
                     activeTask = nil
                     activeTaskID = nil
                 }
+                // **wave12-3 自动保存历史**(codex review:`InsightsEngine.ask` 已内部消费 .done,
+                // 这里 `for await` loop 自然结束就视为流程完成)。每次 Q+A pair 一条记录。
+                // 跳过保存的情况:用户取消(wasCancelled 且无内容)/ AI 一字未产出且无错误。
+                // 保存的情况:有正文(包括 isIncomplete 半截) / 有 errorText(让用户能回看
+                // "网络炸了那次"问的什么)。世代号 guard 防 stale write 不需要 — task 已结束。
+                if activeTaskID != nil { return } // 还有更新的 task 在跑,跳过保存
+                self.persistConversationIfNeeded(question: question, aiMessageID: aiMessageID)
             }
+        }
+    }
+
+    /// 把刚结束的 Q+A pair 存进 CoreData(`AIConversation` entity,kind=askPast)。
+    /// fire-and-forget,失败仅 Log 不打扰用户。
+    private func persistConversationIfNeeded(question: String, aiMessageID: UUID) {
+        guard let aiMsg = messages.first(where: { $0.id == aiMessageID }) else { return }
+        // 啥都没有 → 不保存(取消空 / 用户秒删 / 等)。errorText 仍保存(让用户回看)。
+        if aiMsg.text.isEmpty && (aiMsg.errorText ?? "").isEmpty {
+            return
+        }
+
+        let userMsg = AIConversation.AskPastPayload.Message(
+            role: .user,
+            text: question,
+            citedEntryIds: [],
+            isIncomplete: false,
+            errorText: nil
+        )
+        let aiPayloadMsg = AIConversation.AskPastPayload.Message(
+            role: .ai,
+            text: aiMsg.text,
+            citedEntryIds: aiMsg.citedEntryIds,
+            isIncomplete: aiMsg.isIncomplete,
+            errorText: aiMsg.errorText
+        )
+        let payload = AIConversation.AskPastPayload(messages: [userMsg, aiPayloadMsg])
+
+        do {
+            _ = try AIConversation.insertAskPast(
+                in: viewContext,
+                title: question,
+                payload: payload,
+                citedEntryIds: aiMsg.citedEntryIds
+            )
+            try viewContext.save()
+        } catch {
+            Log.error("[AskPastView] 持久化 AskPast 历史失败: \(error)", category: .persistence)
         }
     }
 

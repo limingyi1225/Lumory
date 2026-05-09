@@ -27,6 +27,8 @@ struct InsightsView: View {
     @State private var isLoadingThemes = false
     @State private var showNarrative = false
     @State private var showAskPast = false
+    /// wave12-3 历史回顾 sheet
+    @State private var showHistory = false
     @State private var themeFilter: InsightsEngine.Theme?
     @State private var themeToDelete: InsightsEngine.Theme?
     @State private var isDeletingTheme = false
@@ -112,8 +114,17 @@ struct InsightsView: View {
                     Button(NSLocalizedString("关闭", comment: "Close")) { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showAskPast = true
+                    Menu {
+                        Button {
+                            showAskPast = true
+                        } label: {
+                            Label(NSLocalizedString("开始回顾", comment: "Start ask past"), systemImage: "bubble.left.and.text.bubble.right")
+                        }
+                        Button {
+                            showHistory = true
+                        } label: {
+                            Label(NSLocalizedString("历史回顾", comment: "Conversation history"), systemImage: "clock.arrow.circlepath")
+                        }
                     } label: {
                         Label(NSLocalizedString("回顾", comment: "Ask your past"), systemImage: "bubble.left.and.text.bubble.right")
                     }
@@ -135,6 +146,10 @@ struct InsightsView: View {
             }
             .lumoryAdaptiveModal(isPresented: $showAskPast, interactiveDismissDisabled: true) {
                 AskPastView()
+                    .environment(\.managedObjectContext, viewContext)
+            }
+            .lumoryAdaptiveModal(isPresented: $showHistory) {
+                ConversationHistoryView()
                     .environment(\.managedObjectContext, viewContext)
             }
             .lumoryAdaptiveModal(item: $themeFilter) { theme in

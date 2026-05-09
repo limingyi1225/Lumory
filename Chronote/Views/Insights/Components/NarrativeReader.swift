@@ -17,6 +17,8 @@ struct NarrativeReader: View {
     // 那个闭包就是打到已释放的 State storage，状态不一致。`@Environment(\.dismiss)` 由
     // SwiftUI 自己管 presentation 栈，健壮得多。
     @Environment(\.dismiss) private var dismiss
+    /// wave12-3 自动保存历史:report stream 完整结束后存进 AIConversation。
+    @Environment(\.managedObjectContext) private var viewContext
 
     @State private var completedParagraphs: [String] = []
     @State private var trailingParagraph: String = ""
@@ -203,7 +205,41 @@ struct NarrativeReader: View {
                 isStreaming = false
                 streamTask = nil
                 streamRunID = nil
+                // **wave12-3 自动保存历史**(codex review:用 generation guard 防 stale write,
+                // 这里 streamRunID 已 guard 过)。每次完整结束保存一条 AIConversation 记录。
+                // 跳过条件:零内容(用户 dismiss 太快 / streamReport 立即 .done 空报告)。
+                // 保存条件:有 completedParagraphs / trailingParagraph,即便 isIncomplete 也存
+                // (用户希望"半截但有用"也能回看)。
+                self.persistNarrativeIfNeeded()
             }
+        }
+    }
+
+    /// 把刚结束的 narrative 报告存进 CoreData。fire-and-forget,失败仅 Log。
+    private func persistNarrativeIfNeeded() {
+        let body: String = {
+            let paragraphs = completedParagraphs + (trailingParagraph.isEmpty ? [] : [trailingParagraph])
+            return paragraphs.joined(separator: "\n\n")
+        }()
+        guard !body.isEmpty else { return }
+
+        let payload = AIConversation.NarrativePayload(
+            rangeStart: range.start,
+            rangeEnd: range.end,
+            body: body,
+            isIncomplete: isIncomplete,
+            truncatedReason: incompleteReason.isEmpty ? nil : incompleteReason
+        )
+        do {
+            _ = try AIConversation.insertNarrative(
+                in: viewContext,
+                title: title,
+                payload: payload,
+                citedEntryIds: []
+            )
+            try viewContext.save()
+        } catch {
+            Log.error("[NarrativeReader] 持久化 narrative 历史失败: \(error)", category: .persistence)
         }
     }
 

@@ -518,3 +518,23 @@
 "这可能是「%@」的别称?" = "Could “%@” be another name?";
 "选择合并目标…" = "Choose a merge target…";
 "重试" = "Retry";
+
+// MARK: - wave12-1 F1 semantic search
+"字面" = "Keyword";
+"语义" = "Semantic";
+"输入关键词后按回车进行语义搜索" = "Type a query and press return for semantic search";
+"正在按相关度搜索…" = "Searching by relevance…";
+"语义搜索网络错误,试试字面模式" = "Semantic search network error — try keyword mode";
+"有 %d 条日记还没生成语义索引,可能漏在结果外" = "%d entries are not yet semantically indexed and may be missing from results";
+
+// MARK: - wave12-3 conversation history
+"开始回顾" = "Start a review";
+"历史回顾" = "History";
+"故事" = "Story";
+"还没有历史回顾" = "No saved reviews yet";
+"AI 回答和生成的故事会自动保存在这里" = "AI answers and generated stories are automatically saved here";
+"内容已损坏或来自未来版本" = "Content corrupt or from a future version";
+"你" = "You";
+"AI" = "AI";
+"(回答被截断)" = "(Answer truncated)";
+"(报告生成时被截断)" = "(Report truncated during generation)";

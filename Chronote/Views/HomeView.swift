@@ -562,7 +562,7 @@ struct HomeView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline))
     }
 
     /// 图片压缩 / 加载失败 inline banner。9 张选 7 成功 → "2 张图片处理失败" 提醒,跟 transcription
@@ -592,7 +592,7 @@ struct HomeView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline))
     }
 
     @ViewBuilder
@@ -619,7 +619,7 @@ struct HomeView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline))
     }
 
     private func transcriptionErrorMessage(for failure: TranscriptionFailure) -> String {
@@ -1733,6 +1733,20 @@ extension HomeView {
         }
         .buttonStyle(.plain)
         .disabled(photoVM.selectedImageItems.count >= 9)
+        // 跟 mic disabled tap 教育对齐 — 9 张满槽时用户不知道为什么 photo 按钮灰着。
+        // overlay tap 在 disabled 时仍接收事件,弹 toast 解释。
+        .overlay {
+            if photoVM.selectedImageItems.count >= 9 {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        LumoryToastCenter.shared.show(
+                            NSLocalizedString("已选 9 张,要再加请先删一张", comment: "Photo slot full"),
+                            severity: .info
+                        )
+                    }
+            }
+        }
         .accessibilityLabel(NSLocalizedString("添加照片", comment: "Add photos"))
         .accessibilityIdentifier("home.keyboard.photo")
         .photosPicker(

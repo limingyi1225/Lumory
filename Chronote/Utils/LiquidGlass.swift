@@ -10,6 +10,8 @@ enum LumoryCornerRadius {
     static let card: CGFloat = 16
     /// toast / overlay 系统级 chip(底部 capsule、popover-style 浮层)
     static let chip: CGFloat = 22
+    /// inline banner 类(略小于 card,跟 card 视觉层级有 4pt 差)— 错误 / 警告 / 不完整提示条
+    static let inline: CGFloat = 12
 }
 
 // MARK: - Liquid Glass View Extensions

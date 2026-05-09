@@ -55,7 +55,7 @@ struct ThemeAliasBanner: View {
                 EmptyView()
             }
         }
-        .animation(.spring(response: 0.42, dampingFraction: 0.86), value: shouldDisplay)
+        .animation(AnimationConfig.bannerAppear, value: shouldDisplay)
         .animation(.spring(response: 0.32, dampingFraction: 0.9), value: isCollapsed)
         // **关键**:.sheet 挂在 Group 之上(条件渲染之外),sheet 的承载视图永远在树里。
         // 之前挂在 `content(for:)` 内,topSuggestion 变 nil 或 isBusy 翻 true 时整个 content 子树

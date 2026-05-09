@@ -62,7 +62,7 @@ struct CitationEntryCard: View {
         } label: {
             content(for: entry)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableScaleButtonStyle())
     }
 
     // 复用一个静态 formatter——以前每次 dateLabel 调用都 new 一个，滚动列表里非常浪费。

@@ -48,6 +48,10 @@ struct InputPhotoThumbnail: View {
                     .font(.system(size: 20))
                     .foregroundColor(.white)
                     .background(Circle().fill(Color.black.opacity(0.6)))
+                    // hit area 32×32 圆形 — 视觉 fill 仍 20pt,但实际可 tap 区扩大到接近 HIG 44pt 推荐
+                    // (9 张缩略图横排,误触常见)。
+                    .frame(width: 32, height: 32)
+                    .contentShape(Circle())
             }
             .buttonStyle(PlainButtonStyle())
             .padding(4)

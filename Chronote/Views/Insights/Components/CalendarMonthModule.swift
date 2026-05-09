@@ -55,7 +55,7 @@ struct CalendarMonthModule: View {
             Button { changeMonth(by: -1) } label: {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 14, weight: .medium))
-                    .frame(width: 36, height: 32)
+                    .frame(width: 44, height: 40)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -72,7 +72,7 @@ struct CalendarMonthModule: View {
             Button { changeMonth(by: 1) } label: {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 14, weight: .medium))
-                    .frame(width: 36, height: 32)
+                    .frame(width: 44, height: 40)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

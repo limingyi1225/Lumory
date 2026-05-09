@@ -54,6 +54,7 @@ struct PointDetailSheet: View {
             // 嵌套 sheet,root / parent overlay 看不见,在这层兜一份给删除 toast。
             .lumoryToastOverlay()
             .navigationTitle(dateLabel)
+            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: DiaryEntry.self) { entry in
                 DiaryDetailView(entry: entry, startInEditMode: false)
             }
@@ -122,7 +123,7 @@ struct PointDetailSheet: View {
         } catch {
             viewContext.rollback()
             Log.error("[PointDetailSheet] 删除日记失败: \(error)", category: .ui)
-            deleteFailureMessage = (error as NSError).localizedDescription
+            deleteFailureMessage = NSLocalizedString("删除失败,可能是磁盘空间不足或同步冲突。请稍后重试。", comment: "Generic delete failure fallback")
         }
     }
 

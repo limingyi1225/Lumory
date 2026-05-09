@@ -109,7 +109,7 @@ struct NarrativeReader: View {
         // P1-Ins-17 玻璃化 — 替 RoundedRectangle.fill(.opacity 0.12) 实色块,跟其他 inline banner
         // 视觉对齐。tint 保留 orange/red 表达 severity。
         .liquidGlassCard(
-            cornerRadius: 10,
+            cornerRadius: LumoryCornerRadius.inline,
             tint: hasContent ? Color.orange : Color.red,
             tintStrength: 0.14
         )

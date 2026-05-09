@@ -503,6 +503,9 @@
 "已保存" = "Saved";
 "已删除" = "Deleted";
 "已有录音,删除当前录音才能重录" = "A recording already exists. Delete it before recording again.";
+"已选 9 张,要再加请先删一张" = "9 photos already selected. Delete one to add more.";
+"删除失败,可能是磁盘空间不足或同步冲突。请稍后重试。" = "Delete failed. Disk may be full or there's a sync conflict. Please retry later.";
+"保存失败,可能是磁盘空间不足或同步冲突。请稍后重试。" = "Save failed. Disk may be full or there's a sync conflict. Please retry later.";
 "已记录" = "Saved to journal";
 "应用语言" = "App language";
 "录音电平" = "Audio level";

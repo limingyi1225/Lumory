@@ -103,7 +103,7 @@ struct DiaryDetailView: View {
         } catch {
             viewContext.rollback()
             Log.error("[DiaryDetailView] 删除日记失败: \(error)", category: .ui)
-            saveError = (error as NSError).localizedDescription
+            saveError = NSLocalizedString("删除失败,可能是磁盘空间不足或同步冲突。请稍后重试。", comment: "Generic delete failure fallback")
         }
     }
     
@@ -694,7 +694,8 @@ struct DiaryDetailView: View {
         } catch {
             Log.error("[DiaryDetailView] 保存更改失败: \(error)", category: .ui)
             // **明确告知用户保存失败**——不能静默，否则用户以为改动已入库但下次打开还是旧内容。
-            saveError = (error as NSError).localizedDescription
+            // 用人话 fallback 而不是 NSError.localizedDescription("Cocoa error 134200" 类技术码对终端用户毫无意义)。
+            saveError = NSLocalizedString("保存失败,可能是磁盘空间不足或同步冲突。请稍后重试。", comment: "Generic save failure fallback")
         }
     }
 

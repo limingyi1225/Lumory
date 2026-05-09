@@ -83,6 +83,7 @@ struct ThemeFilteredEntriesView: View {
             .lumoryToastOverlay()
             .accessibilityIdentifier("themeFilteredEntriesContent")
             .navigationTitle(theme.name)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(NSLocalizedString("关闭", comment: "Close")) { dismiss() }
@@ -238,7 +239,7 @@ struct ThemeFilteredEntriesView: View {
         } catch {
             viewContext.rollback()
             Log.error("[ThemeFilteredEntriesView] 删除日记失败: \(error)", category: .ui)
-            deleteFailureMessage = (error as NSError).localizedDescription
+            deleteFailureMessage = NSLocalizedString("删除失败,可能是磁盘空间不足或同步冲突。请稍后重试。", comment: "Generic delete failure fallback")
         }
     }
 

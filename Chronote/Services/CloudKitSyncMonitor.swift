@@ -274,7 +274,7 @@ class CloudKitSyncMonitor: ObservableObject {
         // 所以这里不能用 `MainActor.assumeIsolated`(会断言失败崩溃)。
         // `handleDatabaseAccessibilityResult` 本身是 main isolated → 用 `Task { @MainActor in ... }` hop。
         database.fetchAllRecordZones { [weak self] _, error in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.handleDatabaseAccessibilityResult(error: error)
             }
         }
@@ -419,7 +419,7 @@ class CloudKitSyncMonitor: ObservableObject {
 
         // 同 `checkDatabaseAccessibility`:CK callback 后台队列触发,Task @MainActor hop。
         database.fetchAllRecordZones { [weak self] _, error in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.handleSyncVerificationResult(error: error)
             }
         }

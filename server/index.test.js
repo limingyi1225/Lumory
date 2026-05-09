@@ -205,6 +205,31 @@ test('chat with too many messages returns 400', async (t) => {
   assert.equal(status, 400);
 });
 
+test('chat count cap fires before char cap when both exceed', async (t) => {
+  // ordering invariant — count check 必须在 char check 前。如果未来 refactor 调换顺序,
+  // attacker 可绕过 count cap 用 1000 条短 message 撑大上游 token 计费。
+  const server = await listen(app);
+  t.after(() => close(server));
+
+  // 65 条 × 1000 chars each = 65000 chars (over MAX_MESSAGES_CHARS=32000 too)。
+  // 期望:count cap 先 fire → 400 "too many messages",而不是 413 "messages too large"。
+  const messages = Array.from({ length: 65 }, () => ({
+    role: 'user',
+    content: 'a'.repeat(1000),
+  }));
+  const status = await postJSON(
+    server,
+    '/api/openai/chat/completions',
+    { messages },
+    {
+      'X-App-Secret': process.env.APP_SHARED_SECRET,
+      'X-Install-Id': 'a7d9673d-eba6-4cf8-a209-cc87f4f7cbba',
+    }
+  );
+
+  assert.equal(status, 400, 'count cap (400) must fire before char cap (413) when both exceed');
+});
+
 test('streaming client abort cancels the upstream OpenAI request', async (t) => {
   const originalAdapter = axios.defaults.adapter;
   let capturedSignal;

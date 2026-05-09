@@ -242,13 +242,16 @@ final class ContextPromptGenerator {
     /// nonisolated static 是为了能在 performBackgroundTask 闭包里被调到。
     /// `internal` 仅为 unit test 可见(@testable import) —— 别在产品代码里直接调,走 `fetchEntries`。
     static func canonicalize(_ raw: [String], with aliasMap: [String: String]) -> [String] {
+        // `aliasMap` 来自 `ThemeAliasResolver.snapshotIndex()`,reverse index key 走 `ThemeKey.make`(NFC 归一)。
+        // **不能**用裸 `lowercased()` 查 — 那是 NFD-passthrough,跟 NFC keyed map 在 NFD 输入(剪贴板复制 web /
+        // 跨 IME)上 silently miss。`InsightsEngine.aggregateThemes` 已经走 ThemeKey.make,这里是 sibling 漏改。
         var seen = Set<String>()
         var out: [String] = []
         for tag in raw {
-            let lower = tag.lowercased()
-            let canon = aliasMap[lower] ?? tag
-            let key = canon.lowercased()
-            if seen.insert(key).inserted { out.append(canon) }
+            let lookupKey = ThemeKey.make(tag)
+            let canon = aliasMap[lookupKey] ?? tag
+            let dedupeKey = ThemeKey.make(canon)
+            if seen.insert(dedupeKey).inserted { out.append(canon) }
         }
         return out
     }

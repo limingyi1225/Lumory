@@ -644,7 +644,7 @@ private struct AskPastMessageRow: View, Equatable {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: LumoryCornerRadius.inline, style: .continuous)
                 .fill(Color.red.opacity(0.08))
         )
     }
@@ -662,7 +662,7 @@ private struct AskPastMessageRow: View, Equatable {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: LumoryCornerRadius.inline, style: .continuous)
                 .fill(Color.orange.opacity(0.12))
         )
     }

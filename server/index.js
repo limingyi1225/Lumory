@@ -405,12 +405,16 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         }
         if (!res.write(chunk)) {
           upstream.data.pause();
-          res.once('drain', () => upstream.data.resume());
+          // 已注册的 'drain' once-listener 还没 fire,不要再加 — 否则 sustained backpressure
+          // 下每个 chunk 都注册新 once,drain fire 时同 tick 触发 N 个 resume()。`once` 自动 unbind,
+          // 但 listener 短暂膨胀(N 个 once 监听)。
+          if (res.listenerCount('drain') === 0) {
+            res.once('drain', () => upstream.data.resume());
+          }
         }
       });
       upstream.data.on('end', () => {
         activeStreams.delete(upstream.data);
-        req.off('aborted', abortUpstream);
         res.off('close', abortUpstream);
         if (!sawDone && sseFrameHasDone(sseBuffer)) {
           sawDone = true;
@@ -423,7 +427,6 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       });
       upstream.data.on('error', (error) => {
         activeStreams.delete(upstream.data);
-        req.off('aborted', abortUpstream);
         res.off('close', abortUpstream);
         req.log.error({ err: safeUpstreamError(error) }, 'upstream stream errored');
         // 不能写 `data: [DONE]`—— 那是 SSE 的**成功**终止帧，iOS 端的
@@ -688,7 +691,17 @@ function startServer() {
 }
 
 // Graceful shutdown — give in-flight requests up to 10s to finish before exit.
+//
+// **Reentrancy guard**:`unhandledRejection` / `uncaughtException` 重新导向走这条路径时,
+// 多个信号同 tick 触发会让 `activeServer.close()` 在第二次 call 时同步抛 ERR_SERVER_NOT_RUNNING
+// → `process.exit(1)`(应该是 0)。PM2 看到 exit 1 计入 unstable_restarts。守 1 行 flag 拦掉。
+let shuttingDownGate = false;
 const shutdown = (signal) => {
+  if (shuttingDownGate) {
+    log.warn({ signal }, 'shutdown already in progress, ignoring duplicate signal');
+    return;
+  }
+  shuttingDownGate = true;
   log.info({ signal, activeStreams: activeStreams.size }, 'shutting down');
   // Abort in-flight upstream SSE streams so they don't dangle past server.close().
   // Their 'error' handler will fire and `res.destroy(error)` the client connection,

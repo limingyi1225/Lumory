@@ -116,19 +116,16 @@ actor WidgetSnapshotService {
         pendingTask = task
     }
 
-    /// 用 empty snapshot 覆盖盘上文件,并 reload widget。
-    /// "五件套"删除路径调用,保证 widget 不展示已删数据的 stale snapshot。
-    /// 同时清 prompt cache —— 删完后 PromptSuggestionEngine 自己也会 clearCache(五件套另一员),
-    /// 我们不留 stale 引用让下次 refresh 能拿到 nil → fallback CTA。
-    /// **`generation &+= 1`** 让任何已经在 `performRefresh` await 里挂着的 in-flight task
-    /// 在 resume 后 write 之前发现 gen 过期,跳过 write,不会用 stale 数据覆盖刚写的 empty。
-    /// 让下一次 `requestRefresh` 强制走 full fetch + 重新取 prompt,跳过 cheap fingerprint 短路
-    /// + per-day prompt cache。**不**清盘上 snapshot 文件,适合"数据可能改变了 widget 派生字段
-    /// 但不需要 nuclear clear"的场景:
+    /// 清 in-memory 派生缓存(prompt / fingerprint),让下一次 `requestRefresh` 强制走 full fetch
+    /// + 重新取 prompt,跳过 cheap fingerprint 短路 + per-day prompt cache。**不**清盘上 snapshot
+    /// 文件,适合"数据可能改变了 widget 派生字段但不需要 nuclear clear"的场景:
     ///   - DiaryDetailView 编辑 save 后(改 date / 改 mood / 改 text → streak / 头像色 / prompt 都可能变)
     ///   - EntryWipeOrchestrator 单删后(per-day cachedPrompt 可能基于已删 entry 算的)
-    /// 跟 `clear()` 的差别:`clear()` 写 empty snapshot + 清 lastWrittenDigest + reload widget,
-    /// 用于"全部清空"语义;`invalidateCaches()` 只清 in-memory 派生缓存,等下次 refresh 走 full path。
+    /// 跟 `clear()` 的差别:`clear()` 写 empty snapshot + 清 lastWrittenDigest + bump generation +
+    /// reload widget,用于"全部清空"语义,真正止住 in-flight `performRefresh` 写 stale 数据;
+    /// `invalidateCaches()` 只清 in-memory 派生缓存,**不** bump generation,因为这条路径的 caller
+    /// 紧跟 `requestRefresh()`(由 NSManagedObjectContextDidSave observer 触发),后者会 cancel 当前
+    /// pendingTask + 起新 task,race 窗口被 250ms debounce 兜住。
     func invalidateCaches() {
         cachedPrompt = nil
         cachedPromptDay = nil

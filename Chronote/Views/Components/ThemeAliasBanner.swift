@@ -56,7 +56,7 @@ struct ThemeAliasBanner: View {
             }
         }
         .animation(AnimationConfig.bannerAppear, value: shouldDisplay)
-        .animation(.spring(response: 0.32, dampingFraction: 0.9), value: isCollapsed)
+        .animation(AnimationConfig.bannerCollapse, value: isCollapsed)
         // **关键**:.sheet 挂在 Group 之上(条件渲染之外),sheet 的承载视图永远在树里。
         // 之前挂在 `content(for:)` 内,topSuggestion 变 nil 或 isBusy 翻 true 时整个 content 子树
         // 被拆掉,sheet 跟着死 —— 用户在 picker 里选择被无情打断。
@@ -237,7 +237,7 @@ struct ThemeAliasBanner: View {
     private func scheduleCollapse() {
         collapseWorkItem?.cancel()
         let item = DispatchWorkItem {
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
+            withAnimation(AnimationConfig.bannerCollapse) {
                 isCollapsed = true
             }
         }
@@ -252,7 +252,7 @@ struct ThemeAliasBanner: View {
             HapticManager.shared.click()
             #endif
         }
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
+        withAnimation(AnimationConfig.bannerCollapse) {
             isCollapsed = true
         }
     }

@@ -220,6 +220,11 @@ final class PersistenceController {
         // **必须 filter** `context.persistentStoreCoordinator === container.persistentStoreCoordinator`,
         // 不然单测套件里 N 个 PersistenceController 实例会互相串台(CLAUDE.md 已记)。
         // 仅 production store 挂(in-memory 不挂),避免 screenshot / 测试模式污染真实 widget snapshot。
+        // **entity 过滤**(wave13 codex 复审 OPT)— widget snapshot 只投影 DiaryEntry,所以非
+        // DiaryEntry 的 save(wave12 加的 AIConversation 历史保存,AskPast / Narrative 写入)
+        // 唤醒 widget pipeline 是浪费:启 Task → 250ms debounce → DiaryEntry dict-fetch →
+        // contentDigest 对比 → fingerprint 对得上跳 write/reload(廉价但仍是 fetch + digest cost)。
+        // 直接 entity 过滤更干净。**注意**:future 加新 entity 影响 widget 时,要把它加到此 filter。
         if !inMemory {
             let coordinator = container.persistentStoreCoordinator
             let didSaveObserver = NotificationCenter.default.addObserver(
@@ -229,6 +234,14 @@ final class PersistenceController {
             ) { [weak self] note in
                 guard let context = note.object as? NSManagedObjectContext,
                       context.persistentStoreCoordinator === coordinator else { return }
+                let userInfo = note.userInfo ?? [:]
+                let inserted = (userInfo[NSInsertedObjectsKey] as? Set<NSManagedObject>) ?? []
+                let updated = (userInfo[NSUpdatedObjectsKey] as? Set<NSManagedObject>) ?? []
+                let deleted = (userInfo[NSDeletedObjectsKey] as? Set<NSManagedObject>) ?? []
+                let touchesDiaryEntry = inserted.contains { $0.entity.name == "DiaryEntry" }
+                    || updated.contains { $0.entity.name == "DiaryEntry" }
+                    || deleted.contains { $0.entity.name == "DiaryEntry" }
+                guard touchesDiaryEntry else { return }
                 self?.scheduleWidgetSnapshotRefresh()
             }
             observers.append(didSaveObserver)

@@ -310,17 +310,16 @@ struct HomeView: View {
                 .onChange(of: searchQuery) { _, newValue in
                     // 字面模式:边打边搜(180ms debounce 同原逻辑)。
                     // 语义模式:**不**自动搜 — embed 一次 800ms-2s,跟着 typing 跑既贵又烦,
-                    // 用户按 return 键(.onSubmit)才触发。query 清空时本地清结果。
+                    // 用户按 return 键(.onSubmit)才触发。但 query 一变(无论 empty 还是新非空),
+                    // 旧搜索结果都过期 — 全清,避免视觉残留(用户改了 query 但还没按 enter
+                    // 时仍能看到旧结果,codex wave12 复审 P2)。
                     if searchMode == .keyword {
                         scheduleInlineSearch(for: newValue)
                     } else {
-                        let trimmed = newValue.trimmingCharacters(in: .whitespaces)
-                        if trimmed.isEmpty {
-                            searchTask?.cancel()
-                            searchResults = []
-                            semanticSearchFailed = false
-                            isSemanticSearchInFlight = false
-                        }
+                        searchTask?.cancel()
+                        searchResults = []
+                        semanticSearchFailed = false
+                        isSemanticSearchInFlight = false
                     }
                 }
                 .onSubmit(of: .search) {
@@ -1227,8 +1226,12 @@ extension HomeView {
             .pickerStyle(.segmented)
             .onChange(of: searchMode) { _, newMode in
                 // 切模式时清结果(防止字面结果残留在语义模式视图,反之亦然)。
+                // **必须 cancel 旧 task** — 否则 keyword task 还在 180ms debounce 内时切到 semantic,
+                // task 跑完会把字面结果灌进 searchResults,在语义视图显示(codex wave12 复审 P2)。
+                searchTask?.cancel()
                 searchResults = []
                 semanticSearchFailed = false
+                isSemanticSearchInFlight = false
                 // 语义模式提示用户按 return 触发 — 这里不主动跑(embed 太贵)。
                 // 字面模式下,如果 query 非空,立刻走原有 inline keyword search。
                 if newMode == .keyword {
@@ -1350,6 +1353,11 @@ extension HomeView {
             let hits = await keywordHits(for: trimmed)
             guard !Task.isCancelled else { return }
             await MainActor.run {
+                // mode-stale guard:onChange(of: searchMode) 已 cancel,但若 cancel 信号在
+                // `await keywordHits` 中途到达,Task.isCancelled 已能挡掉;这里再加一道
+                // searchMode 检查作 belt-and-suspenders,语义对称 triggerSemanticSearch 的
+                // semanticSearchGen 世代号 guard。
+                guard self.searchMode == .keyword else { return }
                 self.searchResults = hits
             }
         }

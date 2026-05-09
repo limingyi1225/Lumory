@@ -3076,3 +3076,89 @@ struct Round2FixesTests {
         #expect(ai.judgeCalls == firstCalls, "second call within 60s must be skipped — debounce broken")
     }
 }
+
+// MARK: - PersistenceController shared NSManagedObjectModel invariant
+//
+// 多个 `PersistenceController(inMemory: true)` 实例必须共享同一个 `NSManagedObjectModel`。
+// 否则 `+[DiaryEntry entity]` 看到 N 份 model "Failed to find a unique match",在 simulator
+// clone 多 fork 跑测试时触发 SIGABRT(`+entity in 0x...` 不在任一 model 里)。CLAUDE.md
+// "⚠️ 但是真的 SIGABRT 不是 clone flake" 段记录了这条踩坑。这条 invariant 锁住 cachedModel
+// 共享路径不被改坏。
+
+struct PersistenceControllerCachedModelTests {
+    @Test func multipleInMemoryInstancesShareManagedObjectModel() {
+        let p1 = PersistenceController(inMemory: true)
+        let p2 = PersistenceController(inMemory: true)
+        // `===` 身份比较:必须是同一个对象,不只是 .isEqual。每次 init 重新 load .xcdatamodeld
+        // 会让 N 个 entity description 互相不识,导致 +entity 找不到唯一 match。
+        #expect(p1.container.managedObjectModel === p2.container.managedObjectModel,
+                "PersistenceController 多实例必须共享同一个 NSManagedObjectModel。 改坏后只在 simulator clone 多 fork 触发 SIGABRT,定位成本极高。")
+    }
+}
+
+// MARK: - DST + leap year boundary tests
+//
+// CLAUDE.md "Follow-up backlog" 提:`computeStreaks` / `cycleBounds` 都用 UTC 标准 30 天月,
+// 跨 DST 春令时 / 2024-02-29 anchor 的 calendar 操作没专门覆盖。这两条用真实 timezone /
+// 真实闰日 fixture 锁住边界行为。
+
+struct DSTBoundaryStreakTests {
+    /// 美国东部春令时:2024-03-10 凌晨 2 点跳到 3 点,这一天只有 23 小时。
+    /// 连续每天写 5 天跨过这条边界,streak 应仍 = 5(不被"今天起到那天的 day diff"
+    /// 偶发算 4 或 6 干扰)。
+    @Test func computeStreaks_acrossUSEasternSpringForward_remainsCorrect() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/New_York")!
+
+        // 5 个连续日(3-08 / 09 / 10 / 11 / 12),3-10 是春令时跳点。
+        // calendar.startOfDay 在那个 timezone 下应正确给出每天 0 点。
+        let days: [Date] = (0..<5).map { i in
+            var components = DateComponents()
+            components.year = 2024
+            components.month = 3
+            components.day = 8 + i
+            return calendar.date(from: components)!
+        }.reversed()  // 倒序:今天最先
+
+        let today = days.first!
+        let result = InsightsEngine.computeStreaks(uniqueDaysDesc: Array(days), today: today, calendar: calendar)
+        #expect(result.current == 5, "DST 春令时不该把连续 5 天的 streak 算成其他值")
+        #expect(result.longest == 5)
+    }
+}
+
+struct LeapYearCycleBoundsTests {
+    /// 2024-02-29 是 leap day,如果 anchor 设在这天,后续 weekly 周期算法应该平稳前推
+    /// (`byAdding: .day, value: 7` 而不是 `.month`/年级别 fall back)。
+    @Test func cycleBounds_weeklyAnchoredOnLeapDay_advancesByDays() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        // anchor:2024-02-29 (leap day) startOfDay UTC
+        var anchorComponents = DateComponents()
+        anchorComponents.year = 2024
+        anchorComponents.month = 2
+        anchorComponents.day = 29
+        let anchor = calendar.startOfDay(for: calendar.date(from: anchorComponents)!)
+
+        // reference:2024-03-15 (anchor 之后 15 天,刚跨进第 3 个 weekly cycle)
+        var refComponents = DateComponents()
+        refComponents.year = 2024
+        refComponents.month = 3
+        refComponents.day = 15
+        let ref = calendar.startOfDay(for: calendar.date(from: refComponents)!)
+
+        let bounds = ReminderService.cycleBounds(
+            referenceDate: ref,
+            anchor: anchor,
+            frequency: .weekly,
+            calendar: calendar
+        )
+
+        // 第 3 周的范围应是 anchor + 14天 → anchor + 21天
+        let expectedStart = calendar.date(byAdding: .day, value: 14, to: anchor)!
+        let expectedEnd = calendar.date(byAdding: .day, value: 21, to: anchor)!
+        #expect(bounds.start == expectedStart, "leap day anchor + weekly:cycle 3 start 应是 anchor + 14 天")
+        #expect(bounds.end == expectedEnd, "leap day anchor + weekly:cycle 3 end 应是 anchor + 21 天")
+    }
+}

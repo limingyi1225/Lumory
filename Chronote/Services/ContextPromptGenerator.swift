@@ -177,30 +177,17 @@ final class ContextPromptGenerator {
         return ContextPrompt(text: String(format: NSLocalizedString("已经连续 %d 天了，今天也写几笔吧", comment: "Streak prompt"), streak))
     }
 
-    /// 计算 streak。**从 today 或 yesterday 起步**：以前 cursor 固定从 today 开始，
-    /// 如果用户连写 5 天但还没动笔记录今天，uniqueDays 不含 today，整个循环 0 次，streak=0，
-    /// 连续书写提示被直接吞掉。对齐 InsightsEngine.computeStreaks 的口径：today 在就从 today，
-    /// today 不在但 yesterday 在就从 yesterday，这样"活跃中但今天还没写"的 case 也能拿到提示。
+    /// 计算 current streak —— wrap `InsightsEngine.computeStreaks`,项目里 streak 的唯一权威实现
+    /// (Widget / StreakMilestone / Insights 都用它)。历史上这里有一份独立 ~18 行实现,平行
+    /// 算同样的事 —— 改 streak 口径(eg. cursor 起点 today vs yesterday)需要同步两处易漂。
+    /// 单源后改动只动一处。
     ///
-    /// `static` + `internal`：让单元测试不依赖 private Snapshot、不进整条 fetch/prompt 管道就能覆盖到边界。
+    /// `static` + `internal`:让单元测试不依赖 private Snapshot、不进整条 fetch/prompt 管道就能覆盖到边界。
     static func computeStreak(entryDates: [Date], calendar: Calendar, now: Date) -> Int {
         let today = calendar.startOfDay(for: now)
-        let uniqueDays = Set(entryDates.map { calendar.startOfDay(for: $0) })
-        var cursor = today
-        if !uniqueDays.contains(cursor) {
-            guard let yesterday = calendar.date(byAdding: .day, value: -1, to: today),
-                  uniqueDays.contains(yesterday) else {
-                return 0
-            }
-            cursor = yesterday
-        }
-        var streak = 0
-        while uniqueDays.contains(cursor) {
-            streak += 1
-            guard let prev = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
-            cursor = prev
-        }
-        return streak
+        let uniqueDaysDesc = Array(Set(entryDates.map { calendar.startOfDay(for: $0) }))
+            .sorted(by: >)
+        return InsightsEngine.computeStreaks(uniqueDaysDesc: uniqueDaysDesc, today: today, calendar: calendar).current
     }
 
     /// FNV-1a 32-bit hash. 进程无关、确定性——用来给同一 theme 永远选到同一条模板，

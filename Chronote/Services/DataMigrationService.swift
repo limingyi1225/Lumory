@@ -7,9 +7,15 @@ struct DataMigrationService {
     /// 执行从 JSON 到 Core Data 的一次性迁移
     static func performMigrationIfNeeded() {
         let defaults = AppGroup.userDefaults
+        // 老用户从 .standard suite 迁到 AppGroup suite 的 sentinel 拷贝。
+        // 对称 pattern:standard 里**任何**显式值(true / false)都搬过来,而不是
+        // "只在 standard.bool=true 才拷"。后者会让历史上**显式写过 false 的老用户**
+        // 在 AppGroup 永远缺这个 key,启动时重跑 performMigrationIfNeeded —— 若 v2 JSON
+        // 文件还在(罕见但可能),就**重导一次,数据翻倍**。CLAUDE.md "Bool UserDefaults
+        // 默认值翻转有 silent regression 风险" 一节记的就是这条家族。
         if defaults.object(forKey: migrationKey) == nil,
-           UserDefaults.standard.bool(forKey: migrationKey) {
-            defaults.set(true, forKey: migrationKey)
+           UserDefaults.standard.object(forKey: migrationKey) != nil {
+            defaults.set(UserDefaults.standard.bool(forKey: migrationKey), forKey: migrationKey)
         }
 
         // 检查是否已经迁移过

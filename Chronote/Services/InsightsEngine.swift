@@ -538,7 +538,13 @@ final class InsightsEngine {
     /// 把一批 objectID 物化成 `DiaryEntryData`。每个 `context.object(with:)` 是 cheap fault,
     /// 第一次访问其属性才会 round-trip 到 row cache。这里遍历完成后所有属性都被读过一次,
     /// 跨 context 边界返回值类型是安全的。
-    private static func materialize(objectIDs: [NSManagedObjectID], in context: NSManagedObjectContext) -> [DiaryEntryData] {
+    /// `includeEmbedding=false`(默认):跳过 `embeddingVector` 解包,省 K × 6KB Float32 拷贝
+    /// (retrieve Phase B 给 ask path 用,消费方只读 id / 文本字段,embedding 拷出来就丢)。
+    private static func materialize(
+        objectIDs: [NSManagedObjectID],
+        in context: NSManagedObjectContext,
+        includeEmbedding: Bool = false
+    ) -> [DiaryEntryData] {
         objectIDs.compactMap { id in
             guard let entry = try? context.existingObject(with: id) as? DiaryEntry else { return nil }
             return DiaryEntryData(
@@ -548,7 +554,7 @@ final class InsightsEngine {
                 moodValue: entry.moodValue,
                 summary: entry.summary ?? "",
                 themes: entry.themeArray,
-                embedding: entry.embeddingVector,
+                embedding: includeEmbedding ? entry.embeddingVector : nil,
                 wordCount: Int(entry.wordCount)
             )
         }

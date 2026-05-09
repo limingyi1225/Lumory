@@ -2,8 +2,7 @@ import Foundation
 
 // MARK: - Transcriber Contract
 //
-// 抽象化"音频文件 → 文本"。线上实现 `OpenAITranscriber`(走 Lumory 后端代理 OpenAI),
-// 单测可注入 `MockTranscriber`(在 `AIService.swift`)。
+// 抽象化"音频文件 → 文本"。线上实现 `OpenAITranscriber`(走 Lumory 后端代理 OpenAI)。
 //
 // 历史:旧实现是 Apple `SFSpeechRecognizer` on-device 转写,中英混合 / 嘈杂环境
 // 准确率明显低,2026-04 替换。

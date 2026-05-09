@@ -60,67 +60,36 @@ final class AudioRecorder: NSObject, ObservableObject {
             return false
         }
         #if !os(macOS)
-        if #available(iOS 17.0, *) {
-            switch AVAudioApplication.shared.recordPermission {
-            case .undetermined:
-                pendingPermissionToken &+= 1
-                let myToken = pendingPermissionToken
-                AVAudioApplication.requestRecordPermission { granted in
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        // token 不一致 = 用户在 alert 弹出后已经离开了"我要录音"的意图。
-                        guard self.pendingPermissionToken == myToken else {
-                            Log.info("[AudioRecorder] Late mic grant ignored (token stale)", category: .audio)
-                            return
-                        }
-                        guard granted else {
-                            Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
-                            return
-                        }
-                        Log.info("[AudioRecorder] Mic permission granted — auto-starting recording", category: .audio)
-                        self.startRecording()
+        // 部署目标 iOS 26.0,直接用 iOS 17+ AVAudioApplication API。
+        switch AVAudioApplication.shared.recordPermission {
+        case .undetermined:
+            pendingPermissionToken &+= 1
+            let myToken = pendingPermissionToken
+            AVAudioApplication.requestRecordPermission { granted in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    // token 不一致 = 用户在 alert 弹出后已经离开了"我要录音"的意图。
+                    guard self.pendingPermissionToken == myToken else {
+                        Log.info("[AudioRecorder] Late mic grant ignored (token stale)", category: .audio)
+                        return
                     }
-                }
-                return false
-            case .denied:
-                Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
-                return false
-            case .granted:
-                break
-            @unknown default:
-                Log.warning("[AudioRecorder] Unknown microphone permission status", category: .audio)
-                return false
-            }
-        } else {
-            switch AVAudioSession.sharedInstance().recordPermission {
-            case .undetermined:
-                pendingPermissionToken &+= 1
-                let myToken = pendingPermissionToken
-                AVAudioSession.sharedInstance().requestRecordPermission { granted in
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        guard self.pendingPermissionToken == myToken else {
-                            Log.info("[AudioRecorder] Late mic grant ignored (token stale)", category: .audio)
-                            return
-                        }
-                        guard granted else {
-                            Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
-                            return
-                        }
-                        Log.info("[AudioRecorder] Mic permission granted — auto-starting recording", category: .audio)
-                        self.startRecording()
+                    guard granted else {
+                        Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
+                        return
                     }
+                    Log.info("[AudioRecorder] Mic permission granted — auto-starting recording", category: .audio)
+                    self.startRecording()
                 }
-                return false
-            case .denied:
-                Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
-                return false
-            case .granted:
-                break
-            @unknown default:
-                Log.warning("[AudioRecorder] Unknown microphone permission status", category: .audio)
-                return false
             }
+            return false
+        case .denied:
+            Log.warning("[AudioRecorder] Microphone permission denied", category: .audio)
+            return false
+        case .granted:
+            break
+        @unknown default:
+            Log.warning("[AudioRecorder] Unknown microphone permission status", category: .audio)
+            return false
         }
         #endif
         do {

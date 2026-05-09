@@ -656,11 +656,6 @@ final class ThemeAliasResolver: ObservableObject {
         }
     }
 
-    /// 在新 conversation / 新 session 一开始重置(可选;现在没人调,留接口)。
-    func resetSessionThrottle() {
-        sessionDismissCount = 0
-    }
-
     /// coolUntil 变化时调:取消旧 timer,若 coolUntil 在未来则起 one-shot timer 在到期点
     /// 触发 SwiftUI re-render(通过 `objectWillChange.send()` + `themeAliasMapDidChange`)。
     /// 自然过期不需要修改 `coolUntil` 值(redDotVisible 逻辑已经判 `Date() < coolUntil`),

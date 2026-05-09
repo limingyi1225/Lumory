@@ -466,12 +466,6 @@ final class ReminderService: ObservableObject {
         }
     }
 
-    /// 不依赖 isEnabled,任何时候都更新本周期写过状态(给 Settings 进度行用)。
-    func refreshProgress() async {
-        let info = await computeCycleInfo()
-        await applyComputedInfo(info)
-    }
-
     /// "下次提醒"时间。Settings UI 显示用。
     ///
     /// **不读 UNUserNotificationCenter pending list** —— 那条路径有竞态:用户切 frequency picker 时,
@@ -730,7 +724,7 @@ final class ReminderService: ObservableObject {
 
     // MARK: - Cycle math
 
-    /// 周期信息快照。在 main actor 上算完一次,reschedule 和 refreshProgress 共用。
+    /// 周期信息快照。在 main actor 上 reschedule 路径用一次。
     struct CycleInfo: Sendable {
         let cycleStart: Date
         let cycleEnd: Date  // exclusive

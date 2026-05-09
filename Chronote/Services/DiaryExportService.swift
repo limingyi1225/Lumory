@@ -72,39 +72,27 @@ class DiaryExportService {
     /// and old (>7d) exports are pruned on each call.
     /// - Parameter content: The content to write.
     /// - Returns: The URL of the created file, or nil if failed.
-    /// - Note: Existing call sites only check for nil; richer error info is
-    ///   available via `createExportFileThrowing(content:)` for callers that
-    ///   want to distinguish disk-full vs other failures.
+    /// - Note: 历史上还有一个 `createExportFileThrowing` 暴露 `ExportError.diskFull`,
+    ///   但所有 call site 都只看 nil/non-nil,disk-full 极小概率 + 系统已有自身 alert,
+    ///   2026-05 删了那条 throwing 路径,inline 进 wrapper。
     static func createExportFile(content: String) -> URL? {
         do {
-            return try createExportFileThrowing(content: content)
-        } catch {
-            Log.error("[DiaryExportService] Failed to create export file: \(error)", category: .persistence)
-            return nil
-        }
-    }
+            let folder = try ensureExportFolder()
 
-    /// Throwing variant that surfaces a distinct `ExportError` for disk-full.
-    static func createExportFileThrowing(content: String) throws -> URL {
-        let folder = try ensureExportFolder()
+            // Cleanup before writing — bound the folder size.
+            cleanupOldExports(in: folder)
 
-        // Cleanup before writing — bound the folder size.
-        cleanupOldExports(in: folder)
+            let isEnglish = AppGroup.userDefaults.string(forKey: "appLanguage") == "en"
+            let baseFileName = isEnglish ? "Lumory_Diary_Export" : "Lumory_日记导出"
+            let fileName = "\(baseFileName)_\(formattedDateForFileName()).txt"
+            let fileURL = folder.appendingPathComponent(fileName)
 
-        let isEnglish = AppGroup.userDefaults.string(forKey: "appLanguage") == "en"
-        let baseFileName = isEnglish ? "Lumory_Diary_Export" : "Lumory_日记导出"
-        let fileName = "\(baseFileName)_\(formattedDateForFileName()).txt"
-        let fileURL = folder.appendingPathComponent(fileName)
-
-        do {
             try content.write(to: fileURL, atomically: true, encoding: .utf8)
             Log.info("[DiaryExportService] Export file created at: \(fileURL.path)", category: .persistence)
             return fileURL
         } catch {
-            if isDiskFull(error) {
-                throw ExportError.diskFull
-            }
-            throw ExportError.writeFailed(underlying: error)
+            Log.error("[DiaryExportService] Failed to create export file: \(error)", category: .persistence)
+            return nil
         }
     }
 

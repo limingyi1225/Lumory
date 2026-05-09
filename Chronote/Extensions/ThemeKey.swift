@@ -27,9 +27,4 @@ enum ThemeKey {
             .precomposedStringWithCanonicalMapping
             .lowercased()
     }
-
-    /// 两个 raw 主题字符串是否归一化后相等。
-    static func equal(_ a: String, _ b: String) -> Bool {
-        return make(a) == make(b)
-    }
 }

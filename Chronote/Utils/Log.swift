@@ -70,16 +70,6 @@ enum Log {
         let text = message()
         logger(category).error("[\(file, privacy: .public):\(line, privacy: .public)] \(text, privacy: .private)")
     }
-
-    static func error(
-        _ error: Error,
-        category: Category = .general,
-        file: String = #fileID,
-        line: Int = #line
-    ) {
-        let text = String(describing: error)
-        logger(category).error("[\(file, privacy: .public):\(line, privacy: .public)] \(text, privacy: .private)")
-    }
 }
 
 // MARK: - Release silencer for legacy `print(...)` call sites.

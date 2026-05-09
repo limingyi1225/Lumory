@@ -2323,10 +2323,6 @@ private final class ThemeAliasAITestDouble: AIServiceProtocol {
 
     func embed(text: String) async -> [Float]? { nil }
 
-    func ask(question: String, context entries: [DiaryEntryData]) -> AsyncStream<String> {
-        AsyncStream { continuation in continuation.finish() }
-    }
-
     @available(iOS 15.0, macOS 12.0, *)
     func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
         AsyncStream { continuation in continuation.finish() }

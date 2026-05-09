@@ -611,14 +611,6 @@ struct ThemeAliasManagementView: View {
             .foregroundStyle(.secondary)
     }
 
-    private var backgroundGradient: some View {
-        LinearGradient(
-            colors: [Color.accentColor.opacity(0.08), Color.clear],
-            startPoint: .top,
-            endPoint: .center
-        )
-    }
-
     @MainActor
     private func maybeAutoScan() async {
         // 持久化标记在 resolver(codex P2 fix):

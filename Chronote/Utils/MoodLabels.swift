@@ -15,14 +15,10 @@ enum MoodLabels {
         Option(emoji: "😄", labelKey: "非常开心", value: 1.0)
     ]
 
-    static func option(for value: Double) -> Option {
+    private static func option(for value: Double) -> Option {
         options.min { lhs, rhs in
             abs(lhs.value - value) < abs(rhs.value - value)
         } ?? options[2]
-    }
-
-    static func localizedLabel(for value: Double) -> String {
-        NSLocalizedString(option(for: value).labelKey, comment: "Mood label")
     }
 
     static func localizedExportDescription(for value: Double) -> String {

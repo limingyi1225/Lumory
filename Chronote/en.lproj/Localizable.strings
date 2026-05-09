@@ -22,8 +22,6 @@
 "摘要" = "Summary";
 "录音" = "Recording";
 "日记详情" = "Diary Details";
-"确认删除此日记？" = "Confirm deletion of this entry?";
-"此操作无法撤销，是否确定？" = "This action cannot be undone. Are you sure?";
 
 "关闭" = "Close";
 "删除录音？" = "Delete Recording?";
@@ -43,8 +41,6 @@
 "English (US)" = "English (US)";
 "在此粘贴日记内容…" = "Paste diaries here...";
 "将你的日记粘贴到下面，支持多篇日记连贴。" = "Paste your diary entries below. Multiple entries supported.";
-"删除日记" = "Delete Entry";
-"确定要删除这篇日记吗？此操作无法撤销。" = "Are you sure you want to delete this entry? This action cannot be undone.";
 /* Mood descriptions */
 "非常低落" = "Very Low";
 "有些低落" = "Somewhat Low";
@@ -227,7 +223,6 @@
 "数据库需要修复" = "Database Recovery Required";
 "数据库可能已损坏。修复会删除本地数据库文件,然后从 iCloud 重新拉取。⚠️ 还没同步到 iCloud 的本地日记可能会丢失(自动备份保留在 App 内,联系开发者可恢复)。修复过程也会重置已合并的主题别名分组。" = "Your database appears corrupted. Recovery will delete the local database files and re-pull from iCloud. ⚠️ Diary entries that haven't synced to iCloud yet may be lost (an automatic backup is kept inside the app — contact the developer to recover). Merged theme alias groups will also be reset.";
 "通知正文会引用近期日记里的人和事(可能在锁屏显示)" = "Notification preview may reference people and topics from recent entries (visible on lock screen).";
-"此操作无法撤销。已合并的主题分组也会一并清除。" = "This action cannot be undone. Your merged theme groups will also be reset.";
 "合并主题「%@」到「%@」?" = "Merge \"%@\" into \"%@\"?";
 "以下别名也会一起搬到目标组:%@" = "These aliases will move along too: %@";
 "继续合并" = "Continue";
@@ -476,7 +471,6 @@
 "清空当前对话？" = "Clear this conversation?";
 "清空后,本次问答和已展开的参考记录都会丢失,无法恢复。" = "After clearing, this conversation and the expanded references will be lost. This can't be undone.";
 "下次提醒" = "Next reminder";
-"点下方输入框写一句,或长按麦克风录一段语音。" = "Tap the input below to write a line, or long-press the mic to record a voice memo.";
 "正在导出 %d 条日记…" = "Exporting %d entries…";
 "有 %d 张图片处理失败" = "Failed to process %d photo(s)";
 "无法播放该录音,文件可能已损坏或丢失。" = "Can't play this recording — the file may be corrupt or missing.";
@@ -490,7 +484,6 @@
 "解锁失败,请重试。" = "Unlock failed, please retry.";
 "启用 App 锁前请先验证身份。" = "Verify your identity to enable app lock.";
 "用 Face ID 解锁 Lumory。" = "Unlock Lumory with Face ID.";
-"此操作无法撤销。" = "This cannot be undone.";
 "milestone.subtitle.streak" = "Day Streak";
 "milestone.tagline.7" = "One week. A promise you've kept.";
 "milestone.tagline.14" = "Two weeks. The habit is forming.";

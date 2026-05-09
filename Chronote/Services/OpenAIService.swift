@@ -1526,37 +1526,6 @@ extension OpenAIService {
     }
 
     // MARK: Ask (RAG)
-    func ask(question: String, context entries: [DiaryEntryData]) -> AsyncStream<String> {
-        // 向下兼容:把事件流平成 String 流,旧 caller 继续好用。
-        // `.truncated` / `.failed` 直接被 streamChat wrapper 转为 `⚠️ ...` 文本附加。
-        AsyncStream { continuation in
-            let task = Task {
-                for await event in self.askEvents(question: question, context: entries) {
-                    switch event {
-                    case .chunk(let text):
-                        continuation.yield(text)
-                    case .truncated(let reason):
-                        continuation.yield("\n\n⚠️ " + reason)
-                    case .failed(let error):
-                        // P0-4 单 key + 系统 locale 路由。旧设计 .zh / .en 双 key 试图按问题语种挑文案,
-                        // 但 NSLocalizedString 始终按 app locale 查表 — 双 key 等于死代码,反而坑过 reviewer:
-                        // en.strings 把 .zh / .en 两个 key 都设为英文 → 中文用户在英文 locale 下提中文问题
-                        // 也只能拿英文。统一单 key,按 app locale 给一份对应文案。
-                        let msg = String(
-                            format: NSLocalizedString("error.stream.answerGeneric", comment: "Generic streaming-answer error"),
-                            error.localizedDescription
-                        )
-                        continuation.yield("\n\n⚠️ " + msg)
-                    case .done:
-                        break
-                    }
-                }
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
     /// 结构化事件版 RAG 问答流。UI 想区分"中断 / 失败 / 正常"直接消费这个。
     func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
         AsyncStream { continuation in

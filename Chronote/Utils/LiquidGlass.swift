@@ -10,10 +10,6 @@ enum LumoryCornerRadius {
     static let card: CGFloat = 16
     /// toast / overlay 系统级 chip(底部 capsule、popover-style 浮层)
     static let chip: CGFloat = 22
-    /// 缩略图、小 badge(<= 40pt 尺寸)
-    static let thumbnail: CGFloat = 8
-    /// 输入框中的 inline 玻璃区(略小于 card)
-    static let inline: CGFloat = 12
 }
 
 // MARK: - Liquid Glass View Extensions

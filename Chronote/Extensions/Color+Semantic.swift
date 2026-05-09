@@ -16,9 +16,6 @@ extension Color {
     /// 警告 / 半态:同步异常 / 数据库修复 / 即将不可逆
     static let semanticWarning: Color = .orange
 
-    /// 操作型 affordance:导入 / 导出 / 主功能 row
-    static let semanticAction: Color = .accentColor
-
     /// 成功 / 已完成:同步 OK / 索引已就绪
     /// 复用 moodSpectrum 的 high-positive 端,跟 Insights 暖绿同源
     static var semanticSuccess: Color { Color.moodSpectrum(value: 0.85) }

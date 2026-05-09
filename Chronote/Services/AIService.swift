@@ -153,12 +153,9 @@ protocol AIServiceProtocol {
     /// 失败返回 nil；调用方应妥善处理（例如延后 backfill）。
     func embed(text: String) async -> [Float]?
 
-    /// 对话式回顾：基于检索到的上下文日记，流式回答一个自然语言问题。
-    /// 实现方负责 prompt 组装；调用方负责先做检索把 `context` 限制在合理数量内。
-    func ask(question: String, context entries: [DiaryEntryData]) -> AsyncStream<String>
-
-    /// 结构化事件版回顾流 —— 能区分 `.chunk` / `.truncated` / `.failed`。
-    /// 旧 `ask` 保留作 wrapper;新 UI 用这个,才能显示"回答不完整"条。
+    /// 结构化事件版对话式回顾流 —— 能区分 `.chunk` / `.truncated` / `.failed`。
+    /// 实现方负责 prompt 组装;调用方负责先做检索把 `context` 限制在合理数量内。
+    /// UI 用 `.truncated` 显示"回答不完整"条,`.failed` 显示错误条。
     @available(iOS 15.0, macOS 12.0, *)
     func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent>
 
@@ -286,13 +283,6 @@ struct MockAIService: AIServiceProtocol {
         return vector.map { $0 / norm }
     }
 
-    func ask(question: String, context entries: [DiaryEntryData]) -> AsyncStream<String> {
-        AsyncStream { continuation in
-            continuation.yield("Mock 回答：你问了『\(question)』，基于 \(entries.count) 条日记。")
-            continuation.finish()
-        }
-    }
-
     @available(iOS 15.0, macOS 12.0, *)
     func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
         AsyncStream { continuation in
@@ -367,20 +357,3 @@ extension EnvironmentValues {
     }
 }
 
-// MARK: - Mock Transcriber
-//
-// 测试侧使用：固定返回一段预设文本，不触碰 Apple Speech / 权限 / 音频引擎。
-@MainActor
-final class MockTranscriber: TranscriberProtocol {
-    let stubbedResult: String?
-    let lastFailure: TranscriptionFailure?
-
-    init(stubbedResult: String? = "mock transcription", lastFailure: TranscriptionFailure? = nil) {
-        self.stubbedResult = stubbedResult
-        self.lastFailure = lastFailure
-    }
-
-    func transcribeAudio(fileURL: URL, localeIdentifier: String) async -> String? {
-        stubbedResult
-    }
-}

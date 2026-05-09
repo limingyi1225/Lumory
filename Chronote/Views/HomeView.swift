@@ -462,15 +462,26 @@ struct HomeView: View {
             // 写到 AppGroup defaults 防进程被杀,但**500ms debounce**:用户每键写一次会让
             // plist encode + KVO + AppGroup 跨进程 sync 累计可观,scrollback 时尤其明显;
             // 改成静默 500ms 后再写,scenePhase=.background 时强 flush(见下面的 onChange)。
-            draftSaveTask?.cancel()
-            draftSaveTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                guard !Task.isCancelled else { return }
-                Self.persistDraft(newValue)
+            //
+            // **空白立即 sync clear,不 debounce** — `handleSendAction` 发完日记后会清空
+            // `inputText`,如果走 debounce 任务,500ms 内 App 被 kill / suspend,旧草稿仍在 AppGroup
+            // 里;下次启动会被 hydrate 回 composer,用户看到已发送的文本"还原"。空白立即清确保
+            // 发送/手动清都立即落盘。
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                draftSaveTask?.cancel()
+                draftSaveTask = nil
+                AppGroup.userDefaults.removeObject(forKey: "lumory.home.draft.text")
+            } else {
+                draftSaveTask?.cancel()
+                draftSaveTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard !Task.isCancelled else { return }
+                    Self.persistDraft(newValue)
+                }
             }
 
             // spectrum state 切换是即时 UI 反馈,不能 debounce
-            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let hasContent = !trimmed.isEmpty
             if hasContent && inputVM.spectrumDisplayState == .idle {
                 withAnimation(.easeInOut(duration: 1.0)) {

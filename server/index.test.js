@@ -191,6 +191,9 @@ test('chat with too many messages returns 400', async (t) => {
 
   // 65 条 messages,超过 MAX_MESSAGES_COUNT=64 上限。每条 content 极短走过 char cap,
   // 触发 messages.length 这一道关。
+  // **per-test X-Forwarded-For**:`app.set('trust proxy', 'loopback')` 信任 loopback 的伪 IP 头。
+  // 用专属 IP 让 globalIPLimiter(env GLOBAL_IP_LIMIT_MAX=3,跨 test 共享 in-memory)的 quota
+  // 不被本测耗光,后续 streaming-abort 测仍能走到 mocked axios adapter。
   const messages = Array.from({ length: 65 }, (_, i) => ({ role: 'user', content: `m${i}` }));
   const status = await postJSON(
     server,
@@ -199,6 +202,7 @@ test('chat with too many messages returns 400', async (t) => {
     {
       'X-App-Secret': process.env.APP_SHARED_SECRET,
       'X-Install-Id': 'a7d9673d-eba6-4cf8-a209-cc87f4f7cbba',
+      'X-Forwarded-For': '10.10.20.1',
     }
   );
 
@@ -213,6 +217,7 @@ test('chat count cap fires before char cap when both exceed', async (t) => {
 
   // 65 条 × 1000 chars each = 65000 chars (over MAX_MESSAGES_CHARS=32000 too)。
   // 期望:count cap 先 fire → 400 "too many messages",而不是 413 "messages too large"。
+  // 同上 — X-Forwarded-For 用专属 IP 让本测不耗 globalIPLimiter quota。
   const messages = Array.from({ length: 65 }, () => ({
     role: 'user',
     content: 'a'.repeat(1000),
@@ -224,6 +229,7 @@ test('chat count cap fires before char cap when both exceed', async (t) => {
     {
       'X-App-Secret': process.env.APP_SHARED_SECRET,
       'X-Install-Id': 'a7d9673d-eba6-4cf8-a209-cc87f4f7cbba',
+      'X-Forwarded-For': '10.10.20.2',
     }
   );
 

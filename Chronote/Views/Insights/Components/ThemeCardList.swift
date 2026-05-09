@@ -218,12 +218,7 @@ private struct ThemeCardPreview: View {
         }
     }
 
-    private static let dateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale.current
-        f.setLocalizedDateFormatFromTemplate("MMM d")
-        return f
-    }()
+    private static var dateFormatter: DateFormatter { LumoryDateFormatters.monthDay }
 
     private func loadSnippets() async {
         // 取最近 3 条 —— 长按 preview 不需要全部

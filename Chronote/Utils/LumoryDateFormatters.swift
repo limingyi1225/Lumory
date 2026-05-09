@@ -69,4 +69,76 @@ enum LumoryDateFormatters {
         f.setLocalizedDateFormatFromTemplate("LLL")
         return f
     }()
+
+    // MARK: - Language-aware accessors
+    //
+    // 上面的 token 用 `Locale.current`(系统当前)— 用户在 App 内通过 `@AppStorage("appLanguage")`
+    // 主动切语言时跟系统不一定一致。Home / Detail / EntryRow 这类 list cell 必须按 `appLanguage`
+    // 显示 weekday / monthDay,不能跟系统 locale 走。下面这一组按 language 缓存,
+    // SwiftUI body 反复 evaluate 时不会重建 formatter。
+
+    private static let languageCacheLock = NSLock()
+    private static var languageCache: [String: DateFormatter] = [:]
+
+    private static func cachedFormatter(
+        key: String,
+        build: () -> DateFormatter
+    ) -> DateFormatter {
+        languageCacheLock.lock()
+        defer { languageCacheLock.unlock() }
+        if let cached = languageCache[key] { return cached }
+        let formatter = build()
+        languageCache[key] = formatter
+        return formatter
+    }
+
+    /// "5月3日" / "May 3" 按 `appLanguage` 锁定语言。
+    static func monthDay(language: String) -> DateFormatter {
+        cachedFormatter(key: "monthDay-\(language)") {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: language)
+            f.setLocalizedDateFormatFromTemplate("MMMd")
+            return f
+        }
+    }
+
+    /// "星期三" / "Wednesday" 按 `appLanguage` 锁定语言。
+    static func weekdayFull(language: String) -> DateFormatter {
+        cachedFormatter(key: "weekdayFull-\(language)") {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: language)
+            f.dateFormat = "EEEE"
+            return f
+        }
+    }
+
+    /// "27" 月内日期数字 — DiaryEntryRow day badge。按 `appLanguage` 锁定数字系。
+    static func dayNumber(language: String) -> DateFormatter {
+        cachedFormatter(key: "dayNumber-\(language)") {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: language)
+            f.dateFormat = "dd"
+            return f
+        }
+    }
+
+    /// "5月" / "May"(短月份)按 `appLanguage` 锁定语言。
+    static func monthShortLocalized(language: String) -> DateFormatter {
+        cachedFormatter(key: "monthShort-\(language)") {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: language)
+            f.dateFormat = "MMM"
+            return f
+        }
+    }
+
+    /// "9:30" / "9:30 AM" — `timeStyle=.short`,按 `appLanguage` 锁定语言/AM-PM。
+    static func timeShortLocalized(language: String) -> DateFormatter {
+        cachedFormatter(key: "timeShort-\(language)") {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: language)
+            f.timeStyle = .short
+            return f
+        }
+    }
 }

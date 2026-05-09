@@ -1267,11 +1267,8 @@ struct HomeView: View {
     }
 
     // 每行都 new 一个 DateFormatter 是主线程热路径浪费——List 每次 diff 刷新，N 行 × 2 个格式
-    // = 2N 次 alloc + ICU 查表。hoist 到 static，按 locale 缓存。
-    private static var cachedWeekdayFormatter: DateFormatter?
-    private static var cachedMonthDayFormatter: DateFormatter?
-    private static var cachedLocale: String = ""
-    private static let relativeDateFormatterLock = NSLock()
+    // = 2N 次 alloc + ICU 查表。 weekday / monthDay 按 `appLanguage` 锁定语言,走
+    // `LumoryDateFormatters` 的共享 cache;HH:mm 是 locale-independent 数字格式,本地保留。
     private static let timeOnlyFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
@@ -1294,22 +1291,10 @@ struct HomeView: View {
     }
 
     private static func relativeDateString(for date: Date, days: Int, language: String) -> String {
-        relativeDateFormatterLock.lock()
-        defer { relativeDateFormatterLock.unlock() }
-        // 按 appLanguage 缓存两个 formatter；语言变了重建
-        if cachedLocale != language {
-            cachedLocale = language
-            let weekday = DateFormatter()
-            weekday.locale = Locale(identifier: language)
-            weekday.dateFormat = "EEEE"
-            cachedWeekdayFormatter = weekday
-            let monthDay = DateFormatter()
-            monthDay.locale = Locale(identifier: language)
-            monthDay.setLocalizedDateFormatFromTemplate("MMMd")
-            cachedMonthDayFormatter = monthDay
-        }
-        let formatter = days < 7 ? cachedWeekdayFormatter : cachedMonthDayFormatter
-        return formatter?.string(from: date) ?? ""
+        let formatter = days < 7
+            ? LumoryDateFormatters.weekdayFull(language: language)
+            : LumoryDateFormatters.monthDay(language: language)
+        return formatter.string(from: date)
     }
 
     private func timeLabel(_ date: Date?) -> String {

@@ -192,30 +192,12 @@ struct DiaryEntryRow: View {
         .frame(width: 50)
     }
 
-    // ** 静态缓存的 DateFormatter **：老实现每次 body eval 都 new 一次 DateFormatter，
-    // scroll 500 条日记时每次 diff 触发数千次 ICU locale 加载。按 (kind, language) 缓存一次就够。
-    private var dayString: String { Self.cachedFormatter(kind: .day, language: appLanguage).string(from: entry.wrappedDate) }
-    private var monthString: String { Self.cachedFormatter(kind: .month, language: appLanguage).string(from: entry.wrappedDate) }
-    private var timeString: String { Self.cachedFormatter(kind: .time, language: appLanguage).string(from: entry.wrappedDate) }
-
-    private enum FormatterKind { case day, month, time }
-    private static let formatterCacheLock = NSLock()
-    private static var formatterCache: [String: DateFormatter] = [:]
-    private static func cachedFormatter(kind: FormatterKind, language: String) -> DateFormatter {
-        let key = "\(kind)-\(language)"
-        formatterCacheLock.lock()
-        defer { formatterCacheLock.unlock() }
-        if let cached = formatterCache[key] { return cached }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: language)
-        switch kind {
-        case .day:   formatter.dateFormat = "dd"
-        case .month: formatter.dateFormat = "MMM"
-        case .time:  formatter.timeStyle = .short
-        }
-        formatterCache[key] = formatter
-        return formatter
-    }
+    // ** 共享缓存的 DateFormatter ** —— 走 `LumoryDateFormatters` 的 language-aware accessor。
+    // 老实现每次 body eval 都 new 一次 DateFormatter,scroll 500 条日记时每次 diff 触发数千次
+    // ICU locale 加载。共享 cache 按 (kind, language) 复用,跨 row 共享一份。
+    private var dayString: String { LumoryDateFormatters.dayNumber(language: appLanguage).string(from: entry.wrappedDate) }
+    private var monthString: String { LumoryDateFormatters.monthShortLocalized(language: appLanguage).string(from: entry.wrappedDate) }
+    private var timeString: String { LumoryDateFormatters.timeShortLocalized(language: appLanguage).string(from: entry.wrappedDate) }
 
     private var thumbnailFileName: String? {
         guard entry.managedObjectContext != nil, !entry.isDeleted else { return nil }

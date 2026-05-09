@@ -539,11 +539,7 @@ struct AskPastView: View {
         return Array(out.prefix(4))
     }
 
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.setLocalizedDateFormatFromTemplate("MMMd")
-        return formatter
-    }()
+    private static var dateFormatter: DateFormatter { LumoryDateFormatters.monthDay }
 }
 
 private struct AskPastMessageRow: View, Equatable {

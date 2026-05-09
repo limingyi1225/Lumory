@@ -325,17 +325,9 @@ struct MoodStoryChart: View {
         )
     }
 
-    /// 三个 bucket 各自一份模板,setLocalizedDateFormatFromTemplate 自动适配中英语序。
-    private static let dayTagFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.setLocalizedDateFormatFromTemplate("MMMd")
-        return formatter
-    }()
-    private static let weekTagFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.setLocalizedDateFormatFromTemplate("MMMd")
-        return formatter
-    }()
+    /// 三个 bucket 各自一份模板,day/week 共用 monthDay token,month bucket 仍 inline(yMMM 没 token)。
+    private static var dayTagFormatter: DateFormatter { LumoryDateFormatters.monthDay }
+    private static var weekTagFormatter: DateFormatter { LumoryDateFormatters.monthDay }
     private static let monthTagFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.setLocalizedDateFormatFromTemplate("yMMM")

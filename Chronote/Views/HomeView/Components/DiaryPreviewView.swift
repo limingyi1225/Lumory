@@ -7,10 +7,8 @@ struct DiaryPreviewView: View {
     let onTap: () -> Void
 
     private let cal = Calendar.current
-    private static let dateFormatterLock = NSLock()
-    private static var cachedWeekdayFormatter: DateFormatter?
-    private static var cachedMonthDayFormatter: DateFormatter?
-    private static var cachedLocale: String = ""
+    // weekday / monthDay 按 `appLanguage` 锁定语言,走 `LumoryDateFormatters` 共享 cache;
+    // HH:mm 是 locale-independent 24h 数字格式,本地保留。
     private static let timeOnlyFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
@@ -116,28 +114,14 @@ struct DiaryPreviewView: View {
     }
 
     private func timeLabel(_ date: Date) -> String {
-        Self.dateFormatterLock.lock()
-        defer { Self.dateFormatterLock.unlock() }
-        return Self.timeOnlyFormatter.string(from: date)
+        Self.timeOnlyFormatter.string(from: date)
     }
 
     private static func relativeDateString(for date: Date, days: Int, language: String) -> String {
-        dateFormatterLock.lock()
-        defer { dateFormatterLock.unlock() }
-        if cachedLocale != language {
-            cachedLocale = language
-            let weekday = DateFormatter()
-            weekday.locale = Locale(identifier: language)
-            weekday.dateFormat = "EEEE"
-            cachedWeekdayFormatter = weekday
-
-            let monthDay = DateFormatter()
-            monthDay.locale = Locale(identifier: language)
-            monthDay.setLocalizedDateFormatFromTemplate("MMMd")
-            cachedMonthDayFormatter = monthDay
-        }
-        let formatter = days < 7 ? cachedWeekdayFormatter : cachedMonthDayFormatter
-        return formatter?.string(from: date) ?? ""
+        let formatter = days < 7
+            ? LumoryDateFormatters.weekdayFull(language: language)
+            : LumoryDateFormatters.monthDay(language: language)
+        return formatter.string(from: date)
     }
 
     private func cleanedSummary(_ raw: String) -> String {

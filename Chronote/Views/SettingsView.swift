@@ -48,13 +48,8 @@ struct SettingsView: View {
     }
 
     /// 显示"下次提醒"用的 formatter。`abbreviated` date + `shortened` time —— 中文 "10月12日 21:00",
-    /// 英文 "Oct 12, 9:00 PM"。
-    private static let nextFireFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return f
-    }()
+    /// 英文 "Oct 12, 9:00 PM"。复用 `LumoryDateFormatters.fullDateTime`(.medium + .short)。
+    private static var nextFireFormatter: DateFormatter { LumoryDateFormatters.fullDateTime }
     /// 防止用户在权限弹窗(首次 enable 的 await requestAuthorization 期间)双击 toggle 进入
     /// race:enable() 暂停时若 disable() 跑完再 resume,isEnabled 会被反复来回写。
     @State private var reminderToggleInFlight = false

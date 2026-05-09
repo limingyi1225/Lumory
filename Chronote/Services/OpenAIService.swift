@@ -12,6 +12,7 @@ final class OpenAIService: AIServiceProtocol {
     private let backendURL: URL
     private let jsonEncoder = JSONEncoder()
     private let jsonDecoder = JSONDecoder()
+    static let narrativeTextBlockMaxUTF16Units = 28_000
 
     // Debounce delay for summarize requests
     private let debounceDelay: TimeInterval = 0.3 // 300ms debounce
@@ -132,11 +133,20 @@ final class OpenAIService: AIServiceProtocol {
             return
         }
 
-        let textBlock = entries.map { entry in
-            "日期: \(entry.date)\n心情分数: \(Int(entry.moodValue * 100))\n摘要: \(entry.summary)\n正文: \(entry.text)"
-        }.joined(separator: "\n---\n")
+        let textBlockInfo = Self.narrativeTextBlock(from: entries)
+        let textBlock = textBlockInfo.text
 
+        if textBlockInfo.truncated {
+            Log.info(
+                "[OpenAIService] Narrative input truncated: included=\(textBlockInfo.includedEntries)/\(textBlockInfo.totalEntries), utf16=\(textBlock.utf16.count)",
+                category: .ai
+            )
+        }
         Log.info("[OpenAIService] 安全数据流式文本块长度: \(textBlock.count) 字符", category: .ai)
+
+        let coverageNote = textBlockInfo.truncated
+            ? "\n# 范围说明\n由于日记总量较大,以下仅包含最近 \(textBlockInfo.includedEntries) / \(textBlockInfo.totalEntries) 篇日记,请基于已提供的内容分析,不要暗示你看过被省略的日记。\n"
+            : ""
 
         let prompt = """
 阅读提供的日记条目，并基于内容撰写一份连贯的分析报告。
@@ -150,6 +160,7 @@ final class OpenAIService: AIServiceProtocol {
 - 1-6段落的报告（Mac版本总字数不超过800字，其他平台不超过400字）。
 - 每个段落之间用空行（两行换行）分隔。
 - 不得使用括号、破折号，引号，星号，加粗，斜体或其他类似标点符号。
+\(coverageNote)
 
 Diary Entries:
 \(textBlock)
@@ -268,6 +279,75 @@ Diary Entries:
                 await MainActor.run { onEvent(.failed(error)) }
             }
         }
+    }
+
+    struct NarrativeTextBlock: Equatable {
+        let text: String
+        let includedEntries: Int
+        let totalEntries: Int
+        let truncated: Bool
+    }
+
+    static func narrativeTextBlock(
+        from entries: [DiaryEntryData],
+        maxUTF16Units: Int = narrativeTextBlockMaxUTF16Units
+    ) -> NarrativeTextBlock {
+        let separator = "\n---\n"
+        guard maxUTF16Units > 0 else {
+            return NarrativeTextBlock(text: "", includedEntries: 0, totalEntries: entries.count, truncated: !entries.isEmpty)
+        }
+
+        var newestFirst: [String] = []
+        var usedUTF16 = 0
+        var didTrimEntry = false
+
+        for entry in entries.reversed() {
+            let block = narrativeEntryBlock(entry)
+            let separatorCost = newestFirst.isEmpty ? 0 : separator.utf16.count
+            let remaining = maxUTF16Units - usedUTF16 - separatorCost
+            guard remaining > 0 else { break }
+
+            let blockCost = block.utf16.count
+            if blockCost <= remaining {
+                newestFirst.append(block)
+                usedUTF16 += separatorCost + blockCost
+            } else if newestFirst.isEmpty {
+                newestFirst.append(trimToUTF16Limit(block, maxUTF16Units))
+                didTrimEntry = true
+                usedUTF16 = newestFirst[0].utf16.count
+                break
+            } else {
+                break
+            }
+        }
+
+        let text = newestFirst.reversed().joined(separator: separator)
+        return NarrativeTextBlock(
+            text: text,
+            includedEntries: newestFirst.count,
+            totalEntries: entries.count,
+            truncated: didTrimEntry || newestFirst.count < entries.count
+        )
+    }
+
+    private static func narrativeEntryBlock(_ entry: DiaryEntryData) -> String {
+        "日期: \(entry.date)\n心情分数: \(Int(entry.moodValue * 100))\n摘要: \(entry.summary)\n正文: \(entry.text)"
+    }
+
+    private static func trimToUTF16Limit(_ text: String, _ maxUTF16Units: Int) -> String {
+        guard text.utf16.count > maxUTF16Units else { return text }
+        guard maxUTF16Units > 0 else { return "" }
+
+        var output = ""
+        output.reserveCapacity(min(text.count, maxUTF16Units))
+        var used = 0
+        for character in text {
+            let cost = character.utf16.count
+            guard used + cost <= maxUTF16Units else { break }
+            output.append(character)
+            used += cost
+        }
+        return output
     }
 
     // MARK: - Core
@@ -547,7 +627,7 @@ Diary Entries:
 
 /// 小的引用容器，用来把 debounce Task 内部算出的泛型值存到外层作用域。
 /// 锁是不可避免的——Task 内外是两个调度域；但只有两次 set+get，单锁够用。
-private final class ResultBox<T>: @unchecked Sendable {
+private final class ResultBox<T: Sendable>: @unchecked Sendable {
     private var value: T?
     private let lock = NSLock()
     func set(_ newValue: T) {

@@ -50,6 +50,17 @@ struct NetworkRetryHelper {
     /// Check if an error is retryable (SSL, timeout, network issues, server errors)
     private static func isRetryableError(_ error: Error) -> Bool {
         let nsError = error as NSError
+
+        // 首个 chunk 前 SSE 自然 EOF 会由 SSEParser 抛 missingDone。调用方已有
+        // hasEmittedAnyChunk guard:已经吐过内容的中断会转为 truncated,不会走到这里重放前缀。
+        if let parserError = error as? SSEParser.ParserError {
+            switch parserError {
+            case .missingDone:
+                return true
+            case .invalidEvent, .upstreamError:
+                return false
+            }
+        }
         
         // Check HTTP status codes for retryable server errors.
         // domain 是 BackendErrorMapper 抛的 NSError —— 历史上叫 "OpenAIService",

@@ -552,10 +552,22 @@ final class ReminderService: ObservableObject {
         }
         #endif
 
-        // disabled 时:pending 已 cancel 即可结束。
+        // disabled 时:pending + delivered 都清掉即可结束。
         // CoreData fetch / auth check / UI state 都不需要,省掉冷启动期 backfill 竞争。
         // 注意:不能在 doReschedule 入口 early-return,因为 `disable()` 也走这条路 cancel 通知。
-        guard isEnabled else { return }
+        guard isEnabled else {
+            #if canImport(UserNotifications)
+            let delivered = await center.deliveredNotifications()
+            guard gen == currentRescheduleGen else { return }
+            let toRemoveDelivered = delivered.compactMap { notif -> String? in
+                notif.request.identifier.hasPrefix(identifierPrefix) ? notif.request.identifier : nil
+            }
+            if !toRemoveDelivered.isEmpty {
+                center.removeDeliveredNotifications(withIdentifiers: toRemoveDelivered)
+            }
+            #endif
+            return
+        }
 
         let info = await computeCycleInfo()
         guard gen == currentRescheduleGen else { return }

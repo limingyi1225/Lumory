@@ -242,16 +242,16 @@ final class InsightsEngine {
             // 不能往同一 bucket 重复 append 同一 entry —— 否则 count/uniqueDays 翻倍。
             var contributedKeys = Set<String>()
             for theme in entry.themes where !theme.isEmpty && !isBannedTheme(theme) {
-                let lower = theme.lowercased()
-                let canonical = aliasMap[lower] ?? theme
-                let key = canonical.lowercased()
+                let themeKey = ThemeKey.make(theme)
+                let canonical = aliasMap[themeKey] ?? theme
+                let key = ThemeKey.make(canonical)
                 guard contributedKeys.insert(key).inserted else { continue }
                 if var existing = bucketMap[key] {
                     existing.items.append(entry)
                     bucketMap[key] = existing
                 } else {
                     // displayName 优先用 canonical(map 命中) / 否则当前 tag 原文
-                    let displayName = aliasMap[lower] ?? theme
+                    let displayName = aliasMap[themeKey] ?? theme
                     bucketMap[key] = (displayName, [entry])
                 }
             }
@@ -300,7 +300,8 @@ final class InsightsEngine {
             // 先按出现的"天数"排序——反复出现的人物/项目优先；tie-break 用条目总数
             .sorted {
                 if $0.uniqueDays != $1.uniqueDays { return $0.uniqueDays > $1.uniqueDays }
-                return $0.count > $1.count
+                if $0.count != $1.count { return $0.count > $1.count }
+                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
             }
             .prefix(limit)
             .map { $0 }

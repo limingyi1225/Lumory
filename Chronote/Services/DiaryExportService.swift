@@ -91,7 +91,7 @@ class DiaryExportService {
         // Cleanup before writing — bound the folder size.
         cleanupOldExports(in: folder)
 
-        let isEnglish = UserDefaults.standard.string(forKey: "appLanguage") == "en"
+        let isEnglish = AppGroup.userDefaults.string(forKey: "appLanguage") == "en"
         let baseFileName = isEnglish ? "Lumory_Diary_Export" : "Lumory_日记导出"
         let fileName = "\(baseFileName)_\(formattedDateForFileName()).txt"
         let fileURL = folder.appendingPathComponent(fileName)

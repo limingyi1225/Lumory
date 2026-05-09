@@ -144,9 +144,11 @@ const activeStreams = new Set();
 function requireAppSecret(req, res, next) {
   const provided = req.get('x-app-secret') || '';
   const expected = APP_SHARED_SECRET;
+  const providedBuffer = Buffer.from(provided);
+  const expectedBuffer = Buffer.from(expected);
   if (
-    provided.length !== expected.length ||
-    !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))
+    providedBuffer.length !== expectedBuffer.length ||
+    !crypto.timingSafeEqual(providedBuffer, expectedBuffer)
   ) {
     req.log.warn('rejected: invalid or missing X-App-Secret');
     res.status(401).json({ error: 'unauthorized' });
@@ -386,7 +388,10 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         if (!sawDone && frames.some(sseFrameHasDone)) {
           sawDone = true;
         }
-        res.write(chunk);
+        if (!res.write(chunk)) {
+          upstream.data.pause();
+          res.once('drain', () => upstream.data.resume());
+        }
       });
       upstream.data.on('end', () => {
         activeStreams.delete(upstream.data);
@@ -673,11 +678,11 @@ if (require.main === module) {
 
   process.on('unhandledRejection', (reason) => {
     log.error({ err: safeUpstreamError(reason) }, 'unhandledRejection');
-    process.exit(1);
+    shutdown('unhandledRejection');
   });
   process.on('uncaughtException', (err) => {
     log.fatal({ err: safeUpstreamError(err) }, 'uncaughtException');
-    process.exit(1);
+    shutdown('uncaughtException');
   });
 }
 

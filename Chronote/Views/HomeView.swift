@@ -1059,6 +1059,27 @@ struct HomeView: View {
         }.value
     }
 
+    private static func resolvedAudioURL(fileName: String) -> URL? {
+        let fm = FileManager.default
+        if let iCloudURL = fm.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
+            let audioURL = iCloudURL
+                .appendingPathComponent("Documents/LumoryAudio")
+                .appendingPathComponent(fileName)
+            if fm.fileExists(atPath: audioURL.path) { return audioURL }
+        }
+
+        let documentsURL = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let localAudioURL = documentsURL
+            .appendingPathComponent("LumoryAudio")
+            .appendingPathComponent(fileName)
+        if fm.fileExists(atPath: localAudioURL.path) { return localAudioURL }
+
+        let legacyURL = documentsURL.appendingPathComponent(fileName)
+        if fm.fileExists(atPath: legacyURL.path) { return legacyURL }
+
+        return nil
+    }
+
     /// 后台线程把图片逐一落到 documents 目录并返回文件名列表。
     private static func persistImagesOffMain(images: [Data], entryID: UUID) async -> [String] {
         guard !images.isEmpty else { return [] }
@@ -1387,6 +1408,10 @@ struct HomeView: View {
                 if inputVM.inputText.isEmpty {
                     inputVM.inputText = toAppend
                 } else {
+                    inputVM.inputText += Self.separatorBeforeAppendingTranscription(
+                        existingText: inputVM.inputText,
+                        appendedText: toAppend
+                    )
                     inputVM.inputText += toAppend
                 }
                 recordingVM.transcriptionError = nil
@@ -1399,13 +1424,27 @@ struct HomeView: View {
         }
     }
 
+    private static func separatorBeforeAppendingTranscription(existingText: String, appendedText: String) -> String {
+        guard let last = existingText.last else { return "" }
+        if last.isWhitespace || last.isNewline { return "" }
+
+        let sentenceBoundary: Set<Character> = [
+            ".", "。", "?", "？", "!", "！", "…",
+            "\"", "'", "”", "’", "」", "』", "》",
+            ")", "）", "】", "]", "}"
+        ]
+        if sentenceBoundary.contains(last) { return "\n" }
+
+        let combined = existingText + appendedText
+        let containsChinese = combined.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil
+        return containsChinese ? "\n" : " "
+    }
+
     /// inline error banner 上的"重试转写"按钮回调。
     /// 文件被删过(用户先点了删录音再点重试)就不重试,设为 .audioReadFailed。
     private func retryTranscription() {
         guard let fileName = recordingVM.currentAudioFileName else { return }
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let audioURL = documentsURL.appendingPathComponent(fileName)
-        guard FileManager.default.fileExists(atPath: audioURL.path) else {
+        guard let audioURL = Self.resolvedAudioURL(fileName: fileName) else {
             recordingVM.transcriptionError = .audioReadFailed
             return
         }
@@ -1417,10 +1456,7 @@ struct HomeView: View {
     private func playAudio(fileName: String) {
         Log.info("[HomeView playAudio START] Requested to play: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
 
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let audioURL = documentsURL.appendingPathComponent(fileName)
-
-        guard FileManager.default.fileExists(atPath: audioURL.path) else {
+        guard let audioURL = Self.resolvedAudioURL(fileName: fileName) else {
             Log.info("[HomeView playAudio] File NOT FOUND: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
             // **失败提示**:文件丢失走早返路径 — onPlayError 不会 fire,banner 不会显示。这里手动 set。
             recordingVM.audioPlaybackError = NSLocalizedString("无法播放该录音,文件可能已损坏或丢失。",

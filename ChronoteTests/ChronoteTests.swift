@@ -407,6 +407,19 @@ struct ThemeAggregationTests {
         #expect(result.first?.uniqueDays == 3)
     }
 
+    @Test func equalFrequencyThemesSortByName() {
+        let range = DateInterval(
+            start: makeDate(year: 2024, month: 6, day: 1),
+            end: makeDate(year: 2024, month: 6, day: 30)
+        )
+        let entries: [DiaryEntryData] = [
+            makeEntry(date: makeDate(year: 2024, month: 6, day: 1), themes: ["Beta"]),
+            makeEntry(date: makeDate(year: 2024, month: 6, day: 2), themes: ["Alpha"])
+        ]
+        let result = InsightsEngine.aggregateThemes(entries: entries, range: range)
+        #expect(result.map(\.name) == ["Alpha", "Beta"])
+    }
+
     @Test func bannedMetaThemesAreFiltered() {
         // 即便历史数据里存了"情绪"标签，聚合时也不应出现。
         let range = DateInterval(
@@ -1158,6 +1171,68 @@ struct SSEParserTests {
     }
 }
 
+// MARK: - Network retry
+
+struct NetworkRetryHelperTests {
+    @Test func missingDoneBeforeFirstChunkRetries() async throws {
+        var attempts = 0
+
+        let value: String = try await NetworkRetryHelper.performWithRetry(
+            maxRetries: 2,
+            retryDelay: 0
+        ) {
+            attempts += 1
+            if attempts == 1 {
+                throw SSEParser.ParserError.missingDone
+            }
+            return "ok"
+        }
+
+        #expect(value == "ok")
+        #expect(attempts == 2)
+    }
+}
+
+// MARK: - Narrative input truncation
+
+struct NarrativeTextBlockTests {
+    @Test func keepsMostRecentEntriesWithinUTF16Limit() {
+        let old = narrativeEntry(day: 1, text: String(repeating: "old", count: 30))
+        let mid = narrativeEntry(day: 2, text: String(repeating: "mid", count: 30))
+        let newest = narrativeEntry(day: 3, text: String(repeating: "new", count: 30))
+
+        let block = OpenAIService.narrativeTextBlock(from: [old, mid, newest], maxUTF16Units: 210)
+
+        #expect(block.truncated)
+        #expect(block.text.utf16.count <= 210)
+        #expect(block.text.contains("new"))
+        #expect(!block.text.contains("old"))
+    }
+
+    @Test func trimsSingleOversizedLatestEntry() {
+        let entry = narrativeEntry(day: 1, text: String(repeating: "你", count: 500))
+
+        let block = OpenAIService.narrativeTextBlock(from: [entry], maxUTF16Units: 120)
+
+        #expect(block.truncated)
+        #expect(block.includedEntries == 1)
+        #expect(block.text.utf16.count <= 120)
+    }
+
+    private func narrativeEntry(day: Int, text: String) -> DiaryEntryData {
+        DiaryEntryData(
+            id: UUID(),
+            date: makeDate(year: 2024, month: 6, day: day),
+            text: text,
+            moodValue: 0.5,
+            summary: "summary-\(day)",
+            themes: [],
+            embedding: nil,
+            wordCount: text.count
+        )
+    }
+}
+
 private func makeEntry(date: Date, mood: Double = 0.5, themes: [String] = []) -> DiaryEntryData {
     DiaryEntryData(
         id: UUID(),
@@ -1226,6 +1301,24 @@ struct ThemeAggregationAliasTests {
         #expect(result.count == 1)
         #expect(result.first?.count == 1)
         #expect(result.first?.uniqueDays == 1)
+    }
+
+    @Test func aliasMap_usesThemeKeyForNFDInput() {
+        let range = DateInterval(
+            start: makeDate(year: 2024, month: 6, day: 1),
+            end: makeDate(year: 2024, month: 6, day: 30)
+        )
+        let nfdCafe = "cafe\u{301}"
+        let entries: [DiaryEntryData] = [
+            makeEntry(date: makeDate(year: 2024, month: 6, day: 1), themes: [nfdCafe])
+        ]
+        let result = InsightsEngine.aggregateThemes(
+            entries: entries,
+            range: range,
+            aliasMap: [ThemeKey.make("café"): "Cafe"]
+        )
+        #expect(result.count == 1)
+        #expect(result.first?.name == "Cafe")
     }
 
     @Test func emptyAliasMap_isNoOp() {

@@ -59,7 +59,7 @@ class CoreDataImportService: ObservableObject {
         var succeeded = 0
         var failed = 0
         var skipped = 0
-        var insertedSinceLastSave = 0
+        var pendingEntries: [PreparedImportEntry] = []
         // **chunk save** — 每 chunkSize 条 save 一次,而不是全部 N 条结束后单次 save。
         // 单次 save 失败 = 整批 N×4 = 4N 个 AI call(~$1)钱白付。chunk=10 是经验值:
         // 失败时丢的最大 batch 是 10 条 = 40 AI call 的 cost,比一次性 200 强 5×。
@@ -86,56 +86,41 @@ class CoreDataImportService: ObservableObject {
                 await (summaryTask, moodTask, themesTask, embeddingTask)
 
             // 创建 Core Data 实体
-            let raw = NSEntityDescription.insertNewObject(forEntityName: "DiaryEntry", into: context)
-            guard let newEntry = raw as? DiaryEntry else {
-                Log.error("[CoreDataImportService] DiaryEntry 类型转换失败，跳过", category: .migration)
-                context.delete(raw)
+            let preparedEntry = PreparedImportEntry(
+                date: date,
+                text: text,
+                summary: summary,
+                moodValue: moodValue,
+                themes: themes,
+                embedding: embedding
+            )
+            guard insertPreparedEntry(preparedEntry, into: context) else {
                 failed += 1
+                seenFingerprints.remove(fingerprint)
                 continue
             }
-            newEntry.id = UUID()
-            newEntry.date = date
-            newEntry.text = text
-            newEntry.moodValue = moodValue
-            newEntry.summary = summary
-            newEntry.setThemes(themes)
-            if let vector = embedding {
-                newEntry.setEmbedding(vector)
-            }
-            newEntry.recomputeWordCount()
-            insertedSinceLastSave += 1
+            pendingEntries.append(preparedEntry)
 
             // 更新进度
             importProgress = Double(index + 1) / Double(total)
             Log.info("[CoreDataImportService] importEntries: imported entry \(index + 1)/\(total)", category: .migration)
 
-            // 凑够 chunkSize 条 save 一次。失败仅丢这 chunk(已经 AI 跑完的钱白付,但比全 N 强)。
-            if insertedSinceLastSave >= chunkSize {
-                do {
-                    try context.save()
-                    succeeded += insertedSinceLastSave
-                    insertedSinceLastSave = 0
-                } catch {
-                    Log.error("[CoreDataImportService] chunk 保存失败，回滚 \(insertedSinceLastSave) 条: \(error)", category: .migration)
-                    context.rollback()
-                    failed += insertedSinceLastSave
-                    insertedSinceLastSave = 0
-                    // 重新 fetch fingerprint(rollback 把 in-memory 的也清了,后续 dedup 仍要正确)。
-                    seenFingerprints = existingEntryFingerprints(in: context)
-                }
+            // 凑够 chunkSize 条 save 一次。失败时 chunk 内逐条 retry,避免 1 条坏数据拖垮整组。
+            if pendingEntries.count >= chunkSize {
+                let result = savePendingEntries(pendingEntries, context: context, label: "chunk")
+                succeeded += result.succeeded
+                failed += result.failed
+                pendingEntries.removeAll(keepingCapacity: true)
+                // 每次 save 后重新 fetch fingerprint,捕获 import 期间 viewContext/CloudKit 的并发写入。
+                seenFingerprints = existingEntryFingerprints(in: context)
             }
         }
 
         // 收尾:还剩 < chunkSize 条没 save 的
-        if insertedSinceLastSave > 0 {
-            do {
-                try context.save()
-                succeeded += insertedSinceLastSave
-            } catch {
-                Log.error("[CoreDataImportService] 收尾 save 失败，回滚 \(insertedSinceLastSave) 条: \(error)", category: .migration)
-                context.rollback()
-                failed += insertedSinceLastSave
-            }
+        if !pendingEntries.isEmpty {
+            let result = savePendingEntries(pendingEntries, context: context, label: "final")
+            succeeded += result.succeeded
+            failed += result.failed
         }
 
         // 导入完成后
@@ -153,6 +138,82 @@ class CoreDataImportService: ObservableObject {
             }
         }
         return ImportResult(succeeded: succeeded, failed: failed, skipped: skipped)
+    }
+
+    private struct PreparedImportEntry {
+        let date: Date
+        let text: String
+        let summary: String?
+        let moodValue: Double
+        let themes: [String]
+        let embedding: [Float]?
+    }
+
+    @discardableResult
+    private func insertPreparedEntry(_ entry: PreparedImportEntry, into context: NSManagedObjectContext) -> Bool {
+        let raw = NSEntityDescription.insertNewObject(forEntityName: "DiaryEntry", into: context)
+        guard let newEntry = raw as? DiaryEntry else {
+            Log.error("[CoreDataImportService] DiaryEntry 类型转换失败，跳过", category: .migration)
+            context.delete(raw)
+            return false
+        }
+        newEntry.id = UUID()
+        newEntry.date = entry.date
+        newEntry.text = entry.text
+        newEntry.moodValue = entry.moodValue
+        newEntry.summary = entry.summary
+        newEntry.setThemes(entry.themes)
+        if let vector = entry.embedding {
+            newEntry.setEmbedding(vector)
+        }
+        newEntry.recomputeWordCount()
+        return true
+    }
+
+    private func savePendingEntries(
+        _ entries: [PreparedImportEntry],
+        context: NSManagedObjectContext,
+        label: String
+    ) -> (succeeded: Int, failed: Int) {
+        do {
+            try context.save()
+            return (entries.count, 0)
+        } catch {
+            Log.error(
+                "[CoreDataImportService] \(label) 保存失败，回滚 \(entries.count) 条并逐条重试: \(error)",
+                category: .migration
+            )
+            context.rollback()
+            return retryEntriesIndividually(entries, context: context, label: label)
+        }
+    }
+
+    private func retryEntriesIndividually(
+        _ entries: [PreparedImportEntry],
+        context: NSManagedObjectContext,
+        label: String
+    ) -> (succeeded: Int, failed: Int) {
+        var succeeded = 0
+        var failed = 0
+        for entry in entries {
+            guard insertPreparedEntry(entry, into: context) else {
+                context.rollback()
+                failed += 1
+                continue
+            }
+            do {
+                try context.save()
+                succeeded += 1
+            } catch {
+                context.rollback()
+                failed += 1
+                Log.error(
+                    "[CoreDataImportService] \(label) 单条保存失败 \(entry.date): \(error)",
+                    category: .migration
+                )
+            }
+        }
+        return (succeeded, failed)
     }
 
     private func existingEntryFingerprints(in context: NSManagedObjectContext) -> Set<String> {

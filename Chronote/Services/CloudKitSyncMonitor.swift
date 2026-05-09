@@ -10,7 +10,6 @@ import CloudKit
 ///   - 所有 method body 默认 main isolated,内部 @Published 写入直接合法
 ///   - CK closure(background queue)调本类 method 必须显式 `Task { @MainActor in ... }` —
 ///     编译器逼着写,漏不了
-///   - `DispatchQueue.main.async` wraps 仍兼容(等价于 main hop),保留即可,不强制重写
 @available(iOS 13.0, macOS 10.15, *)
 @MainActor
 class CloudKitSyncMonitor: ObservableObject {
@@ -209,7 +208,7 @@ class CloudKitSyncMonitor: ObservableObject {
 
         // First check account status
         ckContainer.accountStatus { [weak self] status, error in
-            DispatchQueue.main.async {
+            Task { @MainActor [weak self] in
                 if let error = error {
                     Log.error("[CloudKitSyncMonitor] Account status error: \(error)", category: .sync)
                     self?.syncStatus = .error
@@ -282,52 +281,50 @@ class CloudKitSyncMonitor: ObservableObject {
     }
 
     private func handleDatabaseAccessibilityResult(error: Error?) {
-        DispatchQueue.main.async { [weak self] in
-            if let error = error {
-                let ckError = error as? CKError
-                switch ckError?.code {
-                case .networkUnavailable, .networkFailure:
-                    self?.syncStatus = .networkUnavailable
-                    self?.errorMessage = NSLocalizedString(
-                        "sync.error.networkUnavailable",
-                        value: "iCloud 同步无法连接网络",
-                        comment: "Shown when CloudKit DB access fails due to network"
-                    )
-                case .notAuthenticated:
-                    self?.syncStatus = .notSignedIn
-                    self?.errorMessage = NSLocalizedString(
-                        "sync.error.notAuthenticated",
-                        value: "请登录 iCloud",
-                        comment: "Shown when CloudKit DB access fails due to missing auth"
-                    )
-                case .quotaExceeded:
-                    self?.syncStatus = .error
-                    self?.errorMessage = NSLocalizedString(
-                        "sync.error.quotaExceeded",
-                        value: "iCloud 存储空间不足",
-                        comment: "Shown when CloudKit returns quota exceeded"
-                    )
-                case .zoneNotFound, .userDeletedZone:
-                    // This is expected for new installations
-                    Log.info("[CloudKitSyncMonitor] Zone not found (expected for new installations)", category: .sync)
-                    self?.syncStatus = .synced
-                    self?.errorMessage = nil
-                default:
-                    Log.error("[CloudKitSyncMonitor] Database access error: \(error)", category: .sync)
-                    self?.syncStatus = .error
-                    let template = NSLocalizedString(
-                        "sync.error.generic",
-                        value: "iCloud 同步错误：%@",
-                        comment: "Generic CloudKit DB error; %@ is system message"
-                    )
-                    self?.errorMessage = String(format: template, error.localizedDescription)
-                }
-            } else {
-                // Database is accessible
-                self?.syncStatus = .synced
-                self?.errorMessage = nil
-                Log.info("[CloudKitSyncMonitor] CloudKit database accessible, sync ready", category: .sync)
+        if let error = error {
+            let ckError = error as? CKError
+            switch ckError?.code {
+            case .networkUnavailable, .networkFailure:
+                syncStatus = .networkUnavailable
+                errorMessage = NSLocalizedString(
+                    "sync.error.networkUnavailable",
+                    value: "iCloud 同步无法连接网络",
+                    comment: "Shown when CloudKit DB access fails due to network"
+                )
+            case .notAuthenticated:
+                syncStatus = .notSignedIn
+                errorMessage = NSLocalizedString(
+                    "sync.error.notAuthenticated",
+                    value: "请登录 iCloud",
+                    comment: "Shown when CloudKit DB access fails due to missing auth"
+                )
+            case .quotaExceeded:
+                syncStatus = .error
+                errorMessage = NSLocalizedString(
+                    "sync.error.quotaExceeded",
+                    value: "iCloud 存储空间不足",
+                    comment: "Shown when CloudKit returns quota exceeded"
+                )
+            case .zoneNotFound, .userDeletedZone:
+                // This is expected for new installations
+                Log.info("[CloudKitSyncMonitor] Zone not found (expected for new installations)", category: .sync)
+                syncStatus = .synced
+                errorMessage = nil
+            default:
+                Log.error("[CloudKitSyncMonitor] Database access error: \(error)", category: .sync)
+                syncStatus = .error
+                let template = NSLocalizedString(
+                    "sync.error.generic",
+                    value: "iCloud 同步错误：%@",
+                    comment: "Generic CloudKit DB error; %@ is system message"
+                )
+                errorMessage = String(format: template, error.localizedDescription)
             }
+        } else {
+            // Database is accessible
+            syncStatus = .synced
+            errorMessage = nil
+            Log.info("[CloudKitSyncMonitor] CloudKit database accessible, sync ready", category: .sync)
         }
     }
 
@@ -375,7 +372,7 @@ class CloudKitSyncMonitor: ObservableObject {
 
         ckContainer.accountStatus { [weak self] status, error in
             if let error = error {
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
                     self?.syncStatus = .error
                     let template = NSLocalizedString(
                         "sync.error.accountCheckFailed",
@@ -388,7 +385,7 @@ class CloudKitSyncMonitor: ObservableObject {
             }
 
             guard status == .available else {
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
                     self?.syncStatus = .notSignedIn
                     self?.errorMessage = NSLocalizedString(
                         "sync.error.accountUnavailable",
@@ -407,7 +404,8 @@ class CloudKitSyncMonitor: ObservableObject {
             // 只能从 `NSPersistentCloudKitContainer.eventChangedNotification` (.export, succeeded)
             // 拿,见 handleCloudKitEvent。这里把 .synced 弱化到只覆盖"reachable + 没账户错误"
             // 的语义,实际 export 完成由事件回调最终矫正。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
                 self?.verifySync()
             }
         }
@@ -428,38 +426,36 @@ class CloudKitSyncMonitor: ObservableObject {
     }
 
     private func handleSyncVerificationResult(error: Error?) {
-        DispatchQueue.main.async { [weak self] in
-            if let error = error {
-                let ckError = error as? CKError
-                if ckError?.code == .zoneNotFound || ckError?.code == .userDeletedZone {
-                    // This is normal for new installations
-                    self?.syncStatus = .synced
-                    self?.errorMessage = nil
-                    Log.info("[CloudKitSyncMonitor] Sync verified (new installation)", category: .sync)
-                } else {
-                    self?.syncStatus = .error
-                    let template = NSLocalizedString(
-                        "sync.error.verifyFailed",
-                        value: "同步校验失败：%@",
-                        comment: "Shown when forceSync's verify-step query fails; %@ is system error"
-                    )
-                    self?.errorMessage = String(format: template, error.localizedDescription)
-                    Log.error("[CloudKitSyncMonitor] Sync verification error: \(error)", category: .sync)
-                }
+        if let error = error {
+            let ckError = error as? CKError
+            if ckError?.code == .zoneNotFound || ckError?.code == .userDeletedZone {
+                // This is normal for new installations
+                syncStatus = .synced
+                errorMessage = nil
+                Log.info("[CloudKitSyncMonitor] Sync verified (new installation)", category: .sync)
             } else {
-                // ⚠️ 这一步只能证明 CloudKit zone 可达 + 上次保存的 viewContext 没炸,
-                // **不能**证明刚 push 的本地变更已经导出完。真正"export succeeded"信号
-                // 来自 `NSPersistentCloudKitContainer.eventChangedNotification` 的 .export
-                // 事件 (handleCloudKitEvent),最终状态由那条路径矫正。这里维持 .synced
-                // 是为了让用户主动 pull-to-refresh 后立刻看到一个非"unknown/error"的反馈,
-                // 不要把它当成 export 完成的权威信号。
-                self?.syncStatus = .synced
-                self?.errorMessage = nil
-                Log.info(
-                    "[CloudKitSyncMonitor] CloudKit reachable; export completion is confirmed via eventChangedNotification",
-                    category: .sync
+                syncStatus = .error
+                let template = NSLocalizedString(
+                    "sync.error.verifyFailed",
+                    value: "同步校验失败：%@",
+                    comment: "Shown when forceSync's verify-step query fails; %@ is system error"
                 )
+                errorMessage = String(format: template, error.localizedDescription)
+                Log.error("[CloudKitSyncMonitor] Sync verification error: \(error)", category: .sync)
             }
+        } else {
+            // ⚠️ 这一步只能证明 CloudKit zone 可达 + 上次保存的 viewContext 没炸,
+            // **不能**证明刚 push 的本地变更已经导出完。真正"export succeeded"信号
+            // 来自 `NSPersistentCloudKitContainer.eventChangedNotification` 的 .export
+            // 事件 (handleCloudKitEvent),最终状态由那条路径矫正。这里维持 .synced
+            // 是为了让用户主动 pull-to-refresh 后立刻看到一个非"unknown/error"的反馈,
+            // 不要把它当成 export 完成的权威信号。
+            syncStatus = .synced
+            errorMessage = nil
+            Log.info(
+                "[CloudKitSyncMonitor] CloudKit reachable; export completion is confirmed via eventChangedNotification",
+                category: .sync
+            )
         }
     }
 

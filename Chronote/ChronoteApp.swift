@@ -114,7 +114,9 @@ struct ChronoteApp: App {
         // 和 Settings 的"一键重建"也用同一 service 但不共享 progress（这里走的是
         // `backfillIfNeeded`，"一键重建"走 `forceBackfill`，都是幂等的）。
         Task.detached(priority: .utility) {
-            await WordCountBackfillService.backfillIfNeeded()
+            await WordCountBackfillGate.shared.runIfIdle {
+                await WordCountBackfillService.backfillIfNeeded()
+            }
         }
 
         // 启动时刷一次 widget snapshot —— PersistenceController 的 DidSave / RemoteChange

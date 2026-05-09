@@ -170,6 +170,21 @@ test('missing app secret requests do not consume authenticated global quota', as
   assert.equal(authenticatedStatus, 400);
 });
 
+test('app secret byte length mismatch returns unauthorized', async (t) => {
+  const server = await listen(app);
+  t.after(() => close(server));
+
+  const sameUTF16LengthDifferentByteLength = 'é'.repeat(process.env.APP_SHARED_SECRET.length);
+  const status = await postJSON(
+    server,
+    '/api/openai/embeddings',
+    {},
+    { 'X-App-Secret': sameUTF16LengthDifferentByteLength }
+  );
+
+  assert.equal(status, 401);
+});
+
 test('streaming client abort cancels the upstream OpenAI request', async (t) => {
   const originalAdapter = axios.defaults.adapter;
   let capturedSignal;

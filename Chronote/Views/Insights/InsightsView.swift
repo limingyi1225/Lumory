@@ -394,12 +394,13 @@ struct InsightsView: View {
         Task { await reload() }
     }
 
-    private func fetchDailyCells(in range: DateInterval, lookbackDays: Int = 140) async -> [DailyCell] {
+    private func fetchDailyCells(in range: DateInterval, lookbackDays: Int = 161) async -> [DailyCell] {
         // 同一份 cells 喂给两个组件:
-        // - WritingHeatmap 想要恒定 140 天滚窗(视觉稳定,无论 TimeRange 怎么切都能填满)
+        // - WritingHeatmap 想要恒定 22 周滚窗(视觉稳定,无论 TimeRange 怎么切都能填满)
         // - CalendarMonthModule 需要覆盖用户可能切换到的较早月份(例如 .all 或 .year)
         // 取并集:min(today - lookbackDays, range.start) → max(today, range.end)
-        // 之前硬编码只取 140 天导致用户切到 .year 或往前翻 6 个月时月历空白。
+        // 22 周 heatmap 会按周边界向左扩到 today-147...today-153;取 161 天给一周 buffer,
+        // 防月/季 range 左侧真实日记被误渲染成空格。
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
         let lookbackStart = calendar.date(byAdding: .day, value: -lookbackDays, to: today) ?? today
@@ -447,7 +448,7 @@ struct InsightsView: View {
             grouped.reserveCapacity(rows.count)
             for row in rows {
                 guard let date = row["date"] as? Date else { continue }
-                let mood = (row["moodValue"] as? Double) ?? 0
+                let mood = (row["moodValue"] as? NSNumber)?.doubleValue ?? 0.5
                 let words = (row["wordCount"] as? NSNumber)?.intValue ?? 0
                 let day = calendar.startOfDay(for: date)
                 var agg = grouped[day] ?? DailyAggregate()

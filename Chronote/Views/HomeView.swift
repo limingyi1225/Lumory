@@ -58,6 +58,11 @@ struct HomeView: View {
     @FocusState private var isInputFocused: Bool
     @State private var transcriptionGeneration = 0
 
+    /// 草稿持久化 debounce —— 用户连打字时不每键写 AppGroup UserDefaults(plist encode + KVO +
+    /// 跨进程 sync 累计开销),改成 500ms 静默后才写;scenePhase=.background 强 flush 一次防丢。
+    @State private var draftSaveTask: Task<Void, Never>?
+    @Environment(\.scenePhase) private var scenePhase
+
     private let cal = Calendar.current
     @Environment(\.colorScheme) private var colorScheme
 
@@ -454,14 +459,18 @@ struct HomeView: View {
         }
         .onChange(of: inputVM.inputText) { _, newValue in
             // P1-Home-13 草稿持久化 — 用户切微信回来 OK,但 App 被 OOM 杀掉就丢了。
-            // 写到 AppGroup defaults 防进程被杀;过滤纯空白避免 storage 抖动。
-            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                AppGroup.userDefaults.removeObject(forKey: "lumory.home.draft.text")
-            } else {
-                AppGroup.userDefaults.set(newValue, forKey: "lumory.home.draft.text")
+            // 写到 AppGroup defaults 防进程被杀,但**500ms debounce**:用户每键写一次会让
+            // plist encode + KVO + AppGroup 跨进程 sync 累计可观,scrollback 时尤其明显;
+            // 改成静默 500ms 后再写,scenePhase=.background 时强 flush(见下面的 onChange)。
+            draftSaveTask?.cancel()
+            draftSaveTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled else { return }
+                Self.persistDraft(newValue)
             }
 
+            // spectrum state 切换是即时 UI 反馈,不能 debounce
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let hasContent = !trimmed.isEmpty
             if hasContent && inputVM.spectrumDisplayState == .idle {
                 withAnimation(.easeInOut(duration: 1.0)) {
@@ -472,6 +481,24 @@ struct HomeView: View {
                     inputVM.spectrumDisplayState = .idle
                 }
             }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            // 进 background 时 cancel debounce + 同步 flush 草稿。
+            // 否则用户输入完立刻锁屏 / 切走,iOS 5s background grace 内 task 可能没跑完,丢草稿。
+            if newPhase == .background {
+                draftSaveTask?.cancel()
+                Self.persistDraft(inputVM.inputText)
+            }
+        }
+    }
+
+    /// 草稿写盘的单点入口。空白 → remove key,非空 → set。
+    private static func persistDraft(_ value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            AppGroup.userDefaults.removeObject(forKey: "lumory.home.draft.text")
+        } else {
+            AppGroup.userDefaults.set(value, forKey: "lumory.home.draft.text")
         }
     }
     
@@ -954,6 +981,13 @@ struct HomeView: View {
                 Log.info("[HomeView] 日记已保存，标题稍后生成", category: .ui)
             } catch {
                 Log.error("[HomeView] 保存日记失败: \(error)", category: .ui)
+                // 已落盘的 image 文件孤儿清理 —— entry save 失败时这些文件已经被 persistImagesOffMain
+                // 写到 Documents/LumoryImages,无人引用就是 storage leak,长期累积。best-effort 删,失败静默。
+                // (audio 暂不清:persistAudioOffMain 已把本地副本搬到 iCloud,iCloud 路径由 entry.audioURL 三层
+                // fallback 解析,这个 catch 分支拿不到 entry 实例 / 也不该重新做一遍 lookup,留给后续策略处理。)
+                for fileName in imageFileNames {
+                    try? DiaryEntry.deleteImageFromDocuments(fileName)
+                }
             }
         }
 

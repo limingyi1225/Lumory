@@ -367,9 +367,30 @@ final class ReminderService: ObservableObject {
         #endif
     }
 
+    /// **enable 跟 disable 互斥串行哨兵**。SettingsView Toggle binding 已有 UI 层
+    /// `reminderToggleInFlight` guard 保第一道关,这里 service 层加第二道关:
+    /// 任何对内部状态的 mutating 入口(enable / disable)在另一个还在 await 中时直接 spin-await,
+    /// 防 main actor reentrant 让 enable 在 disable 三段 await 中间插入,导致最终 isEnabled=true
+    /// 但 0 pending 的状态错位。CLAUDE.md "Toggle binding setter sync"段已点出这条 race。
+    @MainActor private var isMutatingState: Bool = false
+
+    private func awaitMutationSlot() async {
+        // 简单的 cooperative spin-await:让出 main actor 给已在跑的 mutation 跑完。
+        while isMutatingState {
+            await Task.yield()
+        }
+        isMutatingState = true
+    }
+
+    private func releaseMutationSlot() {
+        isMutatingState = false
+    }
+
     /// 开 toggle:requestAuthorization + 落 schedule。返回 false 表示权限被拒。
     @discardableResult
     func enable() async -> Bool {
+        await awaitMutationSlot()
+        defer { releaseMutationSlot() }
         #if canImport(UserNotifications)
         // Screenshot mode 早返:任何 UI test / 截图流程意外触发 reminder toggle,
         // 系统通知权限弹窗会盖在 Home 上把首屏截烂。跟 ChronoteApp.requestPermissions()
@@ -418,7 +439,10 @@ final class ReminderService: ObservableObject {
     /// 3. await 老 reschedule task `.value`,等它跑完 —— 它可能正卡在 `await center.add(...)`,
     ///    add 完成那一瞬间又往 UN center 添一条新 pending(race 窗口)。
     /// 4. **第二次** await prefix 清 pending + delivered —— 抓 race 新增。
+    /// 配合 `awaitMutationSlot` 防 enable 在 disable 三段 await 中间插入。
     func disable() async {
+        await awaitMutationSlot()
+        defer { releaseMutationSlot() }
         isEnabled = false
         defaults.set(false, forKey: enabledKey)
         let oldTask = rescheduleTask

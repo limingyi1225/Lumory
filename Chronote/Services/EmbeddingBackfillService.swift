@@ -44,7 +44,6 @@ final class EmbeddingBackfillService: ObservableObject {
     // 以前是裸 `var`，不 actor-safe，多入口 race 会让两份 run() 同时跑、progress 串号。
     @MainActor private var runningTask: Task<Void, Never>?
     @MainActor private var runningRunID: UUID?
-    @MainActor private var pendingCache: (value: Int, date: Date)?
 
     init(
         persistence: PersistenceController = .shared,
@@ -72,7 +71,6 @@ final class EmbeddingBackfillService: ObservableObject {
             return progress
         }
 
-        pendingCache = nil
         let runID = UUID()
         // [weak self]：和 ThemeBackfillService 同款——避免 Task 强捕 singleton 的 AI 客户端和缓存
         let task: Task<Void, Never> = Task { [weak self] in
@@ -85,8 +83,7 @@ final class EmbeddingBackfillService: ObservableObject {
         if runningRunID == runID {
             runningTask = nil
             runningRunID = nil
-            pendingCache = nil
-        }
+            }
         return progress
     }
 
@@ -95,7 +92,6 @@ final class EmbeddingBackfillService: ObservableObject {
         runningTask?.cancel()
         runningTask = nil
         runningRunID = nil
-        pendingCache = nil
     }
 
     // MARK: Core loop
@@ -135,18 +131,14 @@ final class EmbeddingBackfillService: ObservableObject {
 
     /// 当前缺 embedding 的条目数。用 count 而不是 fetch + count,扫一遍主键索引就出来,
     /// 不会把 NSManagedObject 实例化进 context,Settings 页面随手调安全。
+    /// (Lumory 量级 SQL count < 1ms,不需要再套 5s 的 stale cache)
     @MainActor
     func pendingCount() async -> Int {
-        if let pendingCache, Date().timeIntervalSince(pendingCache.date) < 5 {
-            return pendingCache.value
-        }
-        let count = await persistence.container.performBackgroundTask { context -> Int in
+        await persistence.container.performBackgroundTask { context -> Int in
             let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
             request.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
             return (try? context.count(for: request)) ?? 0
         }
-        pendingCache = (count, Date())
-        return count
     }
 
     // MARK: DB helpers

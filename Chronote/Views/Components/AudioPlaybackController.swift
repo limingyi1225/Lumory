@@ -129,6 +129,10 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
         }
     }
 
+    /// 收拾 audio session / displayLink / player 状态,**不**触发 `onFinishPlaying`。
+    /// 触发位置:`audioPlayerDidFinishPlaying` delegate 自然结束路径。
+    /// 历史 bug:catch path 调 `onPlayError` 后 cleanup 又触发 `onFinishPlaying`,UI 看到
+    /// "失败 banner + 立刻完成 callback" 两次冲突反馈。修法是把 `onFinishPlaying` 从 cleanup 拆出。
     private func stopPlaybackCleanup() {
         isPlaying = false
         stopDisplayLink()
@@ -142,7 +146,6 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
             }
              audioPlayer = nil
         }
-        onFinishPlaying?()
     }
 
     @objc fileprivate func updateProgress() {
@@ -209,6 +212,7 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
             self.progress = 1.0
             self.currentTime = self.duration
             self.stopPlaybackCleanup()
+            self.onFinishPlaying?()
         }
     }
 

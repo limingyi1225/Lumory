@@ -43,7 +43,6 @@ final class ThemeBackfillService: ObservableObject {
     // 多入口（Settings 一键重建、manual 按钮、未来 auto）race 下不会出现两份 run 同时跑。
     @MainActor private var runningTask: Task<Void, Never>?
     @MainActor private var runningRunID: UUID?
-    @MainActor private var pendingCache: (value: Int, date: Date)?
 
     init(
         persistence: PersistenceController = .shared,
@@ -81,7 +80,6 @@ final class ThemeBackfillService: ObservableObject {
         runningTask?.cancel()
         runningTask = nil
         runningRunID = nil
-        pendingCache = nil
     }
 
     // MARK: Core loop
@@ -95,7 +93,6 @@ final class ThemeBackfillService: ObservableObject {
             return progress
         }
 
-        pendingCache = nil
         let runID = UUID()
         // [weak self]：service 是 `shared` singleton 正常不会释放；但如果未来被注入/换掉，
         // Task 对 self 的强引用会把 service + 它持有的 AI 客户端 + 一整批 objectIDs 拖住。
@@ -109,8 +106,7 @@ final class ThemeBackfillService: ObservableObject {
         if runningRunID == runID {
             runningTask = nil
             runningRunID = nil
-            pendingCache = nil
-        }
+            }
         return progress
     }
 
@@ -149,12 +145,11 @@ final class ThemeBackfillService: ObservableObject {
     /// 当前"主题为空 OR 含 banned 词"的待修条目数。Settings 用来判断"需要重建"。
     /// 不能纯靠 SQL count —— banned 检测要走 Swift 字符串集合,所以还是 fetch 一遍 themes 字符串
     /// 但 propertiesToFetch 限定只读 themes 一列,代价远小于实例化整个 entry。
+    /// (Lumory 量级 fetch < 几 ms,不需要再套 5s 的 stale cache;cache 反而让 Settings UI
+    /// 在 user 写完日记后 5s 内显示老数,按钮 disabled 状态错位。)
     @MainActor
     func pendingCount() async -> Int {
-        if let pendingCache, Date().timeIntervalSince(pendingCache.date) < 5 {
-            return pendingCache.value
-        }
-        let count = await persistence.container.performBackgroundTask { context -> Int in
+        await persistence.container.performBackgroundTask { context -> Int in
             let request: NSFetchRequest<NSDictionary> = NSFetchRequest(entityName: "DiaryEntry")
             request.predicate = NSPredicate(format: "text != nil AND text != %@", "")
             request.resultType = .dictionaryResultType
@@ -173,8 +168,6 @@ final class ThemeBackfillService: ObservableObject {
             }
             return count
         }
-        pendingCache = (count, Date())
-        return count
     }
 
     // MARK: DB helpers

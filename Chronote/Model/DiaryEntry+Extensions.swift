@@ -7,13 +7,14 @@ extension DiaryEntry {
     // 阈值从 100MB 降到 50MB：iPad 多任务 / 前台 jetsam 阈值紧时 100MB 容易触发系统 kill。
     // 配合 ChronoteApp 里注册的 didReceiveMemoryWarning 通知，系统吃紧时还会显式调
     // clearImageCache() 立刻释放。
+    /// `NSCache` 自身线程安全(Apple doc 明示),不需要再套一层 GCD queue。
+    /// 历史上有过 `cacheQueue` 串行化层,在主线程做 `.sync` hop 是无谓负担,2026-05 删除。
     private static let imageCache: NSCache<NSString, NSData> = {
         let cache = NSCache<NSString, NSData>()
         cache.countLimit = 50
         cache.totalCostLimit = 50 * 1024 * 1024
         return cache
     }()
-    private static let cacheQueue = DispatchQueue(label: "com.lumory.imagecache", attributes: .concurrent)
     /// 获取显示文本（用于列表展示）
     var displayText: String {
         let raw = summary ?? String((text ?? "").prefix(30)) + "..."
@@ -295,9 +296,7 @@ extension DiaryEntry {
                 Log.error("[DiaryEntry] Failed to delete image copy \(fileURL.path): \(error)", category: .persistence)
             }
         }
-        DiaryEntry.cacheQueue.async(flags: .barrier) {
-            DiaryEntry.imageCache.removeObject(forKey: fileName as NSString)
-        }
+        DiaryEntry.imageCache.removeObject(forKey: fileName as NSString)
         if let firstError {
             throw firstError
         }
@@ -325,20 +324,14 @@ extension DiaryEntry {
     /// 逻辑和实例方法一致：iCloud / LumoryImages / 老位置依次回退。
     static func loadImageData(fileName: String) -> Data? {
         let cacheKey = fileName as NSString
-        var cachedData: Data?
-        DiaryEntry.cacheQueue.sync {
-            cachedData = DiaryEntry.imageCache.object(forKey: cacheKey) as Data?
-        }
-        if let data = cachedData { return data }
+        if let cached = DiaryEntry.imageCache.object(forKey: cacheKey) as Data? { return cached }
 
         // iCloud
         if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
             let iCloudFileURL = iCloudURL.appendingPathComponent("Documents/LumoryImages").appendingPathComponent(fileName)
             if FileManager.default.fileExists(atPath: iCloudFileURL.path),
                let data = try? Data(contentsOf: iCloudFileURL) {
-                DiaryEntry.cacheQueue.async(flags: .barrier) {
-                    DiaryEntry.imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
-                }
+                DiaryEntry.imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
                 return data
             }
         }
@@ -348,9 +341,7 @@ extension DiaryEntry {
         let localFileURL = documentsPath.appendingPathComponent("LumoryImages").appendingPathComponent(fileName)
         if FileManager.default.fileExists(atPath: localFileURL.path),
            let data = try? Data(contentsOf: localFileURL) {
-            DiaryEntry.cacheQueue.async(flags: .barrier) {
-                DiaryEntry.imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
-            }
+            DiaryEntry.imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
             return data
         }
 
@@ -358,9 +349,7 @@ extension DiaryEntry {
         let oldFileURL = documentsPath.appendingPathComponent(fileName)
         if FileManager.default.fileExists(atPath: oldFileURL.path),
            let data = try? Data(contentsOf: oldFileURL) {
-            DiaryEntry.cacheQueue.async(flags: .barrier) {
-                DiaryEntry.imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
-            }
+            DiaryEntry.imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
             return data
         }
 
@@ -528,8 +517,6 @@ extension DiaryEntry {
 
     /// Clear all cached images
     static func clearImageCache() {
-        cacheQueue.async(flags: .barrier) {
-            imageCache.removeAllObjects()
-        }
+        imageCache.removeAllObjects()
     }
 }

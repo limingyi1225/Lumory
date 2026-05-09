@@ -420,14 +420,24 @@ app.post('/api/openai/chat/completions', async (req, res) => {
     } else {
       req.log.info('non-streaming request started');
 
-      const upstream = await axios.post(`${OPENAI_BASE_URL}/chat/completions`, upstreamBody, {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: REQUEST_TIMEOUT_MS,
-      });
-      res.json(upstream.data);
+      // 客户端断开时取消上游 OpenAI 请求,避免烧 token / 算 reasoning。
+      // 跟流式分支(line 363-404)同 abortController 模式。
+      const nonStreamAbort = new AbortController();
+      const cancelOnClose = () => nonStreamAbort.abort();
+      res.on('close', cancelOnClose);
+      try {
+        const upstream = await axios.post(`${OPENAI_BASE_URL}/chat/completions`, upstreamBody, {
+          headers: {
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: REQUEST_TIMEOUT_MS,
+          signal: nonStreamAbort.signal,
+        });
+        res.json(upstream.data);
+      } finally {
+        res.off('close', cancelOnClose);
+      }
     }
   } catch (err) {
     if (isStreaming && err.code === 'ERR_CANCELED') {
@@ -435,6 +445,11 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       if (!res.destroyed) {
         res.destroy(err);
       }
+      return;
+    }
+    if (err.code === 'ERR_CANCELED') {
+      // 非流式 chat 客户端断开 — 不再回 status 码(socket 已关)。
+      req.log.info('non-streaming chat request cancelled');
       return;
     }
     const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
@@ -464,6 +479,11 @@ app.post('/api/openai/embeddings', async (req, res) => {
     return;
   }
 
+  // 客户端断开时取消上游,避免烧无效 token。
+  const embeddingAbort = new AbortController();
+  const cancelOnClose = () => embeddingAbort.abort();
+  res.on('close', cancelOnClose);
+
   try {
     const upstream = await axios.post(
       `${OPENAI_BASE_URL}/embeddings`,
@@ -477,10 +497,15 @@ app.post('/api/openai/embeddings', async (req, res) => {
           'Content-Type': 'application/json',
         },
         timeout: REQUEST_TIMEOUT_MS,
+        signal: embeddingAbort.signal,
       }
     );
     res.json(upstream.data);
   } catch (err) {
+    if (err.code === 'ERR_CANCELED') {
+      req.log.info('embeddings request cancelled');
+      return;
+    }
     const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
     req.log.error({ err: safeUpstreamError(err), status }, 'OpenAI embeddings request failed');
     if (!res.headersSent) {
@@ -492,6 +517,8 @@ app.post('/api/openai/embeddings', async (req, res) => {
     } else {
       res.end();
     }
+  } finally {
+    res.off('close', cancelOnClose);
   }
 });
 
@@ -561,6 +588,12 @@ app.post('/api/openai/audio/transcriptions', (req, res) => {
       req.file.originalname || 'audio.m4a'
     );
 
+    // 客户端断开时取消上游 — transcription 25 MB upload + 30-90s 上游耗时,
+    // 不取消会让客户端关 sheet 后服务器仍跑完整套,烧无效 token。
+    const transcriptionAbort = new AbortController();
+    const cancelOnClose = () => transcriptionAbort.abort();
+    res.on('close', cancelOnClose);
+
     try {
       const upstream = await axios.post(`${OPENAI_BASE_URL}/audio/transcriptions`, form, {
         headers: {
@@ -570,12 +603,17 @@ app.post('/api/openai/audio/transcriptions', (req, res) => {
         // axios 默认会把 FormData 自动序列化并加 Content-Type: multipart/form-data; boundary=...
         // 不要手动设 Content-Type,会丢 boundary。
         maxBodyLength: MAX_TRANSCRIPTION_FILE_BYTES + 1024 * 1024, // 留 1 MB 余量给 multipart 头
+        signal: transcriptionAbort.signal,
       });
 
       // OpenAI 返回 { text: "..." }(其他元字段如 duration / language 不透出给客户端,只回 text)
       const text = typeof upstream.data?.text === 'string' ? upstream.data.text : '';
       res.json({ text });
     } catch (err) {
+      if (err.code === 'ERR_CANCELED') {
+        req.log.info('transcription request cancelled');
+        return;
+      }
       const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
       req.log.error({ err: safeUpstreamError(err), status }, 'OpenAI transcription request failed');
       if (!res.headersSent) {
@@ -587,6 +625,8 @@ app.post('/api/openai/audio/transcriptions', (req, res) => {
       } else {
         res.end();
       }
+    } finally {
+      res.off('close', cancelOnClose);
     }
   });
 });

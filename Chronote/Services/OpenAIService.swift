@@ -351,18 +351,19 @@ Diary Entries:
     }
 
     // MARK: - Core
+    /// 非流式 chat。流式路径走 `streamChatEvents` / `generateReportFromData` 自建 RequestBody,
+    /// 不经过这里 —— 历史上 `chat()` 还有一个 `stream:true` 分支(~35 行 SSE 累加 buffer),
+    /// `grep "chat(.*stream: true"` 全仓 0 caller,2026-05 删除避免将来误用。
     private func chat(prompt: String,
                       model: String? = nil,
                       maxTokens: Int = 128,
                       forceJSON: Bool = false,
-                      stream: Bool = false,
                       reasoningEffort: String? = nil) async -> String? {
         struct Message: Codable { let role: String; let content: String }
         struct RequestBody: Codable {
             let model: String
             let messages: [Message]
             let response_format: ResponseFormat?
-            let stream: Bool?
             let reasoning_effort: String?
             // gpt-5 系列用 max_completion_tokens，不是 max_tokens。Swift 侧用 camelCase 以过 lint，
             // 通过 CodingKeys 映射到 OpenAI 期望的 snake_case。
@@ -370,7 +371,7 @@ Diary Entries:
 
             struct ResponseFormat: Codable { let type: String }
             enum CodingKeys: String, CodingKey {
-                case model, messages, response_format, stream, reasoning_effort
+                case model, messages, response_format, reasoning_effort
                 case maxCompletionTokens = "max_completion_tokens"
             }
         }
@@ -383,7 +384,6 @@ Diary Entries:
             model: model ?? "gpt-5.5",
             messages: [Message(role: "user", content: prompt)],
             response_format: forceJSON ? RequestBody.ResponseFormat(type: "json_object") : nil,
-            stream: stream ? true : nil,
             reasoning_effort: reasoningEffort,
             maxCompletionTokens: maxTokens > 0 ? maxTokens : nil
         )
@@ -401,87 +401,50 @@ Diary Entries:
         request.applyBackendAuth()
         request.httpBody = try? jsonEncoder.encode(requestBody)
 
-        // 新增：支持流式响应
-        if stream {
-            do {
-                // 不用 [weak self]：见 embed() 上方注释
-                return try await NetworkRetryHelper.performWithRetry {
-                    let (bytes, response) = try await URLSession.sharedRetrySession.bytes(for: request)
-                    guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                        let httpResponse = response as? HTTPURLResponse
-                        let statusCode = httpResponse?.statusCode ?? -1
-                        Log.info("[OpenAIService] Bad response. Status code: \(statusCode)", category: .ai)
-                        throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
-                    }
-                    var result = ""
-                    // 统一 SSE 解析
-                    for try await streamResp in SSEParser.parse(
-                        bytes: bytes,
-                        type: OpenAIStreamResponse.self,
-                        decoder: self.jsonDecoder
-                    ) {
-                        if let content = streamResp.choices.first?.delta?.content {
-                            result.append(content)
-                        }
-                    }
-                    return result  // 保留换行符，不要trim
-                }
-            } catch {
-                Log.error("[OpenAIService] Request error after retries: \(error)", category: .ai)
-                if error.localizedDescription.contains("Could not connect to the server") ||
-                   error.localizedDescription.contains("The Internet connection appears to be offline") ||
-                   error.localizedDescription.contains("The request timed out") {
-                    // 不再把后端具体地址写日志（避免给终端用户或 log collect 留 IP 线索）
-                    Log.info("[OpenAIService] Cannot connect to backend proxy", category: .ai)
-                }
-                return nil
-            }
-        } else {
-            do {
-                Log.info("[OpenAIService] 执行非流式请求", category: .ai)
-                // 不用 [weak self]：见 embed() 上方注释
-                return try await NetworkRetryHelper.performWithRetry {
-                    Log.info("[OpenAIService] 发送网络请求...", category: .ai)
-                    let (data, response) = try await URLSession.sharedRetrySession.data(for: request)
-                    guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                        if let httpResponse = response as? HTTPURLResponse {
-                            let statusCode = httpResponse.statusCode
-                            // 诊断用最小信息：只 URL path + status + body 长度，不把 body 打进日志（避免泄日记/PII）
-                            Log.error("[OpenAIService] Backend request failed — path=\(request.url?.path ?? "?") status=\(statusCode) bodyLen=\(data.count)", category: .ai)
-                            throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse.value(forHTTPHeaderField: "Retry-After"))
-                        } else {
-                            Log.info("[OpenAIService] Bad response. Not an HTTPURLResponse. Response: \(response)", category: .ai)
-                            throw NSError(
-                                domain: "OpenAIService",
-                                code: -1,
-                                userInfo: [
-                                    NSLocalizedDescriptionKey: NSLocalizedString(
-                                        "error.backend.invalidResponse",
-                                        comment: "Invalid response from backend"
-                                    )
-                                ]
-                            )
-                        }
-                    }
-                    let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
-                    guard let content = decoded.choices.first?.message.content.trimmingCharacters(in: .whitespacesAndNewlines) else {
+        do {
+            Log.info("[OpenAIService] 执行非流式请求", category: .ai)
+            // 不用 [weak self]：见 embed() 上方注释
+            return try await NetworkRetryHelper.performWithRetry {
+                Log.info("[OpenAIService] 发送网络请求...", category: .ai)
+                let (data, response) = try await URLSession.sharedRetrySession.data(for: request)
+                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                    if let httpResponse = response as? HTTPURLResponse {
+                        let statusCode = httpResponse.statusCode
+                        // 诊断用最小信息：只 URL path + status + body 长度，不把 body 打进日志（避免泄日记/PII）
+                        Log.error("[OpenAIService] Backend request failed — path=\(request.url?.path ?? "?") status=\(statusCode) bodyLen=\(data.count)", category: .ai)
+                        throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse.value(forHTTPHeaderField: "Retry-After"))
+                    } else {
+                        Log.info("[OpenAIService] Bad response. Not an HTTPURLResponse. Response: \(response)", category: .ai)
                         throw NSError(
                             domain: "OpenAIService",
                             code: -1,
                             userInfo: [
                                 NSLocalizedDescriptionKey: NSLocalizedString(
-                                    "error.backend.emptyContent",
-                                    comment: "No content in response"
+                                    "error.backend.invalidResponse",
+                                    comment: "Invalid response from backend"
                                 )
                             ]
                         )
                     }
-                    return content
                 }
-            } catch {
-                Log.error("[OpenAIService] Request error after retries: \(error)", category: .ai)
-                return nil
+                let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
+                guard let content = decoded.choices.first?.message.content.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                    throw NSError(
+                        domain: "OpenAIService",
+                        code: -1,
+                        userInfo: [
+                            NSLocalizedDescriptionKey: NSLocalizedString(
+                                "error.backend.emptyContent",
+                                comment: "No content in response"
+                            )
+                        ]
+                    )
+                }
+                return content
             }
+        } catch {
+            Log.error("[OpenAIService] Request error after retries: \(error)", category: .ai)
+            return nil
         }
     }
 

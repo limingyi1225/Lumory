@@ -8,6 +8,12 @@ struct NetworkRetryHelper {
     static let maxRetryDelay: TimeInterval = 8.0
     static let maxRetryAfterDelay: TimeInterval = 30.0
 
+    // **Invariant**:`maxRetries × (maxRetryAfterDelay + timeoutIntervalForRequest) < timeoutIntervalForResource`
+    //   = 3 × (30 + 30) = 180s < 300s
+    // 即最坏 3 次重试的退避总和 + 每次请求超时,必须留余量给 timeoutIntervalForResource(URLSession 总
+    // deadline)。改任一参数前先验证这条不变量,否则 URLSession 会在重试还没尝完就先 abort 整轮。
+    // (timeoutIntervalForRequest=30 / timeoutIntervalForResource=300 在 sharedRetrySession 配置)
+
     /// Execute a network request with automatic retry on SSL/network errors.
     /// 指数回退 (1s → 2s → 4s, cap at maxRetryDelay)，避免 3× 平推在短 2s 内把下游打死。
     static func performWithRetry<T>(

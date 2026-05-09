@@ -185,6 +185,26 @@ test('app secret byte length mismatch returns unauthorized', async (t) => {
   assert.equal(status, 401);
 });
 
+test('chat with too many messages returns 400', async (t) => {
+  const server = await listen(app);
+  t.after(() => close(server));
+
+  // 65 条 messages,超过 MAX_MESSAGES_COUNT=64 上限。每条 content 极短走过 char cap,
+  // 触发 messages.length 这一道关。
+  const messages = Array.from({ length: 65 }, (_, i) => ({ role: 'user', content: `m${i}` }));
+  const status = await postJSON(
+    server,
+    '/api/openai/chat/completions',
+    { messages },
+    {
+      'X-App-Secret': process.env.APP_SHARED_SECRET,
+      'X-Install-Id': 'a7d9673d-eba6-4cf8-a209-cc87f4f7cbba',
+    }
+  );
+
+  assert.equal(status, 400);
+});
+
 test('streaming client abort cancels the upstream OpenAI request', async (t) => {
   const originalAdapter = axios.defaults.adapter;
   let capturedSignal;

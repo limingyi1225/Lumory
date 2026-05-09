@@ -18,6 +18,10 @@ const log = pino({
   // req.body.* 路径：express.json middleware 把解析后的 body 挂到 req.body，pino-http 默认
   // 不 log body，但 err-path 里 `req.log.error({ err }, …)` 可能把 req 快照带上——把
   // 用户 prompt / 日记正文 / embedding input / 上游 OpenAI 错误 body 全挡在日志之外。
+  // 注意:req.body.* / err.* 路径在 default serializer 下永远不会触发(default 只 log
+  // method/url/headers/remoteAddress/remotePort)。这些 redact path 是 future-proof
+  // 兜底 — 如果 future 改了 serializer 或显式 `log.info({ req }, ...)` 路径加上 body,
+  // redact 自动生效防泄漏。同 path 的 err.* 兜底 axios 错误 body 落盘。
   redact: {
     paths: [
       'req.headers.authorization',
@@ -288,6 +292,11 @@ function clampCompletionTokens(value) {
   return Math.min(Math.floor(numeric), MAX_CHAT_COMPLETION_TOKENS);
 }
 
+// 单次 chat 请求 messages 数组上限 — 防绕 char cap 用大量短 messages 撑大上游 token 计费
+// (每条 message 有 ~7 token role/format overhead;1000 条 content="A" 通过 char cap 但
+// 上游算 7000+ token。Lumory 客户端只发单 user message,64 上限对真实使用 0 影响)。
+const MAX_MESSAGES_COUNT = 64;
+
 function sanitizeChatBody(body) {
   const requestedModel = typeof body?.model === 'string' ? body.model : CHAT_DEFAULT_MODEL;
   const model = CHAT_MODEL_ALLOWLIST.has(requestedModel) ? requestedModel : CHAT_DEFAULT_MODEL;
@@ -336,6 +345,10 @@ app.post('/api/openai/chat/completions', async (req, res) => {
     res.status(400).json({ error: 'Request body must include a non-empty `messages` array.' });
     return;
   }
+  if (req.body.messages.length > MAX_MESSAGES_COUNT) {
+    res.status(400).json({ error: 'too many messages' });
+    return;
+  }
   const upstreamBody = sanitizeChatBody(req.body);
   // 防止恶意超长 prompt（也挡了意外拼错 prompt 模板浪费 tokens 的失误）
   const totalChars = countMessageContentChars(upstreamBody.messages);
@@ -357,7 +370,9 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       const abortUpstream = () => {
         abortController.abort();
       };
-      req.on('aborted', abortUpstream);
+      // `req.on('aborted')` 在 Node 17+ deprecated,'close' 覆盖更全面(含 TCP RST、
+      // Cloudflare 边缘超时切断)且对 HTTP/1.1 abort 是 superset。AbortController 自身
+      // idempotent,理论上挂两个 listener 无副作用,但只挂 'close' 减一组 EventEmitter 记账。
       res.on('close', abortUpstream);
 
       const upstream = await axios({

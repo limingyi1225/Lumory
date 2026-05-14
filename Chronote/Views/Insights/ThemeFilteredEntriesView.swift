@@ -25,6 +25,9 @@ struct ThemeFilteredEntriesView: View {
     @State private var mergeSubject: InsightsEngine.Theme?
     @State private var showDeleteAlert = false
     @State private var deleteFailureMessage: String?
+    /// Button row tap 后塞这个,.navigationDestination(item:) 接住推到 DiaryDetailView。
+    /// wave17 改 Button + item-driven destination 是为了去掉 NavigationLink 自带 chevron(用户反馈"杂乱")。
+    @State private var selectedEntry: DiaryEntry?
     // entryToDelete 已移除 — 删除走 4 秒撤销 toast,直接调 deleteEntry,不再 stage。
 
     var body: some View {
@@ -43,9 +46,13 @@ struct ThemeFilteredEntriesView: View {
                     // 才能干净地浮在系统的玻璃 sheet 背景上,不被 insetGrouped 的灰底压住。
                     List {
                         ForEach(entries, id: \.objectID) { entry in
-                            NavigationLink(value: entry) {
+                            Button {
+                                HapticManager.shared.impact(.light)
+                                selectedEntry = entry
+                            } label: {
                                 DiaryEntryRow(entry: entry)
                             }
+                            .buttonStyle(PressableScaleButtonStyle())
                             .listRowBackground(Color.clear)
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
@@ -72,8 +79,21 @@ struct ThemeFilteredEntriesView: View {
                     }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
-                    .navigationDestination(for: DiaryEntry.self) { entry in
-                        DiaryDetailView(entry: entry, startInEditMode: false)
+                    .navigationDestination(item: $selectedEntry) { entry in
+                        let entryObjectID = entry.objectID
+                        DiaryDetailView(
+                            entry: entry,
+                            startInEditMode: false,
+                            onDeleted: {
+                                withAnimation {
+                                    entries.removeAll { $0.objectID == entryObjectID }
+                                }
+                                if selectedEntry?.objectID == entryObjectID {
+                                    selectedEntry = nil
+                                }
+                                onEntryDeleted?()
+                            }
+                        )
                     }
                 }
             }
@@ -207,6 +227,10 @@ struct ThemeFilteredEntriesView: View {
             HapticManager.shared.impact(.medium)
             EntryWipeOrchestrator.performSingleDeleteCleanup()
             withAnimation { entries.removeAll { $0.objectID == entryObjectID } }
+            // selectedEntry 可能指向被删 entry — DiaryDetailView 内部 swipe 删除完 pop 回来后
+            // `.navigationDestination(item:)` 重 evaluate 引用 tombstoned MO 会 CoreData abort。
+            // HomeView 1056 行同 pattern。
+            if selectedEntry?.objectID == entryObjectID { selectedEntry = nil }
             onEntryDeleted?()
 
             // 注册到 undo service + 弹带"撤销"按钮 toast。撤销时把 entry 加回 entries 列表。

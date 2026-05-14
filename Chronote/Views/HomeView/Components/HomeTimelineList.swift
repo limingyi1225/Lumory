@@ -31,16 +31,11 @@ struct HomeTimelineList: View {
 struct HomeTimelineEmptyState: View {
     var body: some View {
         Section {
-            // 共享 EmptyStateView —— 给图标 + 标题 + 提示三层信息,引导走录音 / 文字两条入口。
+            // 共享 EmptyStateView —— 只留图标 + 标题。原副标题("点下方输入框写一句…")
+            // 按用户要求移除:输入框 / 麦克风入口本身已经在屏上,提示行属冗余引导。
             EmptyStateView(
                 systemImage: "book.closed",
-                title: NSLocalizedString("暂无日记，快去记录吧～", comment: "Empty timeline title"),
-                // P1-Home-7 修正"长按麦克风"→"或点下麦克风"。当前实际交互是 tap toggle 不是
-                // hold-to-talk,文案对齐真交互方便首次用户成功触发录音。
-                message: NSLocalizedString(
-                    "点下方输入框写一句,或点下麦克风录一段语音。",
-                    comment: "Empty timeline subtitle"
-                )
+                title: NSLocalizedString("暂无日记，快去记录吧～", comment: "Empty timeline title")
             )
             .frame(minHeight: 320)
         }

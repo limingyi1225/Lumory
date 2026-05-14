@@ -15,6 +15,38 @@ struct ThemeCardList: View {
     /// 长按 → "合并到其他主题"菜单时回调,父视图负责弹 sheet 让用户选 target。nil 表示禁用合并。
     var onMergeRequest: ((InsightsEngine.Theme) -> Void)? = nil
 
+    /// wave17 — 2 行横滚 page-chunked。一页 = 2 行 × N 列(N 跟 size class 走)。
+    /// 之前 LazyHGrid column-major + 自定义 ScrollTargetBehavior 在 SwiftUI 26 snap 完全失效。
+    /// 改成 **themes 按 N×2 个一组分页 → LazyHStack 每 child 是一整页 → .viewAligned**
+    /// 让 SwiftUI 走 stock 的"page-as-child" snap,翻一下精确出 N×2 张新卡。row-major 阅读顺序
+    /// 比 column-major 更直观(从左到右、上到下读)。
+    /// **iPad regular size class** 走 3 列 × 2 行 = 6 张/页(superreview P1-5):iPhone tuning
+    /// 的 372pt pageWidth 在 iPad ~1000pt viewport 上嵌大段空白,扩 cardsPerPage 让 hero
+    /// dashboard 信息密度匹配 iPad 屏宽。
+    private static let cardRowHeight: CGFloat = 100
+    private static let cardWidth: CGFloat = 180
+    private static let columnSpacing: CGFloat = 12
+
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+
+    private var columnsPerPage: Int { hSizeClass == .regular ? 3 : 2 }
+    private var cardsPerPage: Int { columnsPerPage * 2 }
+    private var pageWidth: CGFloat {
+        // pageWidth = columns × cardWidth + (columns - 1) × columnSpacing。iPhone 2 列=372pt,
+        // iPad 3 列=564pt。LazyHStack 间 columnSpacing(12pt) gap 让翻页时 next page 第一列卡
+        // 左边稍稍露出来作 affordance。
+        CGFloat(columnsPerPage) * Self.cardWidth + CGFloat(columnsPerPage - 1) * Self.columnSpacing
+    }
+
+    /// 把 themes 切成 cardsPerPage 张一组,每组渲染成独立 page view 给 LazyHStack。
+    /// 最后一页不足 cardsPerPage 张的位置用 Color.clear placeholder 占位,N×2 网格不塌。
+    private var pagedThemes: [[InsightsEngine.Theme]] {
+        let perPage = cardsPerPage
+        return stride(from: 0, to: themes.count, by: perPage).map { start in
+            Array(themes[start..<min(start + perPage, themes.count)])
+        }
+    }
+
     /// 取候选 ID 的尾部(entryIds 按 date ASC,suffix 即最近 N 条)。
     /// loadSnippets 的 fetchLimit=3,默认传 20 是历史 over-allocation —— SQL `IN` 子句多 17 个 UUID
     /// 没收益(superreview P2-13 fix)。需要更多候选的调用方可显式覆盖 limit。
@@ -24,12 +56,10 @@ struct ThemeCardList: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(NSLocalizedString("主题", comment: "Themes section"))
-                .font(.headline)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-
+        // 标题 "主题" 删除(用户决定 2026-05-12):跟"情绪故事"标题一起去掉,统一无 title 风格;
+        // 横滑卡列本身的色点 + 主题名 + sparkline 已 self-evident。VStack 外壳保留只是把
+        // skeleton/empty/正常态包成一个 view block,不再带 title。
+        Group {
             if isLoading && themes.isEmpty {
                 skeleton
             } else if themes.isEmpty {
@@ -42,56 +72,15 @@ struct ThemeCardList: View {
                 // 不像被夹在 section 之间的「凸起色块」。
                 ScrollView(.horizontal, showsIndicators: false) {
                     GlassEffectContainer(spacing: 12) {
-                        // P1-Ins-8 paging snap — scrollTargetBehavior(.viewAligned) + scrollTargetLayout()
-                        // 让横向滚动到每张卡时自然吸附,比惯性滑过感觉好。不影响 contextMenu 长按。
-                        HStack(spacing: 12) {
-                            ForEach(themes) { theme in
-                                // 关键:**Button + .plain** 而不是 onTapGesture。
-                                // - PressableScaleButtonStyle:scale 动画与 contextMenu"卡片浮起"
-                                //   动画 + GlassEffectContainer detach 三层叠加 → 视觉诡异
-                                // - 纯 onTapGesture:在 iOS 26 + GlassEffectContainer 内会抢手势链,
-                                //   长按完全无反应(用户实测)
-                                // - Button + .plain:无 scale 动画,但 Button 协议层让 SwiftUI
-                                //   知道怎么把 tap 和 contextMenu 的 long-press 分开调度,长按能正常触发。
-                                Button {
-                                    #if canImport(UIKit)
-                                    HapticManager.shared.click()
-                                    #endif
-                                    onSelect(theme)
-                                } label: {
-                                    ThemeCard(theme: theme)
-                                        .frame(width: 180)
-                                        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-                                .contextMenu(menuItems: {
-                                    if let onMergeRequest {
-                                        Button {
-                                            onMergeRequest(theme)
-                                        } label: {
-                                            Label(
-                                                NSLocalizedString("合并到其他主题…", comment: "Merge into another theme"),
-                                                systemImage: "arrow.triangle.merge"
-                                            )
-                                        }
-                                    }
-                                    if let onDelete {
-                                        Button(role: .destructive) {
-                                            onDelete(theme)
-                                        } label: {
-                                            Label(
-                                                NSLocalizedString("删除主题", comment: "Delete theme"),
-                                                systemImage: "trash"
-                                            )
-                                        }
-                                    }
-                                }, preview: {
-                                    // **显式 preview**:跳过 iOS 默认快照(否则 GlassEffectContainer
-                                    // 的外延 + 系统 backdrop 圆角阴影会让"卡片大一点的深色框先闪一下")。
-                                    // 直接渲染最近 3 条相关日记的 snippet,长按等于一次性看到主题
-                                    // "代表了哪些片段",不需要再 tap 进 filtered list。
-                                    ThemeCardPreview(theme: theme)
-                                })
+                        // wave17 — themes 按 4 张一组打包成 page,LazyHStack 每个 child 是一整页
+                        // (2×2 mini grid)。`.scrollTargetLayout()` 标识这些 page 作 snap target,
+                        // `.viewAligned` 让翻一下精确滚 1 page 372pt,正好出 4 张新卡。
+                        // 上一版的自定义 ColumnPagingBehavior 在 iOS 26 行为不稳(snap 失效),用
+                        // page-as-child 这条 stock SwiftUI 路径绕开。
+                        LazyHStack(alignment: .top, spacing: Self.columnSpacing) {
+                            ForEach(Array(pagedThemes.enumerated()), id: \.offset) { _, pageThemes in
+                                themePageView(pageThemes)
+                                    .frame(width: pageWidth)
                             }
                         }
                         .scrollTargetLayout()
@@ -104,20 +93,119 @@ struct ThemeCardList: View {
         }
     }
 
+    /// 单页 N×2 mini grid。row-major 阅读顺序(N = columnsPerPage):
+    ///   iPhone(N=2): [0,1] / [2,3]
+    ///   iPad  (N=3): [0,1,2] / [3,4,5]
+    /// 最后一页不足 cardsPerPage 张的位置用透明 placeholder 占位,N×2 网格不会塌。
+    @ViewBuilder
+    private func themePageView(_ pageThemes: [InsightsEngine.Theme]) -> some View {
+        let cols = columnsPerPage
+        VStack(alignment: .leading, spacing: Self.columnSpacing) {
+            HStack(spacing: Self.columnSpacing) {
+                ForEach(0..<cols, id: \.self) { col in
+                    themeCardOrPlaceholder(at: col, in: pageThemes)
+                }
+            }
+            HStack(spacing: Self.columnSpacing) {
+                ForEach(0..<cols, id: \.self) { col in
+                    themeCardOrPlaceholder(at: col + cols, in: pageThemes)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func themeCardOrPlaceholder(at index: Int, in pageThemes: [InsightsEngine.Theme]) -> some View {
+        if index < pageThemes.count {
+            themeButton(for: pageThemes[index])
+        } else {
+            // 让 2×2 grid 在最后一页只有 1-3 张卡时仍保持对齐(否则下方 row 会左右晃)。
+            Color.clear
+                .frame(width: Self.cardWidth, height: Self.cardRowHeight)
+        }
+    }
+
+    @ViewBuilder
+    private func themeButton(for theme: InsightsEngine.Theme) -> some View {
+        // 关键:**Button + .plain** 而不是 onTapGesture。
+        // - PressableScaleButtonStyle:scale 动画与 contextMenu"卡片浮起"
+        //   动画 + GlassEffectContainer detach 三层叠加 → 视觉诡异
+        // - 纯 onTapGesture:在 iOS 26 + GlassEffectContainer 内会抢手势链,
+        //   长按完全无反应(用户实测)
+        // - Button + .plain:无 scale 动画,但 Button 协议层让 SwiftUI
+        //   知道怎么把 tap 和 contextMenu 的 long-press 分开调度,长按能正常触发。
+        Button {
+            #if canImport(UIKit)
+            HapticManager.shared.click()
+            #endif
+            onSelect(theme)
+        } label: {
+            ThemeCard(theme: theme)
+                .frame(width: Self.cardWidth, height: Self.cardRowHeight)
+                .contentShape(RoundedRectangle(cornerRadius: LumoryCornerRadius.card, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .contextMenu(menuItems: {
+            if let onMergeRequest {
+                Button {
+                    onMergeRequest(theme)
+                } label: {
+                    Label(
+                        NSLocalizedString("合并到其他主题…", comment: "Merge into another theme"),
+                        systemImage: "arrow.triangle.merge"
+                    )
+                }
+            }
+            if let onDelete {
+                Button(role: .destructive) {
+                    onDelete(theme)
+                } label: {
+                    Label(
+                        NSLocalizedString("删除主题", comment: "Delete theme"),
+                        systemImage: "trash"
+                    )
+                }
+            }
+        }, preview: {
+            // **显式 preview**:跳过 iOS 默认快照(否则 GlassEffectContainer
+            // 的外延 + 系统 backdrop 圆角阴影会让"卡片大一点的深色框先闪一下")。
+            // 直接渲染最近 3 条相关日记的 snippet,长按等于一次性看到主题
+            // "代表了哪些片段",不需要再 tap 进 filtered list。
+            ThemeCardPreview(theme: theme)
+        })
+    }
+
     private var skeleton: some View {
-        HStack(spacing: 12) {
-            ForEach(0..<3, id: \.self) { _ in
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Color.secondary.opacity(0.06))
-                    .frame(width: 180, height: 130)
+        // 2 张占位 page(8 个 placeholder)— 跟真实 LazyHStack page 同 layout 避免出场跳变。
+        LazyHStack(alignment: .top, spacing: Self.columnSpacing) {
+            ForEach(0..<2, id: \.self) { _ in
+                VStack(alignment: .leading, spacing: Self.columnSpacing) {
+                    HStack(spacing: Self.columnSpacing) {
+                        ForEach(0..<columnsPerPage, id: \.self) { _ in
+                            skeletonCard
+                        }
+                    }
+                    HStack(spacing: Self.columnSpacing) {
+                        ForEach(0..<columnsPerPage, id: \.self) { _ in
+                            skeletonCard
+                        }
+                    }
+                }
+                .frame(width: pageWidth)
             }
         }
         .padding(.horizontal, 16)
     }
 
+    private var skeletonCard: some View {
+        RoundedRectangle(cornerRadius: LumoryCornerRadius.card)
+            .fill(Color.secondary.opacity(0.06))
+            .frame(width: Self.cardWidth, height: Self.cardRowHeight)
+    }
+
     private var emptyState: some View {
         HStack {
-            Text(NSLocalizedString("AI 正在整理主题，或暂无足够日记", comment: "Empty themes"))
+            Text(NSLocalizedString("暂无主题，或日记还太少", comment: "Empty themes"))
                 .font(.footnote)
                 .foregroundColor(.secondary)
             Spacer()
@@ -189,7 +277,7 @@ private struct ThemeCardPreview: View {
         }
         .padding(14)
         .frame(width: 300)
-        .liquidGlassCard(cornerRadius: 16, interactive: false)
+        .liquidGlassCard(cornerRadius: LumoryCornerRadius.card, interactive: false)
         .task {
             await loadSnippets()
         }
@@ -357,38 +445,48 @@ struct ThemeCard: View {
                     )
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: LumoryCornerRadius.card, style: .continuous))
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(theme.name)
-                    .font(.system(size: 18, weight: .semibold))
-                    .lineLimit(1)
-                Spacer()
-                Text(String(format: NSLocalizedString("%d 次", comment: "Theme count"), theme.count))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
+        // 用户决定 2026-05-12 改竖排:原"name + count 同行"+ 底部"色点 + 积极 + 64" 把 mood
+        // 这件事在卡内表达了三次(gradient bg / 色点 / 数字),冗余且抢走 gradient blob 的存在
+        // 感。新布局:name 占一行,count 单独一行 caption,底部留给 sparkline(仅 trend 够时);
+        // 没 trend 就完全留白让 gradient blob 呼吸 — 卡片更"标签感"而非"成绩单"。
+        VStack(alignment: .leading, spacing: 4) {
+            Text(theme.name)
+                // **P2 fix (2026-05-13 superreview)**:之前硬编码 18 → 改 LumoryFonts.themeCardTitle。
+                .font(LumoryFonts.themeCardTitle)
+                .lineLimit(1)
+
+            Text(String(format: NSLocalizedString("%d 次", comment: "Theme count"), theme.count))
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
 
             Spacer(minLength: 0)
 
-            // 底部：有趋势时展示 sparkline；否则展示情绪分数和定性标签，更有意义。
-            bottomRow
-                .frame(height: 36)
+            // 仅 hasMeaningfulTrend 时画 sparkline(>= 3 个非中性 bucket),否则不渲染 —
+            // 让卡底部空出来给 radial gradient 收尾呼吸,而不是硬塞一条平线。
+            // wave17:30 → 24,适应 100pt 行高(28pt padding + 22 name + 4 + 14 count + 8 spacer + 24 ≈ 100)。
+            if hasMeaningfulTrend {
+                sparkline
+                    .frame(height: 24)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: 130)
+        // wave17 — minHeight 130 → 100。ThemeCardList 现在用 LazyHStack page-chunked + 显式
+        // `.frame(width: cardWidth, height: cardRowHeight)`(100pt),minHeight 这里只是给
+        // 独立 preview / 非 page-chunked 用法的兜底。
+        .frame(minHeight: 100)
         // 所有主题统一走「玻璃白底 + 柔光色斑」语言:tint=nil 让 glass 保持白调,
         // RadialGradient 提供色彩信号。混合主题双点,单色主题单点;落点按主题名 hash 多样化。
         // interactive=true 保留 glass 的 hover/press 高光,父 ScrollView 已留 12pt 垂直空间防裁剪。
         .background { cardBackground }
         .liquidGlassCard(
-            cornerRadius: 16,
+            cornerRadius: LumoryCornerRadius.card,
             tint: nil,
             interactive: true
         )
@@ -397,6 +495,7 @@ struct ThemeCard: View {
     }
 
     private var accessibilityDescription: String {
+        // VoiceOver 用户看不见 gradient blob,a11y label 仍要把 mood 数字朗读出来,跟 hint 顺畅。
         if isMixed {
             return String(
                 format: NSLocalizedString("主题 %@，出现 %d 次，情绪起伏 %d 到 %d 分", comment: "A11y: mixed theme"),
@@ -407,15 +506,6 @@ struct ThemeCard: View {
             format: NSLocalizedString("主题 %@，出现 %d 次，平均情绪 %d 分", comment: "A11y: theme card"),
             theme.name, theme.count, Int(theme.avgMood * 100)
         )
-    }
-
-    @ViewBuilder
-    private var bottomRow: some View {
-        if hasMeaningfulTrend {
-            sparkline
-        } else {
-            summaryRow
-        }
     }
 
     private var sparkline: some View {
@@ -432,34 +522,6 @@ struct ThemeCard: View {
                 }
             }
             .stroke(Color.moodSpectrum(value: theme.avgMood), lineWidth: 2)
-        }
-    }
-
-    /// 数据太少不画图；用文字概括 + 平均分更直接。
-    private var summaryRow: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(Color.moodSpectrum(value: theme.avgMood))
-                .frame(width: 8, height: 8)
-            Text(qualitativeLabel)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(String(format: "%d", Int(theme.avgMood * 100)))
-                .font(.callout.weight(.semibold))
-                .monospacedDigit()
-                .foregroundStyle(Color.primary.opacity(0.85))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var qualitativeLabel: String {
-        switch theme.avgMood {
-        case ..<0.25:  return NSLocalizedString("低落", comment: "Mood: low")
-        case ..<0.45:  return NSLocalizedString("偏低", comment: "Mood: slightly low")
-        case ..<0.55:  return NSLocalizedString("平静", comment: "Mood: neutral")
-        case ..<0.75:  return NSLocalizedString("积极", comment: "Mood: positive")
-        default:       return NSLocalizedString("高涨", comment: "Mood: high")
         }
     }
 }

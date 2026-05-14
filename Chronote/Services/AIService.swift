@@ -294,10 +294,15 @@ struct MockAIService: AIServiceProtocol {
 
     @available(iOS 15.0, macOS 12.0, *)
     func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        // wave15 — 输出 [HEADLINE]/[BODY] marker 格式,匹配 prompt 让客户端 splitter 能拿到
+        // headline。所有依赖 mock narrative 文本的测试要相应更新。
         AsyncStream { continuation in
             Task {
                 let total = entries.count
                 let avg = entries.isEmpty ? 0.5 : entries.map { $0.moodValue }.reduce(0, +) / Double(total)
+                continuation.yield(.chunk("[HEADLINE]\n"))
+                continuation.yield(.chunk("这段时间像一杯凉茶 慢慢见底\n"))
+                continuation.yield(.chunk("[BODY]\n"))
                 continuation.yield(.chunk("共 \(total) 条日记，"))
                 continuation.yield(.chunk("平均情绪 \(String(format: "%.0f", avg * 100))/100。"))
                 continuation.yield(.done)
@@ -316,15 +321,14 @@ struct MockAIService: AIServiceProtocol {
     }
 
     func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? {
-        // Mock：直接按主题拼出能跑的最简 bundle，单测友好
-        let sampleThemes = context.topThemes.prefix(2).map { $0.name }
+        // Mock:不调用 LLM,直接拼出能跑的最简 bundle,单测友好。
         let zh = context.language == "zh"
-        let presets: [String] = sampleThemes.isEmpty
-            ? [zh ? "最近最牵挂什么？" : "What's been on your mind?"]
-            : sampleThemes.map { zh ? "想写写\($0)吗？" : "Want to write about \($0)?" }
-        let placeholders: [String] = sampleThemes.isEmpty
-            ? [zh ? "今天怎么样？" : "How was today?"]
-            : sampleThemes.map { zh ? "再聊聊\($0)" : "More on \($0)" }
+        let presets = zh
+            ? ["最近最牵挂什么？", "我为什么会反复想到那件事？"]
+            : ["What's been on your mind?", "Why does this keep coming back?"]
+        let placeholders = zh
+            ? ["今天怎么样？", "想写点什么？"]
+            : ["How was today?", "Want to write something?"]
         return SuggestionBundle(
             askPastPresets: presets,
             homePlaceholders: placeholders,

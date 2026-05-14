@@ -160,7 +160,24 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --background
 | ...
 ```
 
-报告写完后告诉用户路径,**不要**在主对话里 paste 全文(太长,用户去文件看)。可以摘 P0 一两条 + 总数概览。
+报告草稿写完后**不要**立刻告诉用户,先进入 Step 5 做 Codex 终审。
+
+### Step 5 — Codex 对最终报告做完整终审
+
+Step 4 报告草稿落盘后，召唤一个 `codex:codex-rescue` subagent（read-only task）完整读取报告文件 + 所有被改动的源文件，做最后一轮独立扫描。
+
+**Prompt 要点**（主 agent 在召唤时必须包含）：
+- 给出报告文件路径（`CodeReview/superreview-*.md`）和所有被改动文件的绝对路径
+- 说明前序 Opus 视角清单（让 Codex 知道哪些角度已经覆盖）
+- 要求 Codex：①指出报告中明显遗漏的 finding；②纠正报告里量化有误的断言；③提出 Opus 系视角集体漏掉的盲点
+- 输出格式同 Opus：`P0/P1/P2 + file:line + 一句话问题 + 一句话修复`，并标注是"新增"还是"纠正已有"
+
+**主 agent 收到 Codex 终审结果后**：
+- 新增 finding → 按 severity 并入对应的 P0/P1/P2 区（标注来源 `codex-final`）
+- 纠正已有 finding → 直接修改原条目，在"核对"字段追加 `[Codex 终审修正: ...]`
+- 无新发现 → 在报告末尾 Reviewer 矩阵里加一行 `codex-final | 0 新增 | 0 纠正`，记录已过终审
+
+最终报告更新完后，告诉用户路径 + P0 总数 + 一句话总结。**不要**在主对话 paste 全文。
 
 ## Lumory 项目专属核对清单
 
@@ -186,8 +203,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --background
 3. 单条消息内 N 个 Agent tool call(每个 `model: "opus"`)+ 1 个 codex review skill 调用
 4. 收齐结果
 5. 跑核对(grep + Read + context7)
-6. 写 `CodeReview/superreview-*.md`
-7. 主对话只回:报告路径 + P0 数量 + 一句话总结
+6. 写报告草稿到 `CodeReview/superreview-*.md`
+7. 召唤 `codex:codex-rescue` 对报告草稿 + 源文件做完整终审
+8. 按 Codex 终审结果更新报告(新增 / 纠正 finding)
+9. 主对话只回:报告路径 + P0 数量 + 一句话总结
 
 ## 失败模式 / 别这么干
 
@@ -196,3 +215,4 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --background
 - ❌ 跳过核对步骤 → 用户读到错的行号 / 错的计数,这个 skill 就废了
 - ❌ 给 subagent 模糊 prompt("帮我 review 一下") → 视角散,大量重复 finding
 - ❌ 全部串行 → 没必要,subagent 之间无依赖
+- ❌ 跳过 Step 5 Codex 终审 → 失去跨模型盲点互补,等于把 Opus 系集体盲点遗漏带进报告

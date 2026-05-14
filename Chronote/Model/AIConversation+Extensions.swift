@@ -54,15 +54,65 @@ extension AIConversation {
 
     /// Narrative 一份报告的持久化 DTO。`rangeStart` / `rangeEnd` 让历史详情页面能显示
     /// "2026年5月" / "最近30天"等(仅 startEnd 时间戳,UI 自己 format 跟语言走)。
+    ///
+    /// **v2 (payloadVersion=2)**:加 `rangeKind / entryCount / sourceLatestEntryDate / generatedAt`
+    /// 让 InsightsView 顶部浓缩卡能按"语义 range"(.month/.quarter/.year/.all)而非滚动
+    /// 区间精确匹配查 cache。
+    ///
+    /// **v3 (payloadVersion=3)**:加 `headline` —— gpt-5.5 一次输出 [HEADLINE]\\n一两句诗\\n[BODY]\\n长文,
+    /// 客户端 stream 收完后 split。卡收起态显 headline,tap 进 detail 显 body。v2 老 cache 没 headline
+    /// → view 层 fallback 用 body 第一段第一句作 placeholder,不强制重生。
     struct NarrativePayload: Codable, Equatable {
         let rangeStart: Date
         let rangeEnd: Date
         /// 完整报告 markdown 文本(可能含 truncated 标记/不完整段落 — UI 显示时复用同
-        /// 一套 NarrativeReader 渲染逻辑,带 isIncomplete 状态)。
+        /// 一套渲染逻辑,带 isIncomplete 状态)。
         let body: String
         let isIncomplete: Bool
         /// 截断时的原因(stream.truncated.report 等)。完整时 nil。
         let truncatedReason: String?
+
+        // v2 additions —— rangeKind == nil 表示 v1 record。
+        let rangeKind: String?
+        let entryCount: Int?
+        let sourceLatestEntryDate: Date?
+        let generatedAt: Date?
+
+        // v3 addition —— headline 一两句诗意 summary,模型不守 marker 时 nil → view 层 fallback。
+        let headline: String?
+
+        /// 自定义 init —— Swift memberwise init 即使字段是 optional 也要求传值,
+        /// 不写 custom init 旧 v1 callsite 编不过。
+        init(
+            rangeStart: Date,
+            rangeEnd: Date,
+            body: String,
+            isIncomplete: Bool,
+            truncatedReason: String?,
+            rangeKind: String? = nil,
+            entryCount: Int? = nil,
+            sourceLatestEntryDate: Date? = nil,
+            generatedAt: Date? = nil,
+            headline: String? = nil
+        ) {
+            self.rangeStart = rangeStart
+            self.rangeEnd = rangeEnd
+            self.body = body
+            self.isIncomplete = isIncomplete
+            self.truncatedReason = truncatedReason
+            self.rangeKind = rangeKind
+            self.entryCount = entryCount
+            self.sourceLatestEntryDate = sourceLatestEntryDate
+            self.generatedAt = generatedAt
+            self.headline = headline
+        }
+
+        var payloadVersion: Int32 {
+            // - rangeKind == nil → v1(老 callsite)
+            // - rangeKind != nil + headline == nil → v2
+            // - rangeKind != nil + headline != nil → v3
+            rangeKind == nil ? 1 : (headline != nil ? 3 : 2)
+        }
     }
 
     // MARK: - 写入 helper(显式赋 id/createdAt,不依赖 CoreData model default)
@@ -100,7 +150,7 @@ extension AIConversation {
         conv.kind = Kind.narrative.rawValue
         conv.createdAt = Date()
         conv.title = title
-        conv.payloadVersion = 1
+        conv.payloadVersion = payload.payloadVersion
         conv.payload = try JSONEncoder().encode(payload)
         conv.citedEntryIds = try JSONEncoder().encode(citedEntryIds)
         conv.content = ""

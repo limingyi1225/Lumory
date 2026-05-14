@@ -3,15 +3,15 @@ import CoreData
 
 // MARK: - ConversationHistoryView
 //
-// **wave12-3 历史回顾入口**。`AIConversation` entity 装两类 AI 输出历史:AskPast 一次次
-// Q+A pair / NarrativeReader 一份份生成的报告。这个 view 是统一列表,左侧 Picker 切 kind,
-// 点条进 read-only 详情。
+// **历史回顾入口**。`AIConversation` entity 装两类 AI 输出历史:AskPast 一次次
+// Q+A pair / NarrativeSummaryCard 一份份生成的报告。这个 view 是统一列表(无 kind 切换;
+// 每行靠 icon + 颜色标签自带区分),点条进 read-only 详情。
 //
-// **入口**:在 `InsightsView` toolbar 加按钮(menu 里"历史回顾"item),只在已有任意 record
-// 时才显示(避免空列表点进去)。
+// **入口**:从 `AskPastView` toolbar 的"历史回顾"按钮进。Insights 主页不再独立放入口。
 //
 // **可读性**:列表条目展示 title(用户问题 / 报告时间范围)+ 相对时间 + kind 标签 + 截断 hint。
-// 详情走 read-only 渲染,跟 AskPast / NarrativeReader 同款 markdown 排版,但**不能编辑 / 重生成**。
+// 详情走 read-only 渲染,跟 AskPast / NarrativeDetailSheet 同款 markdown 排版(MarkdownText
+// + preserveLineBreaks: true,跟 detail sheet 视觉对齐),**不能编辑 / 重生成**。
 
 struct ConversationHistoryView: View {
     @Environment(\.managedObjectContext) private var viewContext
@@ -21,43 +21,17 @@ struct ConversationHistoryView: View {
         sortDescriptors: [NSSortDescriptor(keyPath: \AIConversation.createdAt, ascending: false)]
     ) private var conversations: FetchedResults<AIConversation>
 
-    enum FilterMode: String, CaseIterable, Identifiable {
-        case all
-        case askPast
-        case narrative
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .all: return NSLocalizedString("全部", comment: "History filter: all")
-            case .askPast: return NSLocalizedString("回顾", comment: "History filter: askPast")
-            case .narrative: return NSLocalizedString("故事", comment: "History filter: narrative")
-            }
-        }
-    }
-    @State private var filter: FilterMode = .all
-
-    var filtered: [AIConversation] {
-        let all = Array(conversations)
-        switch filter {
-        case .all: return all
-        case .askPast: return all.filter { $0.kindEnum == .askPast }
-        case .narrative: return all.filter { $0.kindEnum == .narrative }
-        }
+    /// wave14 polish — 删除 "全部 / 回顾 / 故事" segmented Picker。kindEnum 已经在每行
+    /// 用 icon + 颜色标签做区分(见 ConversationRow.kindIcon / kindColor),不需要顶部
+    /// 再来一层 filter 让用户自己挑。
+    private var allRecords: [AIConversation] {
+        Array(conversations)
     }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                Picker("", selection: $filter) {
-                    ForEach(FilterMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-
-                if filtered.isEmpty {
+                if allRecords.isEmpty {
                     Spacer()
                     VStack(spacing: 12) {
                         Image(systemName: "bubble.left.and.text.bubble.right")
@@ -66,16 +40,11 @@ struct ConversationHistoryView: View {
                         Text(NSLocalizedString("还没有历史回顾", comment: "History empty"))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                        Text(NSLocalizedString("AI 回答和生成的故事会自动保存在这里", comment: "History empty hint"))
-                            .font(.footnote)
-                            .foregroundStyle(.secondary.opacity(0.7))
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 32)
                     }
                     Spacer()
                 } else {
                     List {
-                        ForEach(filtered, id: \.objectID) { conv in
+                        ForEach(allRecords, id: \.objectID) { conv in
                             NavigationLink {
                                 ConversationDetailView(conversation: conv)
                             } label: {
@@ -101,7 +70,7 @@ struct ConversationHistoryView: View {
 
     private func deleteConversations(at offsets: IndexSet) {
         for idx in offsets {
-            viewContext.delete(filtered[idx])
+            viewContext.delete(allRecords[idx])
         }
         do {
             try viewContext.save()
@@ -288,10 +257,13 @@ private struct ConversationDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Text(payload.body)
-                .font(.body)
-                .lineSpacing(6)
-                .textSelection(.enabled)
+            MarkdownText(
+                markdown: payload.body,
+                inlineFont: .body,
+                lineSpacing: 6,
+                preserveLineBreaks: true
+            )
+            .textSelection(.enabled)
         }
     }
 

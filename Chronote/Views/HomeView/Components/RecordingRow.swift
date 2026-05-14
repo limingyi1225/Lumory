@@ -18,7 +18,12 @@ struct RecordingRow: View {
     var body: some View {
         HStack(spacing: 10) {
             // 左侧 mini 播放/暂停按钮 —— 单层 glass,小尺寸,贴合输入卡的玻璃语言
-            Button(action: onPlay) {
+            Button {
+                #if canImport(UIKit)
+                HapticManager.shared.impact(.light)
+                #endif
+                onPlay()
+            } label: {
                 Image(systemName: isPlayingThis ? "pause.fill" : "play.fill")
                     .font(.system(size: 11, weight: .bold))
                     .frame(width: 22, height: 22)
@@ -43,7 +48,12 @@ struct RecordingRow: View {
             Spacer(minLength: 4)
 
             // 右侧 ghost 删除钮 —— 不抢眼,但 hit area 够大
-            Button(action: onDelete) {
+            Button {
+                #if canImport(UIKit)
+                HapticManager.shared.impact(.light)
+                #endif
+                onDelete()
+            } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)

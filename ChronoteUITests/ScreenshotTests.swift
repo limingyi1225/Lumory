@@ -68,6 +68,18 @@ final class ScreenshotTests: XCTestCase {
         usleep(800_000)
     }
 
+    @MainActor
+    @discardableResult
+    private func openInsights(_ app: XCUIApplication, timeout: TimeInterval = 8) -> XCUIElement {
+        let insightsButton = app.buttons["洞察"]
+        XCTAssertTrue(insightsButton.waitForExistence(timeout: 5), "洞察按钮不见")
+        insightsButton.tap()
+
+        let rootScroll = app.scrollViews["insightsRootScrollView"]
+        XCTAssertTrue(rootScroll.waitForExistence(timeout: timeout), "等不到 Insights 主滚动视图")
+        return rootScroll
+    }
+
     // MARK: - Screenshots
 
     /// 01 — Home:输入卡 + 心情条 + 最近日记列表
@@ -78,46 +90,36 @@ final class ScreenshotTests: XCTestCase {
         snapshot(app, named: "01-Home")
     }
 
-    /// 02 — Insights 主入口:心情曲线 + 主题卡 + 月历
+    /// 02 — Insights 主入口:narrative summary + 主题卡 + 写作热力图
     @MainActor
     func test_02_Insights() throws {
         let app = launchApp()
         waitForHome(app)
 
-        let insightsButton = app.buttons["洞察"]
-        XCTAssertTrue(insightsButton.waitForExistence(timeout: 5), "洞察按钮不见")
-        insightsButton.tap()
-
-        // 等 Insights 标题出现 + 让数据 fetch 完(InsightsEngine 走 background context)
-        let title = app.navigationBars["洞察"]
-        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        _ = openInsights(app)
         usleep(2_000_000) // 2s — 给图表 / 主题卡的数据计算 + 入场动画留时间
 
         snapshot(app, named: "02-Insights")
     }
 
-    /// 03 — Calendar:Insights 滚到月历位置(模块在心情曲线下面一块)
+    /// 03 — Heatmap:Insights 滚到写作热力图位置
     /// 用精准 swipe(从下三分之一往上拖到中间)替代默认 swipeUp(默认是整屏 swipe,容易过位)
     @MainActor
-    func test_03_Calendar() throws {
+    func test_03_Heatmap() throws {
         let app = launchApp()
         waitForHome(app)
 
-        app.buttons["洞察"].tap()
-        XCTAssertTrue(app.navigationBars["洞察"].waitForExistence(timeout: 5))
+        let scroll = openInsights(app)
         usleep(1_500_000)
 
-        let scroll = app.scrollViews.firstMatch
         if scroll.exists {
-            // **swipe 距离要短**:75%→35% 拉太多,会把月历后面的"主题/关联洞察/WritingHeatmap stats"
-            // 一起拉到屏幕里,导致底部 stats 行被 home indicator 区切掉(2026-04-29 用户抓到)。
-            // 75%→55% 只露出"心情故事曲线被推走 + 月历完整居中",月历下面没有其他卡。
+            // 短拖:把 narrative hero 推走,让主题卡 + heatmap 进入主体区域。
             let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
             let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
             start.press(forDuration: 0.05, thenDragTo: end)
             usleep(800_000)
         }
-        snapshot(app, named: "03-Calendar")
+        snapshot(app, named: "03-Heatmap")
     }
 
     /// 04 — Themes:滚到主题卡 + correlation chips + heatmap 区域
@@ -126,12 +128,10 @@ final class ScreenshotTests: XCTestCase {
         let app = launchApp()
         waitForHome(app)
 
-        app.buttons["洞察"].tap()
-        XCTAssertTrue(app.navigationBars["洞察"].waitForExistence(timeout: 5))
+        let scroll = openInsights(app)
         usleep(1_500_000)
 
-        // 两次中等 swipe,精准走过 mood chart + calendar,落在主题卡顶部
-        let scroll = app.scrollViews.firstMatch
+        // 两次中等 swipe,精准走到主题卡 / heatmap / 行动区中段
         if scroll.exists {
             for _ in 0..<2 {
                 let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
@@ -144,23 +144,25 @@ final class ScreenshotTests: XCTestCase {
         snapshot(app, named: "04-Themes")
     }
 
-    /// 05 — Ask Past:点击 toolbar 的"回顾",截 AskPast 入口的 preset 提问
+    /// 05 — Ask Past:进 InsightsView 滚到底部点第一颗 preset chip,截 AskPast 对话入口
     @MainActor
     func test_05_AskPast() throws {
         let app = launchApp()
         waitForHome(app)
 
-        app.buttons["洞察"].tap()
-        XCTAssertTrue(app.navigationBars["洞察"].waitForExistence(timeout: 5))
+        let scrollView = openInsights(app)
         usleep(1_000_000)
 
-        // toolbar 上的"与过去对话"按钮(accessibilityLabel)
-        let askPast = app.buttons["与过去对话"]
-        XCTAssertTrue(askPast.waitForExistence(timeout: 5), "AskPast 入口找不到")
+        let askPast = app.buttons["insightsAskPastPresetChip0"]
+        for _ in 0..<6 {
+            if askPast.exists, askPast.isHittable { break }
+            scrollView.swipeUp()
+            usleep(400_000)
+        }
+        XCTAssertTrue(askPast.waitForExistence(timeout: 5), "AskPast preset chip 找不到")
         askPast.tap()
 
-        // 等 sheet + preset 加载完成。preset 是 AI 生成,有缓存就秒出,无缓存可能要 5-10s。
-        // 我们给 6s 然后无论如何都截 —— 即便还在 loading,玻璃骨架也是有内容的。
+        XCTAssertTrue(app.navigationBars["回顾"].waitForExistence(timeout: 5), "AskPast sheet 未打开")
         usleep(6_000_000)
         snapshot(app, named: "05-AskPast")
     }

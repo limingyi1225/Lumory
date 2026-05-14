@@ -18,7 +18,7 @@ import Foundation
 extension OpenAIService {
     // MARK: - 流式情绪报告(closure 风格 + AsyncStream 包装)
 
-    /// 结构化事件版本 —— NarrativeReader / InsightsEngine 用这个,可以区分 chunk vs truncated vs failed。
+    /// 结构化事件版本 —— NarrativeSummaryCard / NarrativePrecomputeService / InsightsEngine 用这个,可以区分 chunk vs truncated vs failed。
     /// 所有事件都在 MainActor 上投递。
     func generateReportFromData(entries: [DiaryEntryData], onEvent: @escaping @MainActor (StreamEvent) -> Void) async {
         Log.info("[OpenAIService] 开始从安全数据生成流式情绪报告，条目数量: \(entries.count)", category: .ai)
@@ -43,15 +43,27 @@ extension OpenAIService {
             : ""
 
         let prompt = """
-阅读提供的日记条目，并基于内容撰写一份连贯的分析报告。
-# 指南
+阅读提供的日记条目,先写一两句概括,再写完整分析报告。
+# 输出格式
+严格按以下格式输出,顺序不可调换、标记不可省略:
+[HEADLINE]
+（这里写一两句话的诗意概括,15-30 字。沉静、克制,像友人轻轻一句话。
+不要起标题、不要点评,只观察。一行写完,不空行。）
+[BODY]
+（完整分析报告,1-6 段,段间空行分隔。原指南规则全部生效。）
+# HEADLINE 规则
+- 一两句话,共 15-30 字
+- 可以有点诗意,也可以有点幽默
+- 不要点评(避免"做得很棒""加油"),用观察的语气
+- 不要使用逗号之外的标点符号
+- 如果日记是英文,headline 也用英文,长度 8-20 个英文 word(不是 char),其他规则同上
+# BODY 规则
 - **写作风格与语言**：如果日记是中文的，请用中文进行分析；如果是英文的，请用英文进行分析。通过使用"你 xxxx"而非"他们 xxx"等直接称呼，与读者建立直接联系。确保行文生动有趣，富有吸引力。
 - **定性分析**：描述情感时避免使用数值或定量指标。
 - **主题与模式**：识别反复出现的主题、生活方式模式或情感变化，以加深自我理解。
 - **日期引用**：使用口语化的日期表达方式（如"四月初"），避免使用过于正式的数字格式（如2024-12-1）。
 - **结构**：不包含标题、小标题、引言或结论。使用1-4段落，段落之间用空行分隔。
-# 输出格式
-- 1-6段落的报告（Mac版本总字数不超过800字，其他平台不超过400字）。
+- 1-6段落的报告，总字数不超过400字。
 - 每个段落之间用空行（两行换行）分隔。
 - 不得使用括号、破折号，引号，星号，加粗，斜体或其他类似标点符号。
 \(coverageNote)
@@ -66,14 +78,23 @@ Diary Entries:
             let messages: [Message]
             let stream: Bool
             let reasoning_effort: String?
+            // **P1 fix (2026-05-13 superreview)**:narrative prompt 写"总字数不超过 400 字"但模型
+            // 不总守。同 endpoint 的 streamChatEvents 设了 4096 cap,narrative 这里漏 → 偶发 leak
+            // 4k+ token,客户端 rawOutput 累 string concat + split 成本随之上涨。给 1500 硬 cap
+            // 对 ~400 字预期留 3x 余量,既挡住失控 leak 又不切到正常输出。
+            let max_completion_tokens: Int?
 
-            enum CodingKeys: String, CodingKey { case model, messages, stream, reasoning_effort }
+            enum CodingKeys: String, CodingKey {
+                case model, messages, stream, reasoning_effort
+                case max_completion_tokens = "max_completion_tokens"
+            }
         }
         let requestBody = RequestBody(
             model: "gpt-5.5",
             messages: [Message(role: "user", content: prompt)],
             stream: true,
-            reasoning_effort: "low"
+            reasoning_effort: "low",
+            max_completion_tokens: 1500
         )
 
         guard !AppSecrets.appSharedSecret.isEmpty else {
@@ -98,7 +119,7 @@ Diary Entries:
 
         Log.info("[OpenAIService] 发送流式请求，模型: \(requestBody.model), stream: \(requestBody.stream)", category: .ai)
 
-        // **与 streamChat 相同的去重保护**：NarrativeReader 直接把每个 onChunk 累加进 buffer，
+        // **与 streamChat 相同的去重保护**：NarrativeSummaryCard / NarrativePrecomputeService 直接把每个 onChunk 累加进 buffer，
         // 一旦断流后 NetworkRetryHelper 整段回放，生成的故事会出现前缀重复。一次成功 yield 过 chunk 后
         // 不允许重试，直接吐截断标记收尾。
         var hasEmittedAnyChunk = false
@@ -138,16 +159,21 @@ Diary Entries:
                         decoder: self.jsonDecoder
                     ) {
                         try Task.checkCancellation()
+                        // **P1 fix (2026-05-13 superreview round 2)**:OpenAI SSE 最后一条 chunk
+                        // 才带 `finish_reason`。原顺序"先 check truncated → return"会丢弃当条 chunk
+                        // 的 `delta.content` —— 命中 `finish_reason=length`(`max_completion_tokens=1500`
+                        // 撞上限是常见路径)时,模型最末一段 + `[BODY]` marker 都进不了 splitter →
+                        // 走 fallbackHeadline 路径 headline 永久丢。先 yield chunk 再 emit truncated。
+                        if let content = streamResp.choices.first?.delta?.content, !content.isEmpty {
+                            chunkCount += 1
+                            hasEmittedAnyChunk = true
+                            await MainActor.run { onEvent(.chunk(content)) }
+                        }
                         if streamResp.hasTruncatedFinish {
                             let reason = NSLocalizedString("stream.truncated.report", comment: "Report truncated marker")
                             didEmitTerminalStreamEvent = true
                             await MainActor.run { onEvent(.truncated(reason: reason)) }
                             return
-                        }
-                        if let content = streamResp.choices.first?.delta?.content, !content.isEmpty {
-                            chunkCount += 1
-                            hasEmittedAnyChunk = true
-                            await MainActor.run { onEvent(.chunk(content)) }
                         }
                     }
                     Log.info("[OpenAIService] 字节流处理完成，总共收到 \(chunkCount) 个内容块", category: .ai)
@@ -276,15 +302,17 @@ Diary Entries:
             let task = Task {
                 let isZh = question.containsChinese
                 let contextBlock = entries.prefix(8).map { entry in
-                    "[id:\(entry.id.uuidString.prefix(6)) date:\(Self.shortDate(entry.date)) mood:\(Int(entry.moodValue*100))]\n\(entry.text)"
+                    "[id:\(entry.id.uuidString.prefix(6)) date:\(Self.shortDate(entry.date)) mood:\(Self.qualitativeMoodLabel(entry.moodValue, isZh: isZh))]\n\(entry.text)"
                 }.joined(separator: "\n---\n")
 
                 let prompt: String
                 if isZh {
                     prompt = """
-                    你是一位温和、擅长倾听的私人回顾助手。下面是用户的几条相关日记片段（[]里是元数据），
-                    请基于这些日记真诚、具体地回答用户的问题。引用具体日期或情绪分数时请自然融入表达，
-                    不要暴露 id 编号，也不要编造未出现的内容。如果证据不足，请直说并建议用户多写一些。
+                    你是一位温和、擅长倾听的私人回顾助手。下面是用户的几条相关日记片段（[]里是元数据，
+                    包含 mood 定性标签仅供你内部参考用户当时的情绪基调）。请基于这些日记真诚、具体地回答
+                    用户的问题。引用具体日期请自然融入表达。**不要把元数据括号直接复述出来**;要谈情绪请用
+                    自然语言（"那天你比较低落"、"心情比平时好"）。不要暴露 id 编号,也不要编造未出现
+                    的内容。如果证据不足，请直说并建议用户多写一些。
 
                     相关日记：
                     \(contextBlock)
@@ -294,9 +322,12 @@ Diary Entries:
                 } else {
                     prompt = """
                     You are a gentle, attentive personal-reflection assistant. Below are the user's most
-                    relevant diary excerpts ([]-bracketed is metadata). Answer their question honestly
-                    and specifically, weaving in real dates and mood scores naturally. Do not expose
-                    raw ids. Do not invent content. If evidence is thin, say so and suggest journaling more.
+                    relevant diary excerpts ([]-bracketed is metadata, including a qualitative `mood` label for
+                    your internal reference only). Answer their question honestly and specifically,
+                    weaving in real dates naturally. **Do not echo the metadata bracket verbatim.**
+                    When you discuss feelings, use natural language ("you felt low that day",
+                    "your mood was brighter than usual"). Do not expose raw ids. Do not invent content.
+                    If evidence is thin, say so and suggest journaling more.
 
                     Relevant entries:
                     \(contextBlock)
@@ -321,6 +352,21 @@ Diary Entries:
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: date)
+    }
+
+    private static func qualitativeMoodLabel(_ value: Double, isZh: Bool) -> String {
+        switch value {
+        case ..<0.35:
+            return isZh ? "偏低" : "low"
+        case 0.35..<0.45:
+            return isZh ? "有点低" : "slightly low"
+        case 0.45...0.55:
+            return isZh ? "平稳" : "steady"
+        case 0.55..<0.70:
+            return isZh ? "偏好" : "brighter"
+        default:
+            return isZh ? "很好" : "very positive"
+        }
     }
 
     /// 低层流式 chat（**结构化事件版本**）：把 SSE 解析成 `StreamEvent` 流。
@@ -399,15 +445,18 @@ Diary Entries:
                                 decoder: self.jsonDecoder
                             ) {
                                 try Task.checkCancellation()
+                                // **P1 fix (2026-05-13 superreview round 2)** — 同 generateReportFromData。
+                                // OpenAI SSE 最后一条 chunk 才带 finish_reason,先 yield 当条 content 再
+                                // emit truncated,避免丢最末一段。
+                                if let content = streamResp.choices.first?.delta?.content, !content.isEmpty {
+                                    hasEmittedAnyChunk = true
+                                    continuation.yield(.chunk(content))
+                                }
                                 if streamResp.hasTruncatedFinish {
                                     let reason = NSLocalizedString("stream.truncated.answer", comment: "Answer truncated marker")
                                     didEmitTerminalStreamEvent = true
                                     continuation.yield(.truncated(reason: reason))
                                     return
-                                }
-                                if let content = streamResp.choices.first?.delta?.content, !content.isEmpty {
-                                    hasEmittedAnyChunk = true
-                                    continuation.yield(.chunk(content))
                                 }
                             }
                         } catch {

@@ -68,6 +68,9 @@ struct ImageViewerView: View {
                 HStack {
                     Spacer()
                     Button {
+                        #if canImport(UIKit)
+                        HapticManager.shared.impact(.light)
+                        #endif
                         isPresented = false
                     } label: {
                         Image(systemName: "xmark.circle.fill")
@@ -158,6 +161,9 @@ struct ImageViewerView: View {
                 }
                 isDismissDragging = false
                 if value.translation.height > Self.dismissThreshold {
+                    #if canImport(UIKit)
+                    HapticManager.shared.impact(.light)
+                    #endif
                     isPresented = false
                 } else {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
@@ -292,6 +298,9 @@ private struct ImageViewerPage: View {
     }
 
     private func handleDoubleTap() {
+        #if canImport(UIKit)
+        HapticManager.shared.impact(.light)
+        #endif
         withAnimation(.spring()) {
             if scale > 1 {
                 scale = 1

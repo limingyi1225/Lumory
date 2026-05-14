@@ -3,39 +3,58 @@ import CoreData
 
 // MARK: - InsightsView
 //
-// Phase 1 主入口。一屏式滚动：时段选择器 → MoodStoryChart → ThemeCardList
-// → CorrelationChipList → WritingHeatmap → Narrative CTA。
+// Insights 主入口。一屏式滚动：NarrativeSummaryCard → WritingHeatmap
+// → ThemeCardList → AskPast preset chips。
 // 所有数据源自 InsightsEngine，TimeRange 切换会重新拉所有模块。
 
 struct InsightsView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
+    /// iPad / regular size class 下 lumoryAdaptiveModal 走 fullScreenCover 没有下拉手势,
+    /// 必须保留小关闭按钮。iPhone compact 删 toolbar,纯下拉手势。
+    @Environment(\.horizontalSizeClass) private var hSizeClass
 
-    // 默认 `.all` —— 用户直觉上打开 Insight 想看"我的总体主题/总体情绪"，而不是限定月视角。
-    // 需要聚焦近期时再手动切到月/季/年。
-    @State private var range: TimeRange = .all
+    // 默认 `.month`(2026-05-14 用户决定:进 Insights 默认看最近 30 天,而非全部时间)。
+    // 用户切换后持久化,后续恢复上次选择。**key 从 v1 → v2**:旧 install 把上次选择持久化成
+    // 了 `.all`,不 bump key 的话改默认对老用户不生效;bump 让所有 install 重置到新默认 `.month`。
+    @AppStorage("insights.lastRange.v2", store: AppGroup.userDefaults) private var storedRangeRaw: String = TimeRange.month.rawValue
+    @State private var range: TimeRange = .month
+    @State private var didHydrateStoredRange = false
 
     // 各模块数据
-    @State private var moodPoints: [InsightsEngine.MoodPoint] = []
     @State private var themes: [InsightsEngine.Theme] = []
-    @State private var stats: InsightsEngine.WritingStats = .empty
     @State private var dailyCells: [DailyCell] = []
     @State private var dailyCellsCache: [String: [DailyCell]] = [:]
-    @State private var facts: [CorrelationFact] = []
+    /// 行动区 preset chip 文案 — 走 PromptSuggestionEngine.shared.current.askPastPresets,
+    /// 跟 AskPastView 共用同一份 cache。空 = 隐整个 chip 区(冷启动/总 entries<3 时);
+    /// 有值 = 显最多 3 条(tap 直接走 InsightsView 的 askPastIntent → AskPastView auto-submit)。
+    @State private var presetChips: [String] = []
+    /// 浓缩卡专用 — `writingStats.totalEntries` 是全局,不是当前 range;`dailyCells` 是
+    /// heatmap 22 周窗口,无序;所以单独走 `engine.entryCount(in:)`。
+    /// **Optional 当 loading sentinel**:nil = reload 还没拿到这次 range 的 narrative inputs
+    /// (上次 range 的旧值无效);`Some(0)` = 真值 = 该 range 内无日记 → 卡走"日记太少"empty。
+    /// 这样既解决"切 range cache 命中时 stale props"(SWR 命中后数据立即
+    /// 触发,但 entryCount 还是上次的),也避免"空库时 0 跟 sentinel 冲突永远 skeleton"。
+    @State private var rangeEntryCount: Int?
+    @State private var rangeMostRecentEntryDate: Date?
 
-    @State private var isLoadingCharts = false
     @State private var isLoadingThemes = false
-    @State private var showNarrative = false
-    @State private var showAskPast = false
-    /// wave12-3 历史回顾 sheet
-    @State private var showHistory = false
+    /// AskPastView modal 入口 — item: 模式带 initialQuestion payload。
+    /// chip tap 时设 `AskPastIntent(initialQuestion: question)`,AskPastView `.task` 内
+    /// 自动 submit。nil = sheet 关闭。
+    @State private var askPastIntent: AskPastIntent?
     @State private var themeFilter: InsightsEngine.Theme?
     @State private var themeToDelete: InsightsEngine.Theme?
     @State private var isDeletingTheme = false
     @State private var deleteFailureMessage: String?
     @State private var themeToMerge: InsightsEngine.Theme?
-    @State private var selectedPoint: InsightsEngine.MoodPoint?
-    @State private var selectedPointBucket: InsightsEngine.Bucket = .day
+    // wave17 简化(superreview P1-7/P1-8):MoodStoryChart 删除后 caller 只塞 .day,
+    // bucket / MoodPoint 退化成 single-Date 入参。PointDetailSubject(date wrapper)
+    // 让 .lumoryAdaptiveModal(item:) 仍能用 Identifiable 路径。
+    @State private var selectedDay: PointDetailSubject?
+    /// chip header 右上角 refresh 按钮的 loading flag。tap → forceRefresh → 完成后回填。
+    /// refresh 期间老 chip 仍可见,只把 icon 换成 ProgressView,不闪空 / 不闪 skeleton。
+    @State private var isRefreshingChips: Bool = false
 
     // P0-2 toast 已迁到全局 LumoryToastCenter,旧 local toastMessage / toastTask state 删除。
 
@@ -51,33 +70,31 @@ struct InsightsView: View {
                 // 显著降低滚动时的掉帧。Apple 在 Liquid Glass 文档里明确建议大批量玻璃叠放时必用。
                 GlassEffectContainer(spacing: 16) {
                     LazyVStack(spacing: 16) {
-                        rangeSelector
-                            .padding(.horizontal, 16)
-                            .padding(.top, 8)
-
-                        MoodStoryChart(
-                            points: moodPoints,
-                            bucket: range.chartBucket,
-                            isLoading: isLoadingCharts,
-                            onTapPoint: { point in
-                                selectedPointBucket = range.chartBucket
-                                selectedPoint = point
-                            }
-                        )
-                        .padding(.horizontal, 16)
-
-                        CalendarMonthModule(cells: dailyCells) { date in
-                            let day = Calendar.current.startOfDay(for: date)
-                            guard let cell = dailyCells.first(where: { Calendar.current.isDate($0.date, inSameDayAs: day) }) else { return }
-                            selectedPointBucket = .day
-                            selectedPoint = InsightsEngine.MoodPoint(
-                                date: day,
-                                mood: cell.mood,
-                                entryCount: 1
+                        // wave15 v3 — Narrative 浓缩卡升为页面第一个内容(rangeSelector 挪到
+                        // navbar .principal toolbar slot,见 .toolbar { } 块)。"AI 替你读完
+                        // 先给结论"作为情感性开场,工具控件不抢戏 — Apple Photos / Music
+                        // 同款 pattern。reload 拿到本次 range 真值前用 skeleton 占位
+                        // (Optional sentinel — 0 也是合法值表示空库,卡内会走 entryCount < 3 路径)。
+                        if let entryCount = rangeEntryCount {
+                            NarrativeSummaryCard(
+                                range: range,
+                                dateInterval: range.dateInterval,
+                                entryCount: entryCount,
+                                mostRecentEntryDate: rangeMostRecentEntryDate,
+                                engine: engine
                             )
+                        } else {
+                            SkeletonNarrativeSummaryCard()
                         }
-                        .padding(.horizontal, 16)
 
+                        // MoodStoryChart 整块删除(用户决定 2026-05-12)— "情绪故事"
+                        // chart 信息密度低,Y 轴 + 折线对长期日记用户 read-once 后没新意,
+                        // 还跟下面 WritingHeatmap 的 mood 色信号重复(都告诉你"哪天什么心情")。
+
+                        // wave17 顺序调换(2026-05-13)— ThemeCardList 从 heatmap 下移到上方:
+                        // theme 是用户最关心的"我最近在想啥"语义信号,2×2 page-chunked LazyHStack 翻页
+                        // 本身更像 hero dashboard 内容;heatmap 是辅助节奏感知(回头看自己几天写一次),
+                        // 优先级低于 theme,放下面让用户先 scan theme 再回顾节奏。
                         ThemeCardList(
                             themes: themes,
                             isLoading: isLoadingThemes,
@@ -86,70 +103,84 @@ struct InsightsView: View {
                             onMergeRequest: { theme in themeToMerge = theme }
                         )
 
-                        CorrelationChipList(
-                            facts: facts,
-                            isLoading: isLoadingCharts && facts.isEmpty
-                        )
+                        // wave14 — CalendarMonthModule 删除,WritingHeatmap 上移继承
+                        // tap-day 行为(短按 / 长按拖动选择,见 WritingHeatmap onSelectDay)。
+                        WritingHeatmap(cells: dailyCells) { date in
+                            let day = Calendar.current.startOfDay(for: date)
+                            // 检查该天确实有 cell(否则 heatmap 触发空白格子时不弹 sheet)。
+                            guard dailyCells.contains(where: { Calendar.current.isDate($0.date, inSameDayAs: day) }) else { return }
+                            selectedDay = PointDetailSubject(id: day)
+                        }
                         .padding(.horizontal, 16)
 
-                        WritingHeatmap(stats: stats, cells: dailyCells)
-                            .padding(.horizontal, 16)
-
-                        narrativeCTA
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 32)
+                        // 行动区 — 把 AskPastView 内的 preset 问题直接放到页面最底,用户不用
+                        // 进 AskPast 就能看见"可以问什么"。chip tap → askPastIntent 设 payload →
+                        // AskPastView 出场 `.task` 内自动 submit,跳过 empty 态。
+                        if !presetChips.isEmpty {
+                            presetChipsBlock
+                                .padding(.horizontal, 16)
+                                // heatmap ↔ chips 之前只有 LazyVStack 的 16pt,比上面几处
+                                // (Narrative/Theme/Heatmap 之间 ≈40pt)明显紧。+8 → 24pt 让节奏匀一点。
+                                .padding(.top, 8)
+                                .padding(.bottom, 32)
+                        } else {
+                            // 没 chip 时也给 ScrollView 一个底部 spacer,防 ThemeCardList 紧贴 home indicator。
+                            Color.clear.frame(height: 32)
+                        }
                     }
                 }
                 .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.insightsContentMaxWidth)
             }
             // iOS 26 顶部边缘软渐隐 — Insights 滚动顶部跟 large title 过渡更自然。
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .accessibilityIdentifier("insightsRootScrollView")
             .scrollIndicators(.hidden)
-            .navigationTitle(NSLocalizedString("洞察", comment: "Insights"))
+            // wave15 v2 — 删 navigationTitle("洞察")。这页主角是 NarrativeSummaryCard
+            // 浓缩卡 + 各模块图表,加个页面标题反而抢戏。空 title + inline mode 仍保留 navbar
+            // chrome 给 iPad close button 用。
+            .navigationTitle("")
             #if canImport(UIKit)
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(NSLocalizedString("关闭", comment: "Close")) { dismiss() }
+                // wave15 v3 — rangeSelector 挪进 navbar .principal slot(原在 LazyVStack
+                // 顶部当作"页面第一个元素",但 segmented picker 当头条太工具感,把页面情感
+                // 性洞察的开场抢了)。Apple Photos / Music 同款 — picker 在 navbar 居中,
+                // 始终可达(scroll 时 navbar fixed 不缩),narrative 卡升为页面第一内容。
+                // **限宽 260pt**:segmented 默认 maxWidth=.infinity 会贪满中央 slot,挤压
+                // iPad close button 或两侧 system gutter。260pt 容下 4 个 shortLabel 等宽分配。
+                ToolbarItem(placement: .principal) {
+                    rangeSelector
+                        .frame(maxWidth: hSizeClass == .regular ? 320 : 260)
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    Menu {
-                        Button {
-                            showAskPast = true
-                        } label: {
-                            Label(NSLocalizedString("开始回顾", comment: "Start ask past"), systemImage: "bubble.left.and.text.bubble.right")
+                // iPhone compact 走 sheet 有下拉手势 dismiss,不需 close button。
+                // iPad / regular size class 走 fullScreenCover 没下拉手势,留小关闭按钮兜底。
+                if hSizeClass == .regular {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.secondary)
                         }
-                        Button {
-                            showHistory = true
-                        } label: {
-                            Label(NSLocalizedString("历史回顾", comment: "Conversation history"), systemImage: "clock.arrow.circlepath")
-                        }
-                    } label: {
-                        Label(NSLocalizedString("回顾", comment: "Ask your past"), systemImage: "bubble.left.and.text.bubble.right")
+                        .accessibilityLabel(NSLocalizedString("关闭", comment: "Close"))
                     }
-                    .accessibilityLabel(NSLocalizedString("与过去对话", comment: "Accessibility: Ask Your Past"))
                 }
+            }
+            .onAppear {
+                guard !didHydrateStoredRange else { return }
+                didHydrateStoredRange = true
+                range = TimeRange(rawValue: storedRangeRaw) ?? .month
             }
             .task(id: range) { await reload() }
             .onReceive(NotificationCenter.default.publisher(for: .themeAliasMapDidChange)) { _ in
                 // 用户合并/拆分别名后,主题卡片要立刻按新 canonical 重聚合。
                 Task { await reload() }
             }
-            .fullScreenCover(isPresented: $showNarrative) {
-                NarrativeReader(
-                    range: range.dateInterval,
-                    title: narrativeTitle,
-                    engine: engine,
-                    moodHint: stats.avgMood
-                )
-            }
-            .lumoryAdaptiveModal(isPresented: $showAskPast, interactiveDismissDisabled: true) {
-                AskPastView()
-                    .environment(\.managedObjectContext, viewContext)
-            }
-            .lumoryAdaptiveModal(isPresented: $showHistory) {
-                ConversationHistoryView()
+            // wave14 — 允许下滑手势关闭(原 interactiveDismissDisabled: true 屏蔽过)。
+            // AskPastView dismiss 时已自带 cancel stream task 逻辑(见其 cancellation button),
+            // 下滑关闭走 .onDisappear 也会取消,不会泄漏 in-flight task。
+            .lumoryAdaptiveModal(item: $askPastIntent) { intent in
+                AskPastView(initialQuestion: intent.initialQuestion)
                     .environment(\.managedObjectContext, viewContext)
             }
             .lumoryAdaptiveModal(item: $themeFilter) { theme in
@@ -171,10 +202,9 @@ struct InsightsView: View {
                 )
                 .environment(\.managedObjectContext, viewContext)
             }
-            .lumoryAdaptiveModal(item: $selectedPoint) { point in
+            .lumoryAdaptiveModal(item: $selectedDay) { subject in
                 PointDetailSheet(
-                    point: point,
-                    bucket: selectedPointBucket,
+                    date: subject.date,
                     onEntryDeleted: {
                         reloadAfterChildEntryDelete()
                     }
@@ -291,45 +321,109 @@ struct InsightsView: View {
         .labelsHidden()
         .accessibilityLabel(NSLocalizedString("时间范围", comment: "Time range picker"))
         .onChange(of: range) { _, _ in
+            storedRangeRaw = range.rawValue
             HapticManager.shared.impact(.soft)
         }
     }
 
-    // MARK: Narrative CTA
+    // MARK: AskPast preset chips (行动区)
 
-    private var narrativeCTA: some View {
-        Button {
-            HapticManager.shared.impact(.medium)
-            showNarrative = true
-        } label: {
-            HStack(spacing: 12) {
+    /// 把 AskPastView 的 preset 问题平铺到 Insights 页面最底。用户决定 2026-05-12 改 iOS 26
+    /// 原生 `.buttonStyle(.glass)`:每 chip 一颗系统玻璃药丸,抹掉自定义 liquidGlassCard 形状
+    /// 不齐的"歪七扭八"问题。容器卡也撤掉 — 系统 .glass 自带形状/阴影,再套 insightsCard 会
+    /// 双重玻璃。Header(sparkles + hint + refresh)裸渲染在 chip 上方作 section caption。
+    /// tap chip → set askPastIntent payload → AskPastView modal 出场 `.task` 自动 submit。
+    /// 跟 AskPastView 内 presetGrid 共用同一份 SuggestionBundle cache,语料一致。
+    private var presetChipsBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Header inline — 不挂卡 chrome,只是上方的 caption。
+            HStack(spacing: 6) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 22))
-                    .symbolRenderingMode(.hierarchical)
+                    .font(.caption)
                     .foregroundStyle(Color.accentColor)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(String(format: NSLocalizedString("生成%@故事", comment: "Generate story for range"), range.shortLabel))
-                        .font(.system(size: 16, weight: .semibold))
-                    Text(NSLocalizedString("AI 为你读这段时间的日记，讲成一篇文章", comment: "Narrative CTA subtitle"))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                Text(NSLocalizedString("insights.action.tryHint", comment: "Preset chip section header"))
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Image(systemName: "arrow.right.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(Color.accentColor)
+                chipsRefreshButton
             }
-            .padding(16)
-            .foregroundStyle(Color.primary)
-            .liquidGlassCard(cornerRadius: 18, tint: Color.accentColor, tintStrength: 0.1, interactive: true)
-            .shadow(color: Color.accentColor.opacity(0.15), radius: 10, y: 4)
+            .padding(.horizontal, 6)
+
+            // 多个相邻 glass 元素归同一个 GlassEffectContainer,折射合批,边缘观感统一
+            // (跟 AskPastView 内 presetGrid 同 idiom)。spacing 10pt 让相邻 chip 间有清晰间隙。
+            GlassEffectContainer(spacing: 10) {
+                VStack(spacing: 10) {
+                    // **P2 fix (2026-05-13 superreview)**:`PromptSuggestionEngine` 偶尔吐出
+                    // 重复 chip text(LLM 输出非确定),`id: \.self` 让 String 当 id → 同 chip
+                    // 渲染冲突。改 enumerated offset 当稳定 id。
+                    ForEach(Array(presetChips.prefix(3).enumerated()), id: \.offset) { offset, question in
+                        presetChipButton(question, index: offset)
+                    }
+                }
+            }
         }
-        .buttonStyle(PressableScaleButtonStyle())
-        .accessibilityHint(NSLocalizedString("打开全屏故事阅读器", comment: "Narrative CTA a11y hint"))
+        // 整块 a11y container — UI test 走 chip 自己的 label 定位,这里挂兜底 hint。
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(NSLocalizedString("与过去对话", comment: "Accessibility: Ask Your Past"))
     }
 
-    private var narrativeTitle: String {
-        String(format: NSLocalizedString("%@回顾", comment: "Range retrospective title"), range.shortLabel)
+    /// header 右上角 refresh icon — `isRefreshingChips` 期间换成小 ProgressView。
+    /// AskPastView 的 presetGrid 内有同 idiom(line 144),保持视觉一致。
+    @ViewBuilder
+    private var chipsRefreshButton: some View {
+        if isRefreshingChips {
+            ProgressView()
+                .scaleEffect(0.55)
+                .frame(width: 18, height: 18)
+        } else {
+            Button {
+                Task { await regenerateChips() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18, alignment: .center)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(NSLocalizedString("换一组", comment: "Refresh presets"))
+        }
+    }
+
+    /// 单颗 chip = iOS 26 `.buttonStyle(.glass)` 原生玻璃药丸。Apple 系统层处理形状 / 阴影 /
+    /// hover / press,我们只给 label 内容(问题文本 + 右上箭头)。
+    private func presetChipButton(_ question: String, index: Int) -> some View {
+        Button {
+            HapticManager.shared.impact(.light)
+            askPastIntent = AskPastIntent(initialQuestion: question)
+        } label: {
+            HStack(spacing: 10) {
+                Text(question)
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "arrow.up.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 2)
+        }
+        .buttonStyle(.glass)
+        .accessibilityLabel(question)
+        .accessibilityIdentifier("insightsAskPastPresetChip\(index)")
+    }
+
+    /// 用户点 chip 区 refresh icon → 同 AskPastView.regeneratePresets 逻辑:
+    /// forceRefresh AI 一次 + 完后回填 prefix(3)。期间老 chip 仍在,仅 icon 转 ProgressView。
+    private func regenerateChips() async {
+        isRefreshingChips = true
+        _ = await PromptSuggestionEngine.shared.forceRefresh()
+        if let bundle = PromptSuggestionEngine.shared.current, !bundle.askPastPresets.isEmpty {
+            presetChips = Array(bundle.askPastPresets.prefix(3))
+        }
+        isRefreshingChips = false
     }
 
     // MARK: Data loading
@@ -343,16 +437,19 @@ struct InsightsView: View {
 
         // SWR: 命中缓存 → 立刻显示旧数据,跳过 loading skeleton。
         // 后台仍跑 reload,完成后用新数据覆盖。详见 InsightsResultCache.swift 注释。
+        // wave15 v3 — entryCount/mostRecent 也走 SWR(原入口强制 reset nil 导致命中
+        // 仍走 SkeletonNarrativeSummaryCard 中间态,LazyVStack reflow → 切 range 闪烁)。
+        // 命中即 hydrate 全套,只在真 cache miss 才走 nil + Skeleton 路径。
         if let cached = InsightsResultCache.shared.snapshot(for: range) {
-            self.moodPoints = cached.moodPoints
             self.themes = cached.themes
-            self.stats = cached.stats
             self.dailyCells = cached.dailyCells
-            self.facts = cached.facts
-            self.isLoadingCharts = false
+            self.rangeEntryCount = cached.entryCount
+            self.rangeMostRecentEntryDate = cached.mostRecentEntryDate
             self.isLoadingThemes = false
         } else {
-            isLoadingCharts = true
+            // cache miss(第一次切到这个 range)→ 真值还要等 async,显 Skeleton 占位。
+            rangeEntryCount = nil
+            rangeMostRecentEntryDate = nil
             isLoadingThemes = true
         }
 
@@ -363,14 +460,20 @@ struct InsightsView: View {
         // 让后续 stages 直接 bail。loadToken 旧逻辑保留作"写 UI 前再 stale-check"防线。
         if Task.isCancelled { return }
 
-        async let pointsTask = engine.moodSeries(in: interval, bucket: range.chartBucket)
+        // MoodStoryChart 删除后,pointsTask 一并退出 — 不再发 moodSeries 请求,
+        // 省一次 bg fetch + reduce 聚合。PointDetailSheet wave17 API 改 (date:onEntryDeleted:),
+        // 只走 heatmap tap → selectedDay = PointDetailSubject(id: day) 的路径。
         // 主题卡限制 5 太少 —— 用户重度使用后 distinct 主题 >50,只看 top 5 体感"内容量薄"。
         // 30 是横向滚多过 1-2 屏的合理上限,继续拉大对感知没增益但内存压力上升。
         async let themesTask = engine.themes(in: interval, limit: 30)
-        async let statsTask = engine.writingStats()
         async let cellsTask = fetchDailyCells(in: interval)
+        // wave14 — 浓缩卡的 staleness 判定基础:writingStats.totalEntries 是全局,dailyCells
+        // 是 22 周窗口,都不能用作"当前 range 的真实 entryCount/mostRecent"。
+        async let entryCountTask = engine.entryCount(in: interval)
+        async let mostRecentDateTask = engine.mostRecentEntryDate(in: interval)
 
-        let (points, loadedThemes, loadedStats, loadedCells) = await (pointsTask, themesTask, statsTask, cellsTask)
+        let (loadedThemes, loadedCells, loadedEntryCount, loadedMostRecent) =
+            await (themesTask, cellsTask, entryCountTask, mostRecentDateTask)
 
         // 子任务都返回后,如果外层已被 cancel,token 已经被新 reload 推进了,直接 return
         // 让新 reload 接管 UI 状态(它自己的 isLoading/UUID 都已置好)。
@@ -382,25 +485,53 @@ struct InsightsView: View {
         // 由它自己的结尾负责清 false。老 reload 若在这里抢先清 false,新 reload 还没返回,
         // UI 会出现"已加载 → 又加载中"的视觉抖动。
         guard token == loadToken else { return }
-        let newFacts = CorrelationFactGenerator.generate(points: points, themes: loadedThemes, stats: loadedStats)
-        self.moodPoints = points
         self.themes = loadedThemes
-        self.stats = loadedStats
         self.dailyCells = loadedCells
-        self.facts = newFacts
-        self.isLoadingCharts = false
+        self.rangeEntryCount = loadedEntryCount
+        self.rangeMostRecentEntryDate = loadedMostRecent
         self.isLoadingThemes = false
 
         InsightsResultCache.shared.update(
             .init(
-                moodPoints: points,
                 themes: loadedThemes,
-                stats: loadedStats,
                 dailyCells: loadedCells,
-                facts: newFacts
+                entryCount: loadedEntryCount,
+                mostRecentEntryDate: loadedMostRecent
             ),
             for: range
         )
+
+        // 行动区 chip 跟主 reload 并行 hydrate(不阻塞主数据)。命中 cache 立即填,miss 静默
+        // 后台 refreshIfNeeded → 几百 ms 后回填。chip 没显出来主页面也照常用,只是少个 affordance。
+        updatePresetChipsFromCache()
+    }
+
+    /// 从 PromptSuggestionEngine 拿 askPastPresets,跟 AskPastView 内 presetGrid 共用同一份
+    /// SuggestionBundle cache(同 PromptSuggestionEngine.shared.current)。命中 → 立即填;
+    /// miss → utility 优先级后台 refreshIfNeeded,跑完回填。
+    /// **不阻塞主 reload**:chip 是辅助 affordance,主页面没 chip 也能滚 narrative / chart / 主题。
+    private func updatePresetChipsFromCache() {
+        let cachedChips = Self.presetChipQuestions(from: PromptSuggestionEngine.shared.current)
+        if !cachedChips.isEmpty {
+            presetChips = cachedChips
+            return
+        }
+        // **P1 fix (2026-05-14 superreview round 3)**:cache 空时立即清掉旧 presetChips。
+        // 单删走 `PromptSuggestionEngine.clearCache()` 后 cache 为空,但若不清 UI state,
+        // 后台 refresh 失败 / 因 <3 条跳过时,页面会继续显示引用已删 entry 的旧问题。
+        presetChips = []
+        Task(priority: .utility) { @MainActor in
+            await PromptSuggestionEngine.shared.refreshIfNeeded()
+            let refreshedChips = Self.presetChipQuestions(from: PromptSuggestionEngine.shared.current)
+            if !refreshedChips.isEmpty {
+                presetChips = refreshedChips
+            }
+        }
+    }
+
+    static func presetChipQuestions(from bundle: SuggestionBundle?) -> [String] {
+        guard let bundle, !bundle.askPastPresets.isEmpty else { return [] }
+        return Array(bundle.askPastPresets.prefix(3))
     }
 
     private func reloadAfterChildEntryDelete() {
@@ -493,20 +624,18 @@ struct InsightsView: View {
     }
 }
 
+// MARK: - AskPastIntent
+
+/// `lumoryAdaptiveModal(item:)` 的 payload。每次创建换 UUID,即便同一 question 也能让 modal
+/// 重新 present(用户连点同一个 chip 时第二次也响应)。`initialQuestion: nil` 走 empty 入口
+/// (目前没有这种 caller,但保留 None 路径方便未来加"自由提问"入口)。
+private struct AskPastIntent: Identifiable {
+    let id = UUID()
+    let initialQuestion: String?
+}
+
 private struct DailyAggregate {
     var moodSum = 0.0
     var count = 0
     var words = 0
-}
-
-extension InsightsEngine.WritingStats {
-    static let empty = InsightsEngine.WritingStats(
-        totalEntries: 0, currentStreak: 0, longestStreak: 0, totalWords: 0, avgMood: 0.5
-    )
-}
-
-// MARK: - MoodPoint Identifiable fallback
-
-extension InsightsEngine.MoodPoint {
-    // 已有 id: Date 实现；此处无需再扩展
 }

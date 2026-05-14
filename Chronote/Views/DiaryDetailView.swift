@@ -21,6 +21,7 @@ private func deleteDiaryDetailAttachmentFiles(imageFileNames: [String], audioFil
 struct DiaryDetailView: View {
     @ObservedObject var entry: DiaryEntry
     var startInEditMode: Bool = false
+    var onDeleted: (() -> Void)? = nil
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.aiService) private var aiService
@@ -80,6 +81,7 @@ struct DiaryDetailView: View {
             HapticManager.shared.impact(.medium)
             // 单删派生缓存清理统一走 EntryWipeOrchestrator。
             EntryWipeOrchestrator.performSingleDeleteCleanup()
+            onDeleted?()
 
             // 注册到 undo service + 弹带"撤销"按钮 toast。dismiss 后 root overlay / 父视图 overlay
             // 接管 toast 渲染(InsightsView / Home 都已挂 lumoryToastOverlay)。
@@ -151,7 +153,7 @@ struct DiaryDetailView: View {
     var body: some View {
         Group {
             // Check if entry is still valid
-            if entry.managedObjectContext == nil {
+            if entry.managedObjectContext == nil || entry.isDeleted {
                 // Entry has been deleted, just show a placeholder
                 Text(NSLocalizedString("正在返回...", comment: "Returning message"))
                     .onAppear {
@@ -160,19 +162,24 @@ struct DiaryDetailView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
+                        // iOS 26 极简三段式:
+                        // 1. 顶部 hero — 日期 + 心情 + 摘要(一句话定调)
+                        // 2. 主体 — 正文 + 录音 + 照片(连贯的日记内容,无 section label)
+                        // 3. 底部 footer — AI 抽出的主题 chip(元数据,弱化)
+                        // 录音排在照片前:语音日记往往是正文思绪延伸,照片是独立视觉记忆。
                         heroHeader
                         if isEditing {
                             moodEditorBlock
                         }
                         summaryBlock
-                        themesSection
                         entryBodyBlock
-                        if !entry.imageFileNameArray.isEmpty {
-                            photosBlock
-                        }
                         if let audioFileName = entry.audioFileName, let audioURL = entry.audioURL() {
                             audioBlock(audioFileName: audioFileName, audioURL: audioURL)
                         }
+                        if !entry.imageFileNameArray.isEmpty {
+                            photosBlock
+                        }
+                        themesSection
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 18)
@@ -204,6 +211,7 @@ struct DiaryDetailView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if isEditing {
                         Button(NSLocalizedString("保存", comment: "Save button")) {
+                            HapticManager.shared.impact(.light)
                             saveChanges()
                         }
                         .fontWeight(.semibold)
@@ -257,8 +265,11 @@ struct DiaryDetailView: View {
             .lumoryToastOverlay()
             .navigationBarBackButtonHidden(isEditing)
             .interactiveDismissDisabled(isEditing && hasUnsavedChanges)
+            // **P2 fix (2026-05-13 superreview round 2)**:fullScreenCover dismiss 后 `viewerImages`
+            // 仍持有 5 张 12MP HEIC ≈ 25MB 常驻 parent State,InsightsView 滚动时长期占用峰内存。
+            // onDismiss 显式清空让 Swift ARC 回收 Data buffer。
             #if os(iOS)
-            .fullScreenCover(isPresented: $showImageViewer) {
+            .fullScreenCover(isPresented: $showImageViewer, onDismiss: { viewerImages = [] }) {
                 if !viewerImages.isEmpty {
                     ImageViewerView(
                         images: viewerImages,
@@ -268,7 +279,7 @@ struct DiaryDetailView: View {
                 }
             }
             #else
-            .sheet(isPresented: $showImageViewer) {
+            .sheet(isPresented: $showImageViewer, onDismiss: { viewerImages = [] }) {
                 if !viewerImages.isEmpty {
                     ImageViewerView(
                         images: viewerImages,
@@ -296,34 +307,33 @@ struct DiaryDetailView: View {
         }
     }
 
-    /// 主题来自 AI 自动抽取（写入/编辑后台流水线里 extractThemes），
-    /// 用户手动编辑主题容易污染聚合结果 —— 只做只读展示，非空才渲染。
-    /// 主题 chip 和 AI sparkles 都用**当天 mood 颜色**,跟页面顶部日期 / 主题左边的 mood accent 保持
-    /// 视觉统一(accent color 是 system 蓝,跟 mood 色脱节,看起来像两个色系)。
+    /// 主题来自 AI 自动抽取(写入/编辑后台流水线里 extractThemes),
+    /// 用户手动编辑主题容易污染聚合结果 —— 只做只读展示,非空才渲染。
+    /// 主题 chip 用**当天 mood 颜色**,跟页面顶部 mood 圆点 + 摘要竖条同一色系。
+    ///
+    /// **iOS 26 redesign**:去掉 "主题" + sparkles header,chip 直接展示在页面底部
+    /// 作为 footer 元数据。理由:themes 主要价值在 Insights 聚合,单条日记里它是
+    /// "AI 给这条日记打的标签",不需要标题引导;chip 视觉本身 self-explanatory。
+    /// a11y label 加在第一个 chip 上,告诉 VoiceOver 用户这是 AI 提取的标签组。
     @ViewBuilder
     private var themesSection: some View {
         let themes = entry.themeArray
         if !themes.isEmpty {
             let moodTint = Color.moodSpectrum(value: entry.moodValue)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    Text(NSLocalizedString("主题", comment: "Themes label"))
-                        .font(.title3)
-                        .fontWeight(.semibold)
-                    Image(systemName: "sparkles")
-                        .font(.caption2)
-                        .foregroundStyle(moodTint.opacity(0.85))
-                        .symbolRenderingMode(.hierarchical)
-                        .accessibilityLabel(NSLocalizedString("AI 自动提取", comment: "AI auto-extracted tag"))
-                }
-                FlowLayout(spacing: 8) {
-                    ForEach(themes, id: \.self) { theme in
-                        Text(theme)
-                            .font(.footnote)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .liquidGlassCapsule(tint: moodTint)
-                    }
+            FlowLayout(spacing: 8) {
+                // **P2 fix (2026-05-13 superreview)**:`DiaryEntry.themeArray` 不 dedup
+                // (Model/DiaryEntry+Extensions.swift:56-59 只 split+trim),legacy 或导入路径
+                // 可能落入重复 theme → `id: \.element` ForEach 报 id collision warning + 渲染
+                // 不稳。`id: \.offset` 用位置作 id,renaming/reorder 不破坏。
+                ForEach(Array(themes.enumerated()), id: \.offset) { index, theme in
+                    Text(theme)
+                        .font(.footnote)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .liquidGlassCapsule(tint: moodTint)
+                        .accessibilityLabel(index == 0
+                            ? String(format: NSLocalizedString("AI 提取的主题:%@", comment: "First theme chip a11y label"), theme)
+                            : theme)
                 }
             }
         }
@@ -362,7 +372,7 @@ struct DiaryDetailView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(formatDate(displayedDate))
-                        .font(.system(size: 22, weight: .semibold, design: .rounded))
+                        .font(LumoryFonts.diaryHeroTitle)
                     if isEditing {
                         Image(systemName: "calendar")
                             .font(.caption)
@@ -473,53 +483,50 @@ struct DiaryDetailView: View {
         }
     }
 
-    /// 正文：细标签 + 正文；编辑模式用 liquidGlassCard 做容器。
+    /// 正文。**iOS 26 redesign**:阅读态直接渲染 `.body`(17pt 语义字号,Dynamic Type 友好),
+    /// 不带 "记录" caption label —— 一坨正文本身就是日记内容,标签是多余 chrome。
+    /// 编辑态保留 caption label + TextEditor 大空白容器,让用户明确"在编辑哪个字段"。
     @ViewBuilder
     private var entryBodyBlock: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(NSLocalizedString("记录", comment: "Entry label"))
-                .font(.caption.weight(.semibold))
-                .textCase(.uppercase)
-                .tracking(0.8)
-                .foregroundStyle(.secondary)
-            if isEditing {
+        if isEditing {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(NSLocalizedString("记录", comment: "Entry label"))
+                    .font(.caption.weight(.semibold))
+                    .textCase(.uppercase)
+                    .tracking(0.8)
+                    .foregroundStyle(.secondary)
                 TextEditor(text: $editedText)
                     .frame(minHeight: 220)
-                    .font(.system(size: 17))
+                    .font(.body)
                     .lineSpacing(4)
                     .padding(10)
                     .scrollContentBackground(.hidden)
-                    .liquidGlassCard(cornerRadius: 14)
+                    .liquidGlassCard(cornerRadius: LumoryCornerRadius.card)
                     .onChange(of: editedText) { _, _ in hasUnsavedChanges = true }
-            } else {
-                Text(entry.wrappedText)
-                    .font(.system(size: 17))
-                    .lineSpacing(6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
             }
+        } else {
+            Text(entry.wrappedText)
+                .font(.body)
+                .lineSpacing(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
         }
     }
 
-    /// 照片：水平滚动 + 圆角 + 轻阴影。
+    /// 照片:水平滚动缩略图。**iOS 26 redesign**:无 "照片" caption label,
+    /// 缩略图视觉本身 self-evident,标签是多余 chrome。
     @ViewBuilder
     private var photosBlock: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(NSLocalizedString("照片", comment: "Photos label"))
-                .font(.caption.weight(.semibold))
-                .textCase(.uppercase)
-                .tracking(0.8)
-                .foregroundStyle(.secondary)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(Array(entry.imageFileNameArray.enumerated()), id: \.element) { index, fileName in
-                        photoThumbnail(fileName: fileName, index: index)
-                    }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(Array(entry.imageFileNameArray.enumerated()), id: \.offset) { index, fileName in
+                    photoThumbnail(fileName: fileName, index: index)
                 }
-                .padding(.vertical, 2)
             }
-            .frame(height: 136)
+            .padding(.vertical, 2)
         }
+        .frame(height: 136)
+        .accessibilityLabel(NSLocalizedString("照片", comment: "Photos a11y label"))
     }
 
     @ViewBuilder
@@ -532,58 +539,55 @@ struct DiaryDetailView: View {
         }
     }
 
-    /// 音频：大 play 按钮 + 进度条 + 时间。
+    /// 录音:大 play 按钮 + 进度条 + 时间。**iOS 26 redesign**:无 "录音" caption label,
+    /// play 按钮 + 波形进度条 + 时长读数本身就是 audio player 的通用视觉语言。
     @ViewBuilder
     private func audioBlock(audioFileName: String, audioURL: URL) -> some View {
         let isPlayingThis = audioPlaybackController.isPlaying && audioPlaybackController.currentPlayingFileName == audioFileName
-        VStack(alignment: .leading, spacing: 10) {
-            Text(NSLocalizedString("录音", comment: "Recording label"))
-                .font(.caption.weight(.semibold))
-                .textCase(.uppercase)
-                .tracking(0.8)
-                .foregroundStyle(.secondary)
-            HStack(spacing: 14) {
-                Button {
-                    playOrPauseAudio(url: audioURL, fileName: audioFileName)
-                } label: {
-                    Image(systemName: isPlayingThis ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 36))
-                        .foregroundStyle(entry.moodColor)
-                        .symbolRenderingMode(.hierarchical)
-                }
-                .buttonStyle(PlainButtonStyle())
+        HStack(spacing: 14) {
+            Button {
+                playOrPauseAudio(url: audioURL, fileName: audioFileName)
+            } label: {
+                Image(systemName: isPlayingThis ? "pause.circle.fill" : "play.circle.fill")
+                    .font(LumoryFonts.diaryImagePlaceholder)
+                    .foregroundStyle(entry.moodColor)
+                    .symbolRenderingMode(.hierarchical)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .accessibilityLabel(isPlayingThis
+                ? NSLocalizedString("暂停录音", comment: "Pause recording a11y")
+                : NSLocalizedString("播放录音", comment: "Play recording a11y"))
 
-                VStack(alignment: .leading, spacing: 6) {
-                    let isCurrentFile = audioPlaybackController.currentPlayingFileName == audioFileName
-                    let playbackTime = isCurrentFile ? audioPlaybackController.currentTime : 0
-                    let playbackDuration = isCurrentFile && audioPlaybackController.duration > 0
-                        ? audioPlaybackController.duration
-                        : displayableAudioDuration
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.secondary.opacity(0.18))
-                                .frame(height: 5)
-                            if isCurrentFile && displayableAudioDuration > 0 {
-                                Capsule()
-                                    .fill(entry.moodColor)
-                                    .frame(width: geo.size.width * audioPlaybackController.progress, height: 5)
-                            }
+            VStack(alignment: .leading, spacing: 6) {
+                let isCurrentFile = audioPlaybackController.currentPlayingFileName == audioFileName
+                let playbackTime = isCurrentFile ? audioPlaybackController.currentTime : 0
+                let playbackDuration = isCurrentFile && audioPlaybackController.duration > 0
+                    ? audioPlaybackController.duration
+                    : displayableAudioDuration
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.secondary.opacity(0.18))
+                            .frame(height: 5)
+                        if isCurrentFile && displayableAudioDuration > 0 {
+                            Capsule()
+                                .fill(entry.moodColor)
+                                .frame(width: geo.size.width * audioPlaybackController.progress, height: 5)
                         }
                     }
-                    .frame(height: 5)
-                    Text(formattedDuration(
-                        currentTime: playbackTime,
-                        totalDuration: playbackDuration
-                    ))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
                 }
+                .frame(height: 5)
+                Text(formattedDuration(
+                    currentTime: playbackTime,
+                    totalDuration: playbackDuration
+                ))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
             }
-            .padding(14)
-            .liquidGlassCard(cornerRadius: 14)
-            .task(id: audioFileName) {
-                displayableAudioDuration = await fetchAudioDuration(url: audioURL) ?? 0.0
-            }
+        }
+        .padding(14)
+        .liquidGlassCard(cornerRadius: LumoryCornerRadius.card)
+        .task(id: audioFileName) {
+            displayableAudioDuration = await fetchAudioDuration(url: audioURL) ?? 0.0
         }
     }
 
@@ -626,9 +630,12 @@ struct DiaryDetailView: View {
         let textChanged = entry.wrappedText != editedText
         let dateChanged = entry.date != editedDate
         let moodChanged = entry.moodValue != editedMoodValue
+        let normalizedSummary = editedSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summaryChanged = (entry.summary ?? "") != normalizedSummary
+        let narrativeInputChanged = textChanged || dateChanged || moodChanged || summaryChanged
         let entryObjectID = entry.objectID
 
-        entry.summary = editedSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+        entry.summary = normalizedSummary
         entry.text = editedText
         entry.moodValue = editedMoodValue
         entry.date = editedDate
@@ -694,6 +701,11 @@ struct DiaryDetailView: View {
                 Task(priority: .utility) {
                     await Self.refreshAIIndex(for: entryObjectID, newText: textSnapshot, ai: ai)
                 }
+            }
+            if narrativeInputChanged {
+                // Narrative 输入包含日期 / 心情 / 摘要 / 正文。任一项变化都要让旧回顾退出
+                // 浓缩卡 cache,否则会继续显示旧日期、旧心情或旧摘要语义。
+                Task { await EntryWipeOrchestrator.invalidateNarrativeCacheOnEntryChange() }
             }
         } catch {
             Log.error("[DiaryDetailView] 保存更改失败: \(error)", category: .ui)
@@ -838,13 +850,13 @@ private struct AsyncPhotoThumbnail: View {
                     .scaledToFill()
                 #endif
             } else {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: LumoryCornerRadius.card, style: .continuous)
                     .fill(Color.secondary.opacity(0.15))
                     .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
             }
         }
         .frame(width: 130, height: 130)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: LumoryCornerRadius.card, style: .continuous))
         // P1-Dark-5 用 .primary.opacity 而不是 .black.opacity — 暗色下 .primary 是白色,
         // 阴影成"白光"显示在暗背景上,符合 OLED 暗色 lift effect 直觉;.black.opacity 在暗背景零效果。
         .shadow(color: Color.primary.opacity(0.15), radius: 6, y: 2)

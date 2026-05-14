@@ -26,10 +26,17 @@ struct AdvancedSettingsView: View {
     @State private var isSyncing = false
     @State private var syncMessage: String?
 
+    // 清除 AI 回顾缓存(2026-05-14 从主 Settings 搬进进阶 —— 低频维护操作,不该跟
+    // 导入/导出/删除全部同档摆在主层)。
+    @State private var showResetNarrativeAlert = false
+    @State private var isResettingNarrative = false
+    @State private var resetNarrativeFailureMessage: String?
+
     var body: some View {
         Form {
             troubleshootingSection
             perServiceIndexSection
+            narrativeCacheSection
         }
         #if os(macOS)
         .listStyle(.plain)
@@ -146,7 +153,115 @@ struct AdvancedSettingsView: View {
         }
     }
 
+    // MARK: - AI 回顾缓存
+
+    /// 「清除 AI 回顾缓存」(2026-05-14 从主 Settings 搬来)。只删 `AIConversation` kind=.narrative,
+    /// **不动** askPast 对话历史 + 不动日记本身。删完用户回 InsightsView,NarrativeSummaryCard
+    /// 的 .task hydrate 发现 cache nil → 显「生成回顾」CTA。toast 反馈靠 SettingsView 根的
+    /// `.lumoryToastOverlay()`(本页是它 NavigationStack 内 push 的子页)。
+    @ViewBuilder
+    private var narrativeCacheSection: some View {
+        Section(
+            header: Text(NSLocalizedString("AI 回顾", comment: "AI narrative section")),
+            footer: Text(NSLocalizedString(
+                "清除后 Insights「历史回顾」里的「故事」记录会全部消失,下次进入可重新生成。日记本身不受影响。",
+                comment: "Reset narrative cache footer"
+            ))
+        ) {
+            Button {
+                showResetNarrativeAlert = true
+            } label: {
+                HStack {
+                    Label {
+                        Text(NSLocalizedString("清除 AI 回顾缓存", comment: "Reset narrative cache"))
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "sparkles")
+                            .foregroundStyle(Color.semanticDestructive)
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(width: 24)
+                    }
+                    Spacer()
+                    if isResettingNarrative { ProgressView() }
+                }
+            }
+            .disabled(isResettingNarrative)
+            .alert(
+                NSLocalizedString("清除 AI 回顾缓存？", comment: "Confirm reset narrative cache"),
+                isPresented: $showResetNarrativeAlert
+            ) {
+                Button(NSLocalizedString("清除", comment: "Reset"), role: .destructive) {
+                    #if canImport(UIKit)
+                    HapticManager.shared.notification(.warning)
+                    #endif
+                    Task { await resetNarrativeCache() }
+                }
+                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
+            } message: {
+                Text(NSLocalizedString("将清除全部已生成的 AI 回顾,Insights「历史回顾」里的「故事」记录会一并消失。下次进入 Insights 时可以重新生成。日记本身不受影响,此操作不可撤销。", comment: "Reset narrative cache message"))
+            }
+            .alert(
+                NSLocalizedString("清除失败", comment: "Reset failed alert title"),
+                isPresented: Binding(
+                    get: { resetNarrativeFailureMessage != nil },
+                    set: { if !$0 { resetNarrativeFailureMessage = nil } }
+                )
+            ) {
+                Button(NSLocalizedString("好", comment: "OK"), role: .cancel) {
+                    resetNarrativeFailureMessage = nil
+                }
+            } message: {
+                Text(resetNarrativeFailureMessage ?? "")
+            }
+        }
+    }
+
     // MARK: Actions
+
+    /// 清除 AIConversation 表里 kind=.narrative 的 record。**不动** askPast 对话历史 + 不动日记本身。
+    ///
+    /// **race fix**(2026-05-13 superreview P0-3):删之前先 await NarrativePrecomputeService 的
+    /// cancel+bump,杜绝"写完日记 → 60s debounce 中 → 用户点 Reset → 老 task 在 stream 完成后
+    /// 写回新 narrative,reset 失效"的窗口。
+    ///
+    /// 有删除 → "已清除 N 条" toast;0 条 → "没有可清除的回顾" toast,不静默成功让用户怀疑按钮坏了。
+    @MainActor
+    private func resetNarrativeCache() async {
+        isResettingNarrative = true
+        defer { isResettingNarrative = false }
+        await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
+        let request = NSFetchRequest<AIConversation>(entityName: "AIConversation")
+        request.predicate = NSPredicate(format: "kind == %@", AIConversation.Kind.narrative.rawValue)
+        do {
+            let narratives = try viewContext.fetch(request)
+            let count = narratives.count
+            for narrative in narratives {
+                viewContext.delete(narrative)
+            }
+            try viewContext.save()
+            #if canImport(UIKit)
+            HapticManager.shared.notification(.success)
+            #endif
+            if count > 0 {
+                LumoryToastCenter.shared.show(
+                    String(format: NSLocalizedString("settings.resetNarrative.cleared", value: "已清除 %d 条 AI 回顾", comment: "Reset narrative cache toast with count"), count),
+                    severity: .success
+                )
+            } else {
+                LumoryToastCenter.shared.show(
+                    NSLocalizedString("settings.resetNarrative.empty", value: "没有可清除的 AI 回顾", comment: "Reset narrative cache toast when nothing existed"),
+                    severity: .info
+                )
+            }
+        } catch {
+            viewContext.rollback()
+            Log.error("[AdvancedSettings] 清除 AI 回顾缓存失败: \(error)", category: .ui)
+            resetNarrativeFailureMessage = String(
+                format: NSLocalizedString("清除 AI 回顾缓存失败。请稍后重试。错误:%@", comment: "Reset narrative cache failure message"),
+                error.localizedDescription
+            )
+        }
+    }
 
     private func runSyncDiagnostic() {
         isRunningDiagnostic = true

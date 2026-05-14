@@ -26,7 +26,7 @@ final class InsightsEngine {
     }
 
     enum Bucket: Equatable {
-        case day, week, month
+        case day
     }
 
     struct WritingStats: Equatable {
@@ -35,13 +35,6 @@ final class InsightsEngine {
         let longestStreak: Int
         let totalWords: Int
         let avgMood: Double
-    }
-
-    struct SuggestionSnapshot {
-        let topThemes: [Theme]
-        let moodHighEntry: DiaryEntryData?
-        let moodLowEntry: DiaryEntryData?
-        let moodPoints: [MoodPoint]
     }
 
     struct Theme: Identifiable, Equatable {
@@ -92,29 +85,53 @@ final class InsightsEngine {
         self.ai = ai
     }
 
+    // MARK: - 0. Range counters (浓缩卡 staleness 用)
+    //
+    // **不能凑现有 `writingStats().totalEntries`**(那是全局,不带 range);**也不能用
+    // `dailyCells`** —— `InsightsView.fetchDailyCells` 为 heatmap 扩到 22 周窗口
+    // (`lookbackDays=161`),既无序也超出 range。所以单写两个轻量 helper:
+    //
+    // - `entryCount(in:)` 走 NSDictionaryResultType + countFetch(不实例化 NSManagedObject)
+    // - `mostRecentEntryDate(in:)` 走 fetchLimit=1 + sortDescriptor descending
+
+    /// 该 range 内日记总数。NarrativeSummaryCard 判 stale + entryCount<3 disable。
+    func entryCount(in range: DateInterval) async -> Int {
+        await persistence.container.performBackgroundTask { context -> Int in
+            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "date >= %@ AND date <= %@",
+                range.start as NSDate, range.end as NSDate
+            )
+            return (try? context.count(for: request)) ?? 0
+        }
+    }
+
+    /// 该 range 内最新一篇日记的 date。判 cache 是否被新日记 invalidate。
+    /// nil = range 内无日记。
+    func mostRecentEntryDate(in range: DateInterval) async -> Date? {
+        await persistence.container.performBackgroundTask { context -> Date? in
+            let request: NSFetchRequest<NSDictionary> = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            request.resultType = .dictionaryResultType
+            request.predicate = NSPredicate(
+                format: "date >= %@ AND date <= %@",
+                range.start as NSDate, range.end as NSDate
+            )
+            request.propertiesToFetch = ["date"]
+            request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+            request.fetchLimit = 1
+            guard let rows = try? context.fetch(request),
+                  let row = rows.first,
+                  let date = row["date"] as? Date else { return nil }
+            return date
+        }
+    }
+
     // MARK: - 1. Mood series (纯本地聚合)
 
     /// 按 bucket 聚合情绪曲线。空 bucket 会被跳过。
     func moodSeries(in range: DateInterval, bucket: Bucket) async -> [MoodPoint] {
         let entries = await fetchEntryData(in: range)
         return Self.aggregateMoodSeries(entries: entries, bucket: bucket)
-    }
-
-    /// Prompt suggestions need 90d themes plus 30d mood stats. Fetch the 90d superset once,
-    /// then slice in memory for the 30d aggregates.
-    func suggestionSnapshot(themeRange: DateInterval, moodRange: DateInterval, themeLimit: Int = 5) async -> SuggestionSnapshot {
-        // bg fetch + main-actor alias snapshot 互不依赖,async let 并行省一次 MainActor hop。
-        async let aliasMapAsync = MainActor.run { ThemeAliasResolver.shared.snapshotIndex() }
-        let entries = await fetchEntryData(in: themeRange)
-        let moodEntries = entries.filter { moodRange.contains($0.date) }
-        let moodExtremes = Self.computeMoodExtremes(entries: moodEntries)
-        let aliasMap = await aliasMapAsync
-        return SuggestionSnapshot(
-            topThemes: Self.aggregateThemes(entries: entries, range: themeRange, limit: themeLimit, aliasMap: aliasMap),
-            moodHighEntry: moodExtremes.high,
-            moodLowEntry: moodExtremes.low,
-            moodPoints: Self.aggregateMoodSeries(entries: moodEntries, bucket: .day)
-        )
     }
 
     /// 纯函数版本，便于单元测试。
@@ -316,8 +333,6 @@ final class InsightsEngine {
             let task = Task {
                 let entries = await self.fetchEntryData(in: range)
                 guard !entries.isEmpty else {
-                    continuation.yield(.chunk(NSLocalizedString("这段时间还没有日记。", comment: "Empty narrative")))
-                    continuation.yield(.done)
                     continuation.finish()
                     return
                 }
@@ -493,29 +508,6 @@ final class InsightsEngine {
                 )
             }
         }
-    }
-
-    /// 返回情绪最高、最低的那一天（带 summary），供 suggestion grounding 使用。
-    /// 没数据时两个字段都可能为 nil。
-    /// 当所有条目 mood 都相同（比如全是默认 0.5），返回 (nil, nil) ——UI 显示"同一条 = 最高 + 最低"
-    /// 是无意义的；让上游知道"没有显著差异"比给它俩同一个值更好。
-    func moodExtremes(in range: DateInterval) async -> (high: DiaryEntryData?, low: DiaryEntryData?) {
-        let entries = await fetchEntryData(in: range)
-        return Self.computeMoodExtremes(entries: entries)
-    }
-
-    private static func computeMoodExtremes(entries: [DiaryEntryData]) -> (high: DiaryEntryData?, low: DiaryEntryData?) {
-        guard !entries.isEmpty else { return (nil, nil) }
-        // 按 summary 不空优先（空 summary 对 grounding 没用）
-        let withSummary = entries.filter { !$0.summary.isEmpty }
-        let pool = withSummary.isEmpty ? entries : withSummary
-        let high = pool.max { $0.moodValue < $1.moodValue }
-        let low = pool.min { $0.moodValue < $1.moodValue }
-        // 如果 mood 值相同，说明没有显著波动——返回 nil，让下游判定"数据不足"
-        if let highEntry = high, let lowEntry = low, highEntry.moodValue == lowEntry.moodValue {
-            return (nil, nil)
-        }
-        return (high, low)
     }
 
     // MARK: - Private
@@ -751,10 +743,6 @@ final class InsightsEngine {
         switch bucket {
         case .day:
             return calendar.startOfDay(for: date)
-        case .week:
-            return calendar.dateInterval(of: .weekOfYear, for: date)?.start ?? date
-        case .month:
-            return calendar.dateInterval(of: .month, for: date)?.start ?? date
         }
     }
 }

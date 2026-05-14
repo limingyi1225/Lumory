@@ -13,7 +13,7 @@ import CoreData
 ///
 /// **接入点**(2026-05-05 实测):4 处单 entry 删除全部走撤销 toast,跟 CLAUDE.md 一致 ——
 /// HomeView.deleteEntry(主时间线 swipe/contextMenu)、DiaryDetailView.deleteEntry(详情删后 dismiss)、
-/// ThemeFilteredEntriesView.deleteEntry(主题二级页)、PointDetailSheet.deleteEntry(MoodStoryChart 二级)。
+/// ThemeFilteredEntriesView.deleteEntry(主题二级页)、PointDetailSheet.deleteEntry(WritingHeatmap tap-day 二级)。
 /// 后两者用 `@State [DiaryEntry]` 缓存 ——`undo(into:)` 返回 restored entry,callsite 自己 splice 回数组,
 /// 不然撤销给了 success haptic 但视觉不闭环。
 ///

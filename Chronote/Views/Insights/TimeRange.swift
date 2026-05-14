@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Shared time-range model for Insights Dashboard
 //
 // 所有 Insights 子模块共享同一个 TimeRange，顶部选择器一改动，
-// 下游的 MoodStoryChart / ThemeCard / CorrelationChip / Narrative 都重新查询。
+// 下游的 WritingHeatmap / ThemeCard / Narrative 都重新查询。
 
 enum TimeRange: String, CaseIterable, Identifiable, Equatable {
     case month, quarter, year, all
@@ -46,13 +46,4 @@ enum TimeRange: String, CaseIterable, Identifiable, Equatable {
         return DateInterval(start: start, end: now)
     }
 
-    /// 图表 bucket：根据范围挑选合适粒度，点数稳定在 ~30 以内。
-    var chartBucket: InsightsEngine.Bucket {
-        switch self {
-        case .month: return .day
-        case .quarter: return .week
-        case .year: return .month
-        case .all: return .month
-        }
-    }
 }

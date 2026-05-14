@@ -249,7 +249,7 @@ struct ThemeAliasManagementView: View {
         case .fetchingInventory:
             return NSLocalizedString("正在统计标签…", comment: "Scan phase fetch")
         case .judging:
-            return NSLocalizedString("AI 正在分析…", comment: "Scan phase judge")
+            return NSLocalizedString("正在分析主题…", comment: "Scan phase judge")
         case .applying:
             return NSLocalizedString("正在整理建议…", comment: "Scan phase apply")
         case .done:

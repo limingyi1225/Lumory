@@ -11,6 +11,13 @@ import CoreData
 // 整条检索+生成链路由 `InsightsEngine.ask(_:)` 负责；本视图只关心 UI。
 
 struct AskPastView: View {
+    /// 调用方可通过此参数让 view 一上来就 fire 一道问题。InsightsView 行动区 preset chip
+    /// 入口走这条 — 用户从 Insights 点一个建议问题,sheet 出场即"用户气泡 + AI 流式回答",
+    /// 跳过 empty / preset grid 闪烁。nil(默认) = 跟原来一样进 empty welcome + presetGrid;
+    /// non-nil = `.task` 里自动 fire 一次 submit。`hasSubmittedInitial` 守住只 fire 一次,
+    /// 用户在内部按"清空"reset 回 empty 后不重新自动 submit。
+    var initialQuestion: String? = nil
+
     enum Role { case user, ai }
     struct Message: Identifiable, Equatable {
         var id: UUID = UUID()
@@ -29,12 +36,14 @@ struct AskPastView: View {
 
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var hSizeClass
 
     @State private var messages: [Message] = []
     @State private var inputText: String = ""
     @State private var activeTask: Task<Void, Never>?
     @State private var activeTaskID: UUID?
-    @State private var showResetConfirmation: Bool = false
+    /// wave14 — 历史回顾入口从 InsightsView toolbar Menu 移到 AskPastView 自己的 toolbar。
+    @State private var showHistory: Bool = false
     @FocusState private var inputFocused: Bool
 
     // 引用卡展开状态（按 message id 记录）
@@ -49,6 +58,8 @@ struct AskPastView: View {
     /// 后台静默刷新 task 的句柄 —— onDisappear 时取消,避免 view 关掉后还在跑/写 singleton。
     @State private var backgroundRefreshTask: Task<Void, Never>?
     @State private var lastAutoScrollAt: Date = .distantPast
+    /// initialQuestion 模式的"只 fire 一次"守卫。reset() 后保持 true,清空对话不重 fire。
+    @State private var hasSubmittedInitial: Bool = false
 
     private let engine = InsightsEngine.shared
     private static let streamFlushInterval: TimeInterval = 0.08
@@ -76,39 +87,55 @@ struct AskPastView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    // P1-T9 dismiss 时**会取消进行中的 stream task**(语义=撤销正在进行的事),
-                    // 按 HIG 规则文案应该是"取消"而非"关闭"。规则见 CLAUDE.md sheet 按钮文案约定。
-                    Button(NSLocalizedString("取消", comment: "Cancel ongoing task and dismiss")) {
-                        activeTask?.cancel()
-                        activeTask = nil
-                        activeTaskID = nil
-                        dismiss()
+                // iPad regular 走 fullScreenCover,没有下拉关闭手势;保留显式 close 兜底。
+                if hSizeClass == .regular {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button {
+                            activeTask?.cancel()
+                            dismiss()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityLabel(NSLocalizedString("关闭", comment: "Close"))
                     }
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showHistory = true
+                    } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                    }
+                    .accessibilityLabel(NSLocalizedString("历史回顾", comment: "Conversation history"))
+                }
+                // 清空按钮 — wave14 改成直接执行 reset(),不再走 confirmationDialog。
                 if !messages.isEmpty {
                     ToolbarItem(placement: .primaryAction) {
                         Button {
-                            showResetConfirmation = true
+                            HapticManager.shared.impact(.medium)
+                            reset()
                         } label: {
                             Image(systemName: "trash.slash")
                         }
+                        .accessibilityLabel(NSLocalizedString("清空", comment: "Reset chat"))
                     }
                 }
             }
-            .confirmationDialog(
-                NSLocalizedString("清空当前对话？", comment: "Reset chat confirmation title"),
-                isPresented: $showResetConfirmation,
-                titleVisibility: .visible
-            ) {
-                Button(NSLocalizedString("清空", comment: "Reset chat confirm"), role: .destructive) {
-                    reset()
-                }
-                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }
-            } message: {
-                Text(NSLocalizedString("清空后,本次问答和已展开的参考记录都会丢失,无法恢复。", comment: "Reset chat confirmation message"))
+            .lumoryAdaptiveModal(isPresented: $showHistory) {
+                ConversationHistoryView()
+                    .environment(\.managedObjectContext, viewContext)
             }
             .task {
+                // InsightsView 行动区 preset chip 入口:先 fire 再 hydrate presets。
+                // submit 同步 append messages → 下一帧渲染 conversationList,presetGrid
+                // 已不在 messages.isEmpty 分支,不会闪一帧 preset。
+                if let initial = initialQuestion?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !initial.isEmpty,
+                   !hasSubmittedInitial {
+                    hasSubmittedInitial = true
+                    submit(initial)
+                }
                 await loadPresetsIfNeeded()
             }
             .onDisappear {
@@ -124,16 +151,12 @@ struct AskPastView: View {
     // MARK: Welcome
 
     private var welcomeHeader: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .foregroundStyle(.tint)
-                Text(NSLocalizedString("问问过去的你", comment: "Ask your past heading"))
-                    .font(.title3.weight(.semibold))
-            }
-            Text(NSLocalizedString("AI 会从你的日记里检索相关片段，回答你的问题，并附上可跳转的参考。", comment: "Ask your past subtitle"))
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+        // wave14 — 删 "AI 会从你的日记里检索相关片段..." 副标题(去 AI 化、保持无感)。
+        HStack(spacing: 8) {
+            Image(systemName: "sparkles")
+                .foregroundStyle(.tint)
+            Text(NSLocalizedString("问问过去的你", comment: "Ask your past heading"))
+                .font(.title3.weight(.semibold))
         }
     }
 
@@ -385,6 +408,7 @@ struct AskPastView: View {
                     msg.isStreaming = false
                 }
                 // 清掉 activeTask,下一次 submit 才能通过 guard;stale 旧 task 不得清掉新 task。
+                let isSuperseded = activeTaskID != nil && activeTaskID != taskID
                 if activeTaskID == taskID {
                     activeTask = nil
                     activeTaskID = nil
@@ -394,7 +418,12 @@ struct AskPastView: View {
                 // 跳过保存的情况:用户取消(wasCancelled 且无内容)/ AI 一字未产出且无错误。
                 // 保存的情况:有正文(包括 isIncomplete 半截) / 有 errorText(让用户能回看
                 // "网络炸了那次"问的什么)。世代号 guard 防 stale write 不需要 — task 已结束。
-                if activeTaskID != nil { return } // 还有更新的 task 在跑,跳过保存
+                //
+                // **P2 clarity fix (2026-05-13 superreview)**:之前 `if activeTaskID != nil { return }`
+                // 在同 task 完成路径上 activeTaskID 已清 → 永远 false,只在"newer task 抢了
+                // activeTaskID 但本 task 还没 reach 这行"的极窄 race window 才生效。改用显式
+                // isSuperseded 表达意图,后人改时不会误以为是死代码。
+                if isSuperseded { return }
                 self.persistConversationIfNeeded(question: question, aiMessageID: aiMessageID)
             }
         }

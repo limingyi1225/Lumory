@@ -72,7 +72,10 @@ final class iPadAdaptiveModalSmokeTests: XCTestCase {
         let insightsButton = app.buttons["洞察"]
         XCTAssertTrue(insightsButton.waitForExistence(timeout: 5), "Insights button missing")
         insightsButton.tap()
-        XCTAssertTrue(app.navigationBars["洞察"].waitForExistence(timeout: 5), "Insights did not open")
+        XCTAssertTrue(
+            app.descendants(matching: .any)["insightsRootScrollView"].waitForExistence(timeout: 5),
+            "Insights did not open"
+        )
         usleep(2_000_000)
     }
 

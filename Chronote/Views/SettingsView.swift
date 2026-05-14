@@ -113,11 +113,16 @@ struct SettingsView: View {
         }
         // backgroundGradient 挂在 NavigationStack 外 — 不受 push/pop 影响,消除子页面回来"暗一闪"。
         .background(backgroundGradient.ignoresSafeArea())
+        // Settings 是 sheet,root toast overlay 被压住看不见;在 sheet 根挂一份。
+        // 覆盖整个 NavigationStack,包括 push 进去的 AdvancedSettingsView —— 「清除 AI 回顾缓存」
+        // 的 toast 在进阶子页触发,靠这层 overlay 浮出来。跟 InsightsView 等同 pattern。
+        .lumoryToastOverlay()
     }
 
     // MARK: - Header
 
-    /// 顶部：App 图标 + 名字 + 版本 + 条目计数。纯装饰，没有按钮。
+    /// 顶部：App 图标 + 名字 + 条目计数。纯装饰，没有按钮。
+    /// (2026-05-14 用户决定:不显具体版本号 —— 用户不需要看到 build number。)
     @ViewBuilder
     private var appHeaderSection: some View {
         Section {
@@ -131,9 +136,6 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(NSLocalizedString("Lumory", comment: "App name"))
                         .font(.title3.weight(.semibold))
-                    Text(versionString)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
                     Text(String(format: NSLocalizedString("%d 条日记", comment: "Entry count"), entries.count))
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -480,10 +482,12 @@ struct SettingsView: View {
             } message: {
                 // P1-Set-2 inject 数量,让用户在确认前看到具体数字防误删。
                 Text(String(
-                    format: NSLocalizedString("将永久删除 %d 条日记,无法撤销。已合并的主题分组也会一并清除。", comment: "Delete all undo with entry count"),
+                    format: NSLocalizedString("将永久删除 %d 条日记,无法撤销。已合并的主题分组和 AI 历史对话也会一并清除。", comment: "Delete all undo with entry count"),
                     entries.count
                 ))
             }
+            // 「清除 AI 回顾缓存」已挪到 进阶 → AdvancedSettingsView(2026-05-14 用户决定):
+            // 它是低频维护操作,跟主层的导入/导出/删除全部不同档,放进阶更合适。
         }
     }
 
@@ -553,12 +557,6 @@ struct SettingsView: View {
                 .symbolRenderingMode(.hierarchical)
                 .frame(width: 24)
         }
-    }
-
-    private var versionString: String {
-        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-        return "\(short) (\(build))"
     }
 
     /// 很淡的顶部 mood-tinted 渐变，让 Settings 和首页保持同一种空气感。

@@ -83,14 +83,14 @@ struct HomeComposerCard: View {
             "",
             text: $inputVM.inputText,
             prompt: Text(inputPlaceholder)
-                .font(.system(size: 16))
+                .font(LumoryFonts.composerPlaceholder)
                 .foregroundColor(promptColor),
             axis: .vertical
         )
         .lineLimit(6...20)
         .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
         .background(Color.clear)
-        .font(.system(size: 17))
+        .font(LumoryFonts.composerBody)
         .focused($isInputFocused)
         // P1-Home-12 键盘 toolbar 加"完成"按钮 — 中文拼音输入法 candidate bar 占额外 36pt,
         // 用户要看下方滚动区必须先关键盘。"keyboard.chevron.compact.down" 是系统标准 dismiss 图标。
@@ -156,6 +156,9 @@ struct HomeComposerCard: View {
         ) {
             Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
                 if let target = recordingVM.deleteTarget {
+                    #if canImport(UIKit)
+                    HapticManager.shared.impact(.medium)
+                    #endif
                     onDeleteRecordingConfirmed(target)
                 }
             }
@@ -333,7 +336,7 @@ struct HomeComposerCard: View {
             photoVM.photosPickerPresented = true
         } label: {
             Image(systemName: "photo")
-                .font(.system(size: 18, weight: .medium))
+                .font(LumoryFonts.composerToolbarIcon)
                 .foregroundStyle(Color.primary.opacity(0.85))
                 .frame(width: 44, height: 36)
                 .contentShape(Rectangle())
@@ -372,16 +375,13 @@ struct HomeComposerCard: View {
         }
 
         Button {
-            #if canImport(UIKit)
-            HapticManager.shared.click()
-            #endif
             onMicTap()
         } label: {
             // .buttonStyle(.plain) 不应用系统默认的 disabled dim,所以同色 mic 在 disabled 时
             // 视觉上跟 enabled 完全一样。显式 opacity 让"已有录音"态可见。
             let isMicDisabled = recordingVM.audioRecordings.count >= 1 && !recorder.isRecording
             Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic")
-                .font(.system(size: 18, weight: .medium))
+                .font(LumoryFonts.composerToolbarIcon)
                 .foregroundStyle(recorder.isRecording ? .red : Color.primary.opacity(0.85))
                 .opacity(isMicDisabled ? 0.4 : 1.0)
                 .symbolEffect(.bounce, value: recorder.isRecording)
@@ -417,8 +417,7 @@ struct HomeComposerCard: View {
         // action 用的 Liquid Glass style。在 GlassEffectContainer 里 + 外层 liquidGlassCard 提供
         // surface 上下文。渲染成什么样交给 SwiftUI,不手绘装饰。
         Button {
-            // 点的瞬间 .light impact 让用户立刻知道按到了。完成时仍走 .success(在 parent 的
-            // handleSendAction 末尾)。
+            // 点的瞬间用 .light 给"按到了"的轻反馈,完成时仍走 .success(parent handleSendAction 末尾)。
             #if canImport(UIKit)
             HapticManager.shared.impact(.light)
             #endif
@@ -429,7 +428,7 @@ struct HomeComposerCard: View {
                     .controlSize(.small)
             } else {
                 Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .bold))
+                    .font(LumoryFonts.composerSendIcon)
             }
         }
         .buttonStyle(.glassProminent)

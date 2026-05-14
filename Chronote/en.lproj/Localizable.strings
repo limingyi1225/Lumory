@@ -100,11 +100,6 @@
 /* Empty State Messages */
 /* Error Messages */
 /* New keys (post-launch review) */
-"mood.veryBad" = "Very Bad";
-"mood.bad" = "Bad";
-"mood.neutral" = "Normal";
-"mood.good" = "Good";
-"mood.veryGood" = "Great";
 "status.generating" = "Generating...";
 "洞察" = "Insights";
 "诊断、修复与分项控制" = "Diagnostics, repair, and granular controls";
@@ -230,7 +225,7 @@
 "扫描已有主题" = "Scan Existing Themes";
 "重新扫描" = "Rescan";
 "扫描中…" = "Scanning…";
-"AI 正在分析…" = "AI analyzing…";
+"正在分析主题…" = "Analyzing themes…";
 "正在统计标签…" = "Counting tags…";
 "正在整理建议…" = "Organizing suggestions…";
 "扫到 %d 条建议" = "Found %d suggestions";
@@ -338,12 +333,11 @@
 "%@，情绪 %d 分，%d 字" = "%@: mood %d, %d words";
 "%d 条日记" = "%d entries";
 "%d 篇相关日记" = "%d relevant entries";
-"AI 为你读这段时间的日记，讲成一篇文章" = "AI reads your entries from this period and weaves them into a story";
-"AI 会从你的日记里检索相关片段，回答你的问题，并附上可跳转的参考。" = "AI searches your diary for relevant excerpts, answers your question, and includes tappable references.";
-"AI 写作中" = "AI is writing";
-"AI 正在整理主题，或暂无足够日记" = "AI is organizing themes, or there isn't enough data yet.";
-"AI 正在讲述" = "AI is narrating";
-"AI 自动提取" = "Auto-extracted by AI";
+"生成建议中…" = "Generating suggestions…";
+"暂无主题，或日记还太少" = "No themes yet — or too few entries.";
+"AI 提取的主题:%@" = "AI-extracted theme: %@";
+"暂停录音" = "Pause recording";
+"播放录音" = "Play recording";
 "Lumory" = "Lumory";
 "import.alert.duplicates.message" = "%d entries detected, but all already exist; nothing imported.";
 "import.alert.duplicates.title" = "Duplicates skipped";
@@ -360,7 +354,6 @@
 "与过去对话" = "Chat with your past";
 "为历史日记生成语义向量，用于语义搜索和 Ask Your Past" = "Generate semantic vectors for past entries, used for semantic search and Ask Your Past";
 "主题 %d 失败" = "Theme %d failed";
-"书写热力" = "Writing heatmap";
 "今天发生了什么？" = "What happened today?";
 "今天想到 %@ 了吗？" = "Thinking about %@ today?";
 "今晚想记录什么？" = "What do you want to capture tonight?";
@@ -499,7 +492,7 @@
 "全部忽略" = "Dismiss all";
 "全部忽略待审主题" = "Dismiss all pending suggestions";
 "去系统设置" = "Open Settings";
-"将永久删除 %d 条日记,无法撤销。已合并的主题分组也会一并清除。" = "Permanently delete %d entries. This cannot be undone. Merged theme groups will also be cleared.";
+"将永久删除 %d 条日记,无法撤销。已合并的主题分组和 AI 历史对话也会一并清除。" = "Permanently delete %d entries. This cannot be undone. Merged theme groups and AI conversation history will also be cleared.";
 "已保存" = "Saved";
 "已删除" = "Deleted";
 "已有录音,删除当前录音才能重录" = "A recording already exists. Delete it before recording again.";
@@ -514,18 +507,11 @@
 "撤销" = "Undo";
 "收起键盘" = "Hide keyboard";
 "整体进度" = "Overall progress";
-"点下方输入框写一句,或点下麦克风录一段语音。" = "Tap the field below to write a line, or tap the mic to record a voice note.";
 "这可能是「%@」的别称?" = "Could “%@” be another name?";
 "选择合并目标…" = "Choose a merge target…";
 "重试" = "Retry";
 
 // MARK: - wave12-1 F1 semantic search
-"字面" = "Keyword";
-"语义" = "Semantic";
-"输入关键词后按回车进行语义搜索" = "Type a query and press return for semantic search";
-"正在按相关度搜索…" = "Searching by relevance…";
-"语义搜索网络错误,试试字面模式" = "Semantic search network error — try keyword mode";
-"有 %d 条日记还没生成语义索引,可能漏在结果外" = "%d entries are not yet semantically indexed and may be missing from results";
 
 // MARK: - wave12-3 conversation history
 "开始回顾" = "Start a review";
@@ -538,3 +524,41 @@
 "AI" = "AI";
 "(回答被截断)" = "(Answer truncated)";
 "(报告生成时被截断)" = "(Report truncated during generation)";
+
+/* InsightsView Narrative summary card + AskPast bottom entry + ambient search (wave14) */
+"narrative.summary.title.month" = "Last Month";
+"narrative.summary.title.quarter" = "Last 3 Months";
+"narrative.summary.title.year" = "Last Year";
+"narrative.summary.title.all" = "All Time";
+"narrative.summary.cta.generate" = "Generate";
+"narrative.summary.loading.a11y" = "Generating reflection";
+"narrative.summary.empty.tooFew" = "Too few entries to summarize";
+"narrative.summary.metadataFormat" = "%@ · %d entries";
+"narrative.summary.regenerate" = "Regenerate";
+"narrative.summary.incomplete" = "(Generation was truncated)";
+"narrative.summary.localOutputLimit" = "Output was too long and was truncated.";
+"narrative.summary.streamFailed" = "Generation failed — try again";
+"narrative.summary.streamFailedReason" = "Reason: %@";
+"narrative.summary.tapToOpen" = "Double tap to open the full reflection";
+"narrative.summary.tapToGenerate.a11y" = "Double tap to generate";
+"insights.action.tryHint" = "Ask your past";
+"search.relatedEntries.section" = "Related";
+"search.expanding" = "Expanding search…";
+"search.semanticUnavailable" = "Semantic search is unavailable; showing keyword matches";
+
+// wave17 — PointDetailSheet day step navigation
+"上一天" = "Previous day";
+"下一天" = "Next day";
+
+// wave17 — DiaryEntryRow audio attachment indicator
+"含录音" = "Has audio";
+
+// wave17 — Settings reset narrative cache
+"清除 AI 回顾缓存" = "Reset AI Recap Cache";
+"清除 AI 回顾缓存？" = "Reset AI recap cache?";
+"清除" = "Reset";
+"清除失败" = "Reset failed";
+"将清除全部已生成的 AI 回顾,Insights「历史回顾」里的「故事」记录会一并消失。下次进入 Insights 时可以重新生成。日记本身不受影响,此操作不可撤销。" = "All generated AI recaps will be erased, including every \"Story\" entry under Insights History. You can regenerate them next time you open Insights. Your diary entries are unaffected. This action cannot be undone.";
+"清除 AI 回顾缓存失败。请稍后重试。错误:%@" = "Failed to reset AI recap cache. Please try again later. Error: %@";
+"settings.resetNarrative.cleared" = "Cleared %d AI recaps";
+"settings.resetNarrative.empty" = "No AI recaps to clear";

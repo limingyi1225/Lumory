@@ -91,37 +91,27 @@ struct HomeView: View {
     /// 冷启动首帧 @FetchRequest 尚未完成时为 false——避免 emptyState 闪一帧。
     @State private var hasLoadedOnce: Bool = false
 
-    // Search state — 由系统 .searchable 托管输入;下面三个仅是结果与节流任务。
+    // Search state — 由系统 .searchable 托管输入;下面是结果 + 节流 task。
+    // wave14 — 改成"无感"双引擎融合:keyword 立刻出 + 600ms 后 semantic 后台补,
+    // 删除 SearchMode picker。embed 失败时给一次轻提示,避免用户以为搜索条件太窄。
     @State private var searchQuery: String = ""
+    /// keyword 命中(主结果)。
     @State private var searchResults: [DiaryEntry] = []
-    @State private var searchTask: Task<Void, Never>?
+    @State private var keywordSearchTask: Task<Void, Never>?
 
-    // F1 语义搜索:模式切换 + loading state + 索引覆盖率提示。
-    // **`.searchable(placement: .toolbar)` 已占满 toolbar**(codex review 提醒),segmented picker
-    // 不能塞 toolbar,放在搜索结果列表顶部 header。字面是默认(行为不变),用户主动切语义模式
-    // 时才走 embed → cosine 排名。语义模式下 typing 不触发(embed 一次 800ms-2s 太贵),只在
-    // 用户按 return 键(`.onSubmit`)时跑。
-    enum SearchMode: String, CaseIterable, Identifiable {
-        case keyword
-        case semantic
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .keyword: return NSLocalizedString("字面", comment: "Search mode: keyword")
-            case .semantic: return NSLocalizedString("语义", comment: "Search mode: semantic")
-            }
-        }
-    }
-    @State private var searchMode: SearchMode = .keyword
-    @State private var isSemanticSearchInFlight: Bool = false
-    /// 语义搜索索引覆盖率 0.0-1.0;< 0.95 时 UI 提示"索引不完整"。nil = 还没跑过。
-    @State private var semanticIndexCoverage: Double?
-    /// 总日记数(用来算"X 条没在结果里")。
-    @State private var semanticTotalCount: Int = 0
-    /// `for await` 完整跑完时的世代号 — 防 stale write 覆盖更新结果。每次 submit 前 `&+= 1`。
+    /// semantic 补充结果(渲染时实时过滤掉 keyword 已命中,见 searchResultsBody)。
+    @State private var semanticAuxResults: [DiaryEntry] = []
+    @State private var semanticSearchTask: Task<Void, Never>?
+    /// 世代号 — 防 stale write,onChange 起新 task 前 `&+= 1`。
     @State private var semanticSearchGen: Int = 0
-    /// 语义搜索 embed 失败 → UI 显示"网络错误,试试字面搜索"。
-    @State private var semanticSearchFailed: Bool = false
+    /// 涵盖 600ms debounce + embed in-flight。从 onChange 创建 semantic task 起即 true,
+    /// 完成或失败后置 false。但 UI 渲染"正在扩展搜索…"时还要看 `keywordSearchSettled`,
+    /// 否则用户键入瞬间(keyword 180ms debounce 还没过)就会闪 loading,体验差。
+    @State private var semanticSearchPending: Bool = false
+    @State private var semanticSearchFailureNotifiedFor: String?
+    /// keyword 路径是否已"落定" — debounce 过 + bg fetch 完。键入瞬间 false,180ms+ 后 true。
+    /// UI 用这个 gate"正在扩展搜索…"提示,不在 keyword 还没出结果时就先闪 semantic loading。
+    @State private var keywordSearchSettled: Bool = false
 
     /// 滚动深度 —— 用户向下滚超过阈值才显示"回顶部"FAB,避免常态遮挡内容。
     @State private var showScrollToTop: Bool = false
@@ -161,6 +151,7 @@ struct HomeView: View {
             let didStart = recorder.startRecording()
             if didStart {
                 #if canImport(UIKit)
+                HapticManager.shared.impact(.light)
                 HapticManager.shared.notification(.success)
                 #endif
             }
@@ -308,28 +299,22 @@ struct HomeView: View {
                     prompt: NSLocalizedString("搜索日记", comment: "Search field prompt")
                 )
                 .onChange(of: searchQuery) { _, newValue in
-                    // 字面模式:边打边搜(180ms debounce 同原逻辑)。
-                    // 语义模式:**不**自动搜 — embed 一次 800ms-2s,跟着 typing 跑既贵又烦,
-                    // 用户按 return 键(.onSubmit)才触发。但 query 一变(无论 empty 还是新非空),
-                    // 旧搜索结果都过期 — 全清,避免视觉残留(用户改了 query 但还没按 enter
-                    // 时仍能看到旧结果,codex wave12 复审 P2)。
-                    if searchMode == .keyword {
-                        scheduleInlineSearch(for: newValue)
-                    } else {
-                        searchTask?.cancel()
-                        searchResults = []
-                        semanticSearchFailed = false
-                        isSemanticSearchInFlight = false
-                    }
-                }
-                .onSubmit(of: .search) {
-                    // 语义模式 return 键提交 → 走 embed + cosine。字面模式系统已经处理。
-                    if searchMode == .semantic {
-                        triggerSemanticSearch(for: searchQuery)
-                    }
+                    // wave14 "无感"融合:keyword 立刻出(180ms debounce)+ semantic 600ms 后
+                    // 后台补。embed 失败静默,无 picker,无 hint banner。
+                    handleSearchQueryChange(newValue)
                 }
                 .navigationDestination(item: $selectedEntry) { entry in
-                    DiaryDetailView(entry: entry, startInEditMode: shouldStartEditing)
+                    let entryObjectID = entry.objectID
+                    DiaryDetailView(
+                        entry: entry,
+                        startInEditMode: shouldStartEditing,
+                        onDeleted: {
+                            if selectedEntry?.objectID == entryObjectID {
+                                selectedEntry = nil
+                            }
+                            removeDeletedEntryFromSearchResults(entryObjectID)
+                        }
+                    )
                         .onDisappear {
                             shouldStartEditing = false
                         }
@@ -646,9 +631,8 @@ struct HomeView: View {
         // 内，第二次 tap 照样能过上面的 guard —— 两条日记双发落库。
         // handleSendAction 由 Button action 触发，天然在主线程，VM 字段同步写合法。
         inputVM.isSending = true
-        // 之前发送有三次 haptic:button click + mood reveal + save success → 用户感觉太抖。
-        // 只保留**保存完成**那一次(行末 .completed 状态时发,跟"已记录"toast 一起),
-        // 把 click 删掉(.glassProminent 视觉高亮已经够) + mood reveal 也删(在 MoodSpectrumBar)。
+        // 发送触觉分两段:按钮点按只给 .soft 的轻反馈,保存完成再给 .success。
+        // mood reveal 不额外 haptic,避免一条发送链路抖成三连击。
         Task {
             // 1. 发送开始：snapshot 输入 + 立即清空 UI，避免 2 秒动画窗口内继续打字造成
             //    情绪分析文本与落库文本错位，或新输入被后续清空吞掉。
@@ -853,6 +837,9 @@ struct HomeView: View {
             Log.info("[HomeView handleStopRecording: stopRecording returned nil] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
             return
         }
+        #if canImport(UIKit)
+        HapticManager.shared.impact(.light)
+        #endif
         processStoppedRecording(fileName: fileName, duration: recorder.duration)
     }
 
@@ -939,11 +926,17 @@ struct HomeView: View {
                     inputVM.inputText += toAppend
                 }
                 recordingVM.transcriptionError = nil
+                #if canImport(UIKit)
+                HapticManager.shared.notification(.success)
+                #endif
                 // 转录后不再自动分析情绪,等待发送时统一分析
             } else {
                 let failure = transcriber.lastFailure ?? .networkFailed
                 Log.error("[HomeView transcriptionTask] 转写失败: \(failure)", category: .ui)
                 recordingVM.transcriptionError = failure
+                #if canImport(UIKit)
+                HapticManager.shared.notification(.warning)
+                #endif
             }
         }
     }
@@ -1075,6 +1068,7 @@ struct HomeView: View {
         if selectedEntry?.objectID == entry.objectID {
             selectedEntry = nil // Prevent navigation to a deleted item
         }
+        let entryObjectID = entry.objectID
 
         // 先停止可能的音频播放，如果该条目正在播放
         if self.audioPlaybackController.currentPlayingFileName == entry.audioFileName {
@@ -1105,6 +1099,7 @@ struct HomeView: View {
         }
 
         guard didSucceed else { return }
+        removeDeletedEntryFromSearchResults(entryObjectID)
         HapticManager.shared.impact(.medium)
         // 单删派生缓存清理统一走 EntryWipeOrchestrator(Reminder + Prompt + Insights + alias 孤儿清理)。
         // 注意:这层是聚合刷新,不删 attachment 文件 — attachment 由 EntryDeletionUndoService 4s 后清。
@@ -1213,126 +1208,146 @@ struct HomeView: View {
 // MARK: - Inline search
 
 extension HomeView {
-    /// 字面 / 语义切换的 segmented picker + 语义模式特有的 hint 横条。
-    /// 放在搜索结果列表顶部 — `.searchable(placement: .toolbar)` 已占满 toolbar,picker 不能塞那里。
-    @ViewBuilder
-    private var searchModeHeader: some View {
-        VStack(spacing: 8) {
-            Picker("", selection: $searchMode) {
-                ForEach(SearchMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .onChange(of: searchMode) { _, newMode in
-                // 切模式时清结果(防止字面结果残留在语义模式视图,反之亦然)。
-                // **必须 cancel 旧 task** — 否则 keyword task 还在 180ms debounce 内时切到 semantic,
-                // task 跑完会把字面结果灌进 searchResults,在语义视图显示(codex wave12 复审 P2)。
-                searchTask?.cancel()
-                searchResults = []
-                semanticSearchFailed = false
-                isSemanticSearchInFlight = false
-                // 语义模式提示用户按 return 触发 — 这里不主动跑(embed 太贵)。
-                // 字面模式下,如果 query 非空,立刻走原有 inline keyword search。
-                if newMode == .keyword {
-                    let trimmed = searchQuery.trimmingCharacters(in: .whitespaces)
-                    if !trimmed.isEmpty { scheduleInlineSearch(for: searchQuery) }
-                }
-            }
-            .padding(.horizontal, 16)
+    /// wave14 — query 变化的统一入口。keyword 180ms debounce 立刻出;query 稳定 600ms 后
+    /// 后台跑 semantic;短查询(< 2 字符)不触发 semantic 防止过宽 + 浪费 embed。
+    /// embed 失败静默,UI 不显示 banner。
+    func handleSearchQueryChange(_ newValue: String) {
+        let trimmed = newValue.trimmingCharacters(in: .whitespaces)
 
-            // 语义模式专属提示
-            if searchMode == .semantic {
-                if isSemanticSearchInFlight {
-                    HStack(spacing: 8) {
-                        ProgressView().scaleEffect(0.8)
-                        Text(NSLocalizedString("正在按相关度搜索…", comment: "Semantic search in progress"))
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 16)
-                } else if semanticSearchFailed {
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                            .font(.caption)
-                        Text(NSLocalizedString("语义搜索网络错误,试试字面模式", comment: "Semantic search network error"))
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 16)
-                } else if let coverage = semanticIndexCoverage, coverage < 0.95, semanticTotalCount > 0 {
-                    let unindexed = semanticTotalCount - Int(Double(semanticTotalCount) * coverage)
-                    HStack(spacing: 6) {
-                        Image(systemName: "info.circle.fill")
-                            .foregroundStyle(.blue)
-                            .font(.caption)
-                        Text(String(
-                            format: NSLocalizedString("有 %d 条日记还没生成语义索引,可能漏在结果外", comment: "Semantic index incomplete hint"),
-                            unindexed
-                        ))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 16)
+        keywordSearchTask?.cancel()
+        semanticSearchTask?.cancel()
+        semanticAuxResults = []
+        semanticSearchPending = false
+        semanticSearchFailureNotifiedFor = nil
+        keywordSearchSettled = false
+        semanticSearchGen &+= 1
+        let myGen = semanticSearchGen
+
+        guard !trimmed.isEmpty else {
+            searchResults = []
+            return
+        }
+        searchResults = []
+
+        // keyword: 180ms debounce 立刻出。
+        keywordSearchTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !Task.isCancelled else { return }
+            let hits = await keywordHits(for: trimmed)
+            guard !Task.isCancelled else { return }
+            self.searchResults = hits
+            self.keywordSearchSettled = true
+        }
+
+        // semantic: 短查询不触发 — 1 字符的"快"对中文是无意义索引基准,会把
+        // top-K 全占了。≥ 2 字符才进队。
+        guard trimmed.count >= 2 else { return }
+        semanticSearchPending = true
+        semanticSearchTask = Task { @MainActor in
+            // 600ms debounce 期间 semanticSearchPending 已 true → UI 显示"正在扩展搜索…"
+            // 不会在空窗里先闪"没有匹配"。
+            defer {
+                if semanticSearchGen == myGen { semanticSearchPending = false }
+            }
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled, semanticSearchGen == myGen else { return }
+            let result = await InsightsEngine.shared.searchSemantic(query: trimmed, topK: 20)
+            guard !Task.isCancelled, semanticSearchGen == myGen else { return }
+            // queryEmbedded == false → embed 失败,result.ids 已 fallback 到时间倒序兜底,
+            // 但那不是"语义补充"语义。静默丢弃,不污染 aux section。
+            guard result.queryEmbedded else {
+                semanticAuxResults = []
+                if semanticSearchFailureNotifiedFor != trimmed {
+                    semanticSearchFailureNotifiedFor = trimmed
+                    LumoryToastCenter.shared.show(
+                        NSLocalizedString("search.semanticUnavailable", comment: "Semantic search unavailable toast"),
+                        severity: .info
+                    )
                 }
+                return
+            }
+            semanticAuxResults = result.ids.compactMap {
+                try? viewContext.existingObject(with: $0) as? DiaryEntry
             }
         }
-        .padding(.top, 8)
+    }
+
+    private func removeDeletedEntryFromSearchResults(_ objectID: NSManagedObjectID) {
+        searchResults.removeAll { $0.objectID == objectID }
+        semanticAuxResults.removeAll { $0.objectID == objectID }
     }
 
     @ViewBuilder
     var searchResultsList: some View {
         let trimmed = searchQuery.trimmingCharacters(in: .whitespaces)
-        VStack(spacing: 0) {
-            searchModeHeader
-            searchResultsBody(trimmed: trimmed)
-        }
+        searchResultsBody(trimmed: trimmed)
     }
 
     @ViewBuilder
     private func searchResultsBody(trimmed: String) -> some View {
+        // wave14 — 渲染时实时 dedup:semantic aux 中已被 keyword 命中的去掉,避免两 section
+        // 出现重复条目。即便 keyword 在 semantic 后到达,view 层 filter 也能正确响应。
+        let keywordIds = Set(searchResults.map { $0.objectID })
+        let displayedAux = semanticAuxResults.filter { !keywordIds.contains($0.objectID) }
+
         if trimmed.isEmpty {
             Spacer(minLength: 0)
-            Text(searchMode == .keyword
-                 ? NSLocalizedString("按标题、正文或主题匹配", comment: "Keyword search hint")
-                 : NSLocalizedString("输入关键词后按回车进行语义搜索", comment: "Semantic search hint"))
+            Text(NSLocalizedString("按标题、正文或主题匹配", comment: "Search hint"))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Spacer(minLength: 0)
-        } else if searchMode == .semantic && isSemanticSearchInFlight && searchResults.isEmpty {
-            // loading 第一次(已经有 header 上的 spinner,这里给 list 区域空白避免突然弹空状态)。
-            Spacer(minLength: 0)
-        } else if searchResults.isEmpty {
-            Spacer(minLength: 0)
-            VStack(spacing: 8) {
-                Image(systemName: "doc.text.magnifyingglass")
-                    .font(.system(size: 28, weight: .light))
-                    .foregroundStyle(.secondary.opacity(0.5))
-                Text(NSLocalizedString("没有匹配的日记", comment: "No results"))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+        } else if searchResults.isEmpty && displayedAux.isEmpty {
+            if !keywordSearchSettled {
+                // keyword 还在 180ms debounce 或 bg fetch — 静默空白,让用户感觉 keyword 立刻出。
+                // 不在键入瞬间就闪 "正在扩展搜索…",那个 loading 是 keyword 真的为空时才有意义。
+                Spacer(minLength: 0)
+                Spacer(minLength: 0)
+            } else if semanticSearchPending {
+                // keyword 已 settle 但命中 0 + semantic 还在跑 → 显示"正在扩展搜索…"。
+                Spacer(minLength: 0)
+                HStack(spacing: 8) {
+                    ProgressView().scaleEffect(0.7)
+                    Text(NSLocalizedString("search.expanding", comment: "Semantic expanding"))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Spacer(minLength: 0)
+            } else {
+                Spacer(minLength: 0)
+                VStack(spacing: 8) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        // **P2 fix (2026-05-13 superreview)**:硬编码 28 → 语义 `.title`(28pt)
+                        // 走 Dynamic Type。
+                        .font(.title.weight(.light))
+                        .foregroundStyle(.secondary.opacity(0.5))
+                    Text(NSLocalizedString("没有匹配的日记", comment: "No results"))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Spacer(minLength: 0)
         } else {
             List {
-                ForEach(searchResults, id: \.objectID) { entry in
-                    Button {
-                        shouldStartEditing = false
-                        selectedEntry = entry
-                    } label: {
-                        HomeTimelineCard(entry: entry, appLanguage: appLanguage)
-                            .padding(.bottom, 10)
-                            .contentShape(Rectangle())
+                Section {
+                    ForEach(searchResults, id: \.objectID) { entry in
+                        searchResultRow(entry)
                     }
-                    .buttonStyle(PlainButtonStyle())
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                }
+                if !displayedAux.isEmpty {
+                    Section {
+                        ForEach(displayedAux, id: \.objectID) { entry in
+                            searchResultRow(entry)
+                        }
+                    } header: {
+                        Text(NSLocalizedString("search.relatedEntries.section", comment: "Related entries section"))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .optimizedList()
@@ -1340,65 +1355,20 @@ extension HomeView {
         }
     }
 
-    func scheduleInlineSearch(for query: String) {
-        searchTask?.cancel()
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else {
-            searchResults = []
-            return
+    @ViewBuilder
+    private func searchResultRow(_ entry: DiaryEntry) -> some View {
+        Button {
+            shouldStartEditing = false
+            selectedEntry = entry
+        } label: {
+            HomeTimelineCard(entry: entry, appLanguage: appLanguage)
+                .padding(.bottom, 10)
+                .contentShape(Rectangle())
         }
-        searchTask = Task {
-            try? await Task.sleep(nanoseconds: 180_000_000)
-            guard !Task.isCancelled else { return }
-            let hits = await keywordHits(for: trimmed)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                // mode-stale guard:onChange(of: searchMode) 已 cancel,但若 cancel 信号在
-                // `await keywordHits` 中途到达,Task.isCancelled 已能挡掉;这里再加一道
-                // searchMode 检查作 belt-and-suspenders,语义对称 triggerSemanticSearch 的
-                // semanticSearchGen 世代号 guard。
-                guard self.searchMode == .keyword else { return }
-                self.searchResults = hits
-            }
-        }
-    }
-
-    /// F1 语义搜索触发。`InsightsEngine.searchSemantic` 是 Sendable 接口,返 `[NSManagedObjectID]` +
-    /// 索引覆盖率。**世代号 guard** 防 stale write:用户连按两次 return,旧 task 跑完时世代号已变,
-    /// 不写 result。
-    func triggerSemanticSearch(for query: String) {
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else {
-            searchResults = []
-            isSemanticSearchInFlight = false
-            return
-        }
-        searchTask?.cancel()
-        semanticSearchGen &+= 1
-        let myGen = semanticSearchGen
-        isSemanticSearchInFlight = true
-        semanticSearchFailed = false
-
-        searchTask = Task { @MainActor in
-            let result = await InsightsEngine.shared.searchSemantic(query: trimmed, topK: 20)
-            // stale write guard
-            guard self.semanticSearchGen == myGen, !Task.isCancelled else { return }
-
-            self.semanticIndexCoverage = result.indexCoverage
-            self.semanticTotalCount = result.totalCount
-            self.isSemanticSearchInFlight = false
-
-            // embed 失败 → 提示用户换字面模式。不静默漏掉。
-            guard result.queryEmbedded else {
-                self.semanticSearchFailed = true
-                self.searchResults = []
-                return
-            }
-            // 物化 objectIDs → DiaryEntry。和 keywordHits 同 idiom(existingObject 容错 tombstone)。
-            self.searchResults = result.ids.compactMap {
-                try? viewContext.existingObject(with: $0) as? DiaryEntry
-            }
-        }
+        .buttonStyle(PlainButtonStyle())
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
     }
 
     @MainActor

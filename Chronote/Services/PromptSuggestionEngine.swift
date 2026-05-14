@@ -18,32 +18,29 @@ struct SuggestionBundle: Codable, Equatable {
     }
 }
 
-/// 喂给 LLM 的 grounding 数据。全部从 InsightsEngine 现有接口取，不自己造。
+/// 喂给 LLM 的 grounding 数据。**极简化**:gpt-5.5 自己能从原文里识别主题 / 情绪 /
+/// 重复人物,不再做客户端预聚合(topThemes / mood 极值 / 平均)那套老模型脚手架。
+/// `today` 是给模型的时间锚 —— 让它能推断"上周说要去滑冰"是已经发生过的,而不是未来事件。
 struct SuggestionContext {
-    let topThemes: [InsightsEngine.Theme]
-    let moodAvg30d: Double
-    let moodHighEntry: DiaryEntryData?   // 30 天情绪最高那条
-    let moodLowEntry: DiaryEntryData?    // 30 天情绪最低那条
-    let currentStreak: Int
-    let totalEntries: Int
-    let recentEntries: [DiaryEntryData]  // 最近 3 条，text 已截 ≤200 字
+    let today: Date
+    let recentEntries: [DiaryEntryData]  // 最近 5 条，text 已截 ≤300 字,降序(最新在前)
     let language: String                 // "zh" / "en"
 
     /// 稳定指纹——输入"明显"变了才重新生成。
     ///
-    /// 历史:V1 用 `totalEntries`,每写一篇就 +1,用户每次开 AskPast 都看到重生成 → 删了。
-    /// V2 只保留 latestWeek + top3themes,但走太远 —— 同一周内写新日记、moodHigh/Low 变了、
-    /// recentEntries 内容变了,指纹都不感知,AskPast 一直引用上周的旧片段。
-    /// V3:加"最新日记的 ID 前 8 位",新写日记触发刷新。
-    /// V4(当前):再加 30 天 mood 平均的 10% 桶 —— 用户编辑老条目改变情绪极端值时,
-    /// id 没变但 moodAvg 变了,V3 漏掉这个。10% 粒度足够稳定,小波动不触发刷新。
-    /// **用户看不到可见重生成**,因为 AskPastView 是 "cache 命中立刻展示 + detached
-    /// refresh" 模式,新 bundle 只在下次进入时浮上来。
+    /// 当前组成:`language | todayWeek | latestEntryWeek | latestEntryId`。
+    /// - **新写日记** → 新 entry id → 翻转
+    /// - **跨自然周** → today / latest entry 的 ISO 周编号变 → 翻转
+    /// - **同周内重打开** → 不变,沿用 cache(AskPastView 是"cache 命中立刻展示 +
+    ///   detached refresh"模式,触发的 refresh 也会因指纹不变而走 dedup join)
+    ///
+    /// 历史背景:之前的 V4 还把 top3 themes + moodAvg 30d 折进来,目的是让"编辑老日记
+    /// 改 mood"也能触发刷新。新版 prompt 已经不喂主题/情绪聚合给模型,这些维度的变化
+    /// 不会改变模型输出,折进指纹反而会无谓刷新。砍掉。
     func makeFingerprint() -> String {
-        let topNames = topThemes.prefix(3).map { $0.name.lowercased() }.joined(separator: "|")
         let latestId = recentEntries.first.map { String($0.id.uuidString.prefix(8)) } ?? "none"
-        let latestWeek: String = {
-            guard let latest = recentEntries.first else { return "none" }
+        func isoWeekString(from date: Date?) -> String {
+            guard let date else { return "none" }
             let formatter = DateFormatter()
             // ISO 8601 周年 + 周编号。**必须显式 pin calendar/locale** —— DateFormatter 默认
             // 用 Calendar.current(美区 firstWeekday=1,非 ISO)+ Locale.current,跨地区 /
@@ -51,16 +48,16 @@ struct SuggestionContext {
             formatter.calendar = Calendar(identifier: .iso8601)
             formatter.locale = Locale(identifier: "en_US_POSIX")
             formatter.dateFormat = "YYYY-'W'ww"
-            return formatter.string(from: latest.date)
-        }()
-        // 0..1 区间分成 10 档 → 单条日记 mood 改动通常落在同一桶,极端波动才跨桶。
-        let moodBucket = Int((moodAvg30d * 10).rounded())
-        return "\(language)|\(latestWeek)|\(latestId)|m\(moodBucket)|\(topNames)"
+            return formatter.string(from: date)
+        }
+        let todayWeek = isoWeekString(from: today)
+        let latestWeek = isoWeekString(from: recentEntries.first?.date)
+        return "\(language)|\(todayWeek)|\(latestWeek)|\(latestId)"
     }
 
     /// 数据太少时跳 AI，让调用方落到模板 fallback。
     var hasEnoughSignal: Bool {
-        totalEntries >= 3
+        recentEntries.count >= 3
     }
 }
 
@@ -100,10 +97,19 @@ final class PromptSuggestionEngine: ObservableObject {
 
     init(
         insights: InsightsEngine = .shared,
-        ai: AIServiceProtocol = OpenAIService.shared
+        ai: AIServiceProtocol? = nil
     ) {
         self.insights = insights
-        self.ai = ai
+        // **P1 fix (2026-05-14 superreview round 3)**:screenshot / UI-test 模式只 seed
+        // DiaryEntry,PromptSuggestionEngine 默认走 `OpenAIService.shared` → fresh sim / 无
+        // secret / 弱网 / 限流时 `refreshIfNeeded` 拿不到 bundle,InsightsView chip 区不渲染,
+        // `test_05_AskPast` 找不到 `insightsAskPastPresetChip0`。UI-test 模式注入 `MockAIService`
+        // (`composeSuggestions` 返回 deterministic bundle),让 chip 区稳定可截图。
+        #if DEBUG
+        self.ai = ai ?? (UITestSampleData.isActive ? MockAIService() : OpenAIService.shared)
+        #else
+        self.ai = ai ?? OpenAIService.shared
+        #endif
         self.current = Self.loadCache(key: cacheKey)
     }
 
@@ -236,39 +242,10 @@ final class PromptSuggestionEngine: ObservableObject {
     // MARK: Context building
 
     private func buildContext() async -> SuggestionContext {
-        let now = Date()
-        let calendar = Calendar.current
-        let themeRange = DateInterval(
-            start: calendar.date(byAdding: .day, value: -90, to: now) ?? now,
-            end: now
-        )
-        let moodRange = DateInterval(
-            start: calendar.date(byAdding: .day, value: -30, to: now) ?? now,
-            end: now
-        )
-
-        async let suggestionSnapshot = insights.suggestionSnapshot(
-            themeRange: themeRange,
-            moodRange: moodRange,
-            themeLimit: 5
-        )
-        async let stats = insights.writingStats()
-        async let recent = insights.recentEntries(limit: 3, textCharCap: 200)
-
-        let (snapshot, writingStats, recentEntries) = await (suggestionSnapshot, stats, recent)
-
-        let moodAvg = snapshot.moodPoints.isEmpty
-            ? 0.5
-            : snapshot.moodPoints.reduce(0.0) { $0 + $1.mood } / Double(snapshot.moodPoints.count)
+        let recentEntries = await insights.recentEntries(limit: 5, textCharCap: 300)
         let language = Self.detectLanguage(from: recentEntries)
-
         return SuggestionContext(
-            topThemes: snapshot.topThemes,
-            moodAvg30d: moodAvg,
-            moodHighEntry: snapshot.moodHighEntry,
-            moodLowEntry: snapshot.moodLowEntry,
-            currentStreak: writingStats.currentStreak,
-            totalEntries: writingStats.totalEntries,
+            today: Date(),
             recentEntries: recentEntries,
             language: language
         )

@@ -1,5 +1,16 @@
 import Foundation
 
+// **P1 fix (2026-05-13 superreview)**:DailyCell 之前定义在 WritingHeatmap.swift(View 层)
+// 但被 Service 层(InsightsResultCache.Snapshot)反向引用,违反分层。挪到 Service 文件让所有
+// reader(InsightsView 数据流 + WritingHeatmap 视图组件)从同一处 import。
+// DailyCell 没有任何 View 依赖(纯 Date / Double / Int),搬运成本零。
+struct DailyCell: Identifiable, Equatable, Hashable {
+    let date: Date
+    let mood: Double
+    let wordCount: Int
+    var id: Date { date }
+}
+
 /// Insights sheet 的 stale-while-revalidate 缓存。
 ///
 /// 背景:`InsightsView` 是 HomeView 的 `.sheet`,SwiftUI dismiss 后整个 view 销毁,
@@ -21,11 +32,21 @@ final class InsightsResultCache {
     private init() {}
 
     struct Snapshot {
-        let moodPoints: [InsightsEngine.MoodPoint]
         let themes: [InsightsEngine.Theme]
-        let stats: InsightsEngine.WritingStats
+        // **P1 fix (2026-05-13 superreview)**:原 `stats: WritingStats` 字段在 InsightsView
+        // 重构 wave 后已无 reader(只一处 writer 塞 `.empty`),归类 dead code,删除。
+        // 全局 writingStats 仍由 InsightsEngine.writingStats() / AskPastView preset 使用,
+        // 但跟浓缩卡 SWR cache 无关。
         let dailyCells: [DailyCell]
-        let facts: [CorrelationFact]
+        // MoodStoryChart 整块删除(用户决定 2026-05-12)— `moodPoints` 字段一并退出 snapshot,
+        // pointsTask 在 reload 中也删掉,省一次 bg fetch + reduce 聚合。
+        // CorrelationChipList 整块删除 — `facts` 字段同步退出 snapshot,所有 caller 都不再读写。
+        // wave15 v3 — 浓缩卡专用 stats 也进 SWR snapshot。原本 reload 入口强制把这俩
+        // 设 nil 等 async,导致 SWR 命中时仍要走 SkeletonNarrativeSummaryCard 中间态,
+        // 卡 in/out 触发 LazyVStack reflow → 切 range 闪烁。一并 cache 后命中即用,
+        // 后台 reload 完成后用 fresh 值覆盖。
+        let entryCount: Int
+        let mostRecentEntryDate: Date?
     }
 
     /// Key = TimeRange。Bucket 一一对应 range,不入 key。

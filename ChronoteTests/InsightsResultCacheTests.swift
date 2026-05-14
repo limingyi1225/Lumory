@@ -28,22 +28,15 @@ struct InsightsResultCacheTests {
 
     // MARK: - Fixture
 
-    /// 构造一个最小可识别的 Snapshot。`marker` 用 `stats.totalEntries` 携带,
+    /// 构造一个最小可识别的 Snapshot。`marker` 用 `entryCount` 携带,
     /// 比较时只看这个字段(Snapshot 整体不是 Equatable)。
+    /// (2026-05-13 superreview:原 `stats.totalEntries` 当 marker 的 stats 字段已删,marker 改走 entryCount。)
     private func makeSnapshot(marker: Int) -> InsightsResultCache.Snapshot {
-        let stats = InsightsEngine.WritingStats(
-            totalEntries: marker,
-            currentStreak: 0,
-            longestStreak: 0,
-            totalWords: 0,
-            avgMood: 0.5
-        )
         return InsightsResultCache.Snapshot(
-            moodPoints: [],
             themes: [],
-            stats: stats,
             dailyCells: [],
-            facts: []
+            entryCount: marker,
+            mostRecentEntryDate: nil
         )
     }
 
@@ -67,7 +60,7 @@ struct InsightsResultCacheTests {
         cache.update(snap, for: .month)
         let got = cache.snapshot(for: .month)
         #expect(got != nil)
-        #expect(got?.stats.totalEntries == 42)
+        #expect(got?.entryCount == 42)
     }
 
     @Test func update_differentRanges_dontInterfere() {
@@ -77,8 +70,8 @@ struct InsightsResultCacheTests {
         let yearSnap = makeSnapshot(marker: 99)
         cache.update(monthSnap, for: .month)
         cache.update(yearSnap, for: .year)
-        #expect(cache.snapshot(for: .month)?.stats.totalEntries == 1)
-        #expect(cache.snapshot(for: .year)?.stats.totalEntries == 99)
+        #expect(cache.snapshot(for: .month)?.entryCount == 1)
+        #expect(cache.snapshot(for: .year)?.entryCount == 99)
         // 未写过的 range 应该仍然 nil。
         #expect(cache.snapshot(for: .quarter) == nil)
         #expect(cache.snapshot(for: .all) == nil)
@@ -89,7 +82,7 @@ struct InsightsResultCacheTests {
         let cache = InsightsResultCache.shared
         cache.update(makeSnapshot(marker: 1), for: .month)
         cache.update(makeSnapshot(marker: 2), for: .month)
-        #expect(cache.snapshot(for: .month)?.stats.totalEntries == 2)
+        #expect(cache.snapshot(for: .month)?.entryCount == 2)
     }
 
     @Test func update_allFourRanges_storedIndependently() {
@@ -99,10 +92,10 @@ struct InsightsResultCacheTests {
         cache.update(makeSnapshot(marker: 20), for: .quarter)
         cache.update(makeSnapshot(marker: 30), for: .year)
         cache.update(makeSnapshot(marker: 40), for: .all)
-        #expect(cache.snapshot(for: .month)?.stats.totalEntries == 10)
-        #expect(cache.snapshot(for: .quarter)?.stats.totalEntries == 20)
-        #expect(cache.snapshot(for: .year)?.stats.totalEntries == 30)
-        #expect(cache.snapshot(for: .all)?.stats.totalEntries == 40)
+        #expect(cache.snapshot(for: .month)?.entryCount == 10)
+        #expect(cache.snapshot(for: .quarter)?.entryCount == 20)
+        #expect(cache.snapshot(for: .year)?.entryCount == 30)
+        #expect(cache.snapshot(for: .all)?.entryCount == 40)
     }
 
     // MARK: - clear()
@@ -143,6 +136,6 @@ struct InsightsResultCacheTests {
         cache.clear()
         // clear 后再写应该正常工作(不残留状态)。
         cache.update(makeSnapshot(marker: 5), for: .month)
-        #expect(cache.snapshot(for: .month)?.stats.totalEntries == 5)
+        #expect(cache.snapshot(for: .month)?.entryCount == 5)
     }
 }

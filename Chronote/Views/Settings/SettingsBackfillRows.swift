@@ -259,7 +259,7 @@ struct OneClickRebuildRow: View {
         case .embeddings:
             return "\(embeddingService.progress.processed)/\(embeddingService.progress.total)"
         case .suggestions:
-            return NSLocalizedString("AI 写作中", comment: "One-click suggestions stage detail")
+            return NSLocalizedString("生成建议中…", comment: "One-click suggestions stage detail")
         default:
             return ""
         }

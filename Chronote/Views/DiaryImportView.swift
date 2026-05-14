@@ -149,11 +149,22 @@ struct DiaryImportView: View {
         }
     }
 
+    #if canImport(UIKit)
+    private func playImportOutcomeHaptic(_ outcome: ImportOutcome) {
+        switch outcome {
+        case .finished(let succeeded, let failed, _):
+            HapticManager.shared.notification(succeeded > 0 && failed == 0 ? .success : .warning)
+        case .duplicatesOnly, .noEntriesDetected, .error:
+            HapticManager.shared.notification(.warning)
+        }
+    }
+    #endif
+
     // MARK: - Logic
     private func startImport() {
         // **不再立即 dismiss**：等导入完成（失败也算完成）再弹 alert 给用户看数字，然后 dismiss。
         // 三种结束态:解析抛错 / 解析返回 0 条 / 正常完成 —— 走不同 alert 文案。
-        Task {
+        Task { @MainActor in
             do {
                 let result = try await importService.importEntries(from: pastedText, context: viewContext)
                 if result.succeeded == 0 && result.failed == 0 && result.skipped == 0 {
@@ -171,6 +182,9 @@ struct DiaryImportView: View {
                 // `DiaryImportError.errorDescription` 里翻译过。
                 outcome = .error(error.localizedDescription)
             }
+            #if canImport(UIKit)
+            playImportOutcomeHaptic(outcome)
+            #endif
             showResultAlert = true
         }
     }

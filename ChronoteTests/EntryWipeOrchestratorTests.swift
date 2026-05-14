@@ -156,19 +156,10 @@ final class EntryWipeOrchestratorTests: XCTestCase {
     func testBulkWipe_clearsInsightsResultCache() async {
         // Seed:塞一份非空 snapshot 进 .month bucket。
         let snap = InsightsResultCache.Snapshot(
-            moodPoints: [
-                InsightsEngine.MoodPoint(date: Date(), mood: 0.7, entryCount: 3)
-            ],
             themes: [],
-            stats: InsightsEngine.WritingStats(
-                totalEntries: 5,
-                currentStreak: 2,
-                longestStreak: 7,
-                totalWords: 1200,
-                avgMood: 0.6
-            ),
             dailyCells: [],
-            facts: []
+            entryCount: 5,
+            mostRecentEntryDate: nil
         )
         InsightsResultCache.shared.update(snap, for: .month)
         XCTAssertNotNil(InsightsResultCache.shared.snapshot(for: .month), "seed precondition")
@@ -274,17 +265,10 @@ final class EntryWipeOrchestratorTests: XCTestCase {
     func testSingleDelete_clearsInsightsResultCache() async {
         // Seed 跟 bulk 用例同样模式。
         let snap = InsightsResultCache.Snapshot(
-            moodPoints: [],
             themes: [],
-            stats: InsightsEngine.WritingStats(
-                totalEntries: 1,
-                currentStreak: 1,
-                longestStreak: 1,
-                totalWords: 100,
-                avgMood: 0.5
-            ),
             dailyCells: [],
-            facts: []
+            entryCount: 1,
+            mostRecentEntryDate: nil
         )
         InsightsResultCache.shared.update(snap, for: .month)
         InsightsResultCache.shared.update(snap, for: .quarter)

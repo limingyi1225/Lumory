@@ -1,7 +1,12 @@
 import SwiftUI
 
 struct DiaryEntryRow: View {
-    let entry: DiaryEntry
+    // **P1 fix (2026-05-13 superreview round 2)**:与同期 `HomeTimelineCard.entry` 写法对齐。
+    // AI summary writeback(`EntryCreationService.performAIWriteback`)异步写回
+    // `entry.summary` 时,`@ObservedObject` 让 SwiftUI 稳定收到 NSManagedObject 的 willChange,
+    // 触发 row 重建把 shimmer 换成真摘要。原 `let entry: DiaryEntry` + `FetchedResults publish`
+    // 在某些场景下不够稳(HomeTimelineCard:11 注释已 callout 同款踩坑)。
+    @ObservedObject var entry: DiaryEntry
     @State private var thumbnailImage: ThumbnailImageDecoder.PlatformImage?
     @State private var loadedThumbnailFileName: String?
     @State private var shimmerPhase: CGFloat = 0
@@ -16,10 +21,6 @@ struct DiaryEntryRow: View {
     private var isSummaryLoading: Bool {
         guard entry.managedObjectContext != nil, !entry.isDeleted else { return false }
         return entry.summary == nil && !(entry.text ?? "").isEmpty
-    }
-
-    private var hasAnalyzedMood: Bool {
-        abs(entry.moodValue - 0.5) > 0.0001 && abs(entry.moodValue) > 0.0001
     }
 
     var body: some View {
@@ -48,19 +49,19 @@ struct DiaryEntryRow: View {
 
                         // Metadata row
                         HStack(spacing: 12) {
-                            // Mood indicator — 0.5 是 neutral sentinel（当前默认值），0.0 是老版本的
-                            // Core Data 默认值（升级用户 / CloudKit 老记录可能带 0.0），两者都视作
-                            // "未分析"隐藏掉 indicator。AI 真实返回值落在开区间 (0,1)，精确命中
-                            // 0.0 或 0.5 的概率极低，作 sentinel 够用。浮点比较用 tolerance 防御桥接误差。
-                            if hasAnalyzedMood {
-                                MoodIndicator(value: entry.moodValue)
-                            }
+                            // MoodIndicator(色点 + "不错" / "较差" 文字)已删除 (2026-05-12) —
+                            // 用户反馈跟整 row 的 liquidGlassCard mood tint 是同一信息双重表达。
 
-                            // Audio indicator
-                            if entry.audioFileName != nil {
-                                Label("", systemImage: "waveform")
+                            // 录音标识 — 极简 mic icon,没数字 label。
+                            // wave17 superreview P2-10 加回:大 waveform 太杂被砍后,Insights row 完全
+                            // 看不出哪条有录音。换成更小的 mic.fill,占位仅 caption2 不抢内容主体。
+                            if let audio = entry.audioFileName, !audio.isEmpty {
+                                Image(systemName: "mic.fill")
                                     .font(.caption)
-                                    .foregroundColor(.blue)
+                                    // 改用 accentColor(App 主色调浅蓝)—— 原 .orange 跟整体浅蓝色系
+                                    // 冲突,小 metadata 图标用主色调更协调(2026-05-14 用户反馈)。
+                                    .foregroundColor(.accentColor)
+                                    .accessibilityLabel(NSLocalizedString("含录音", comment: "Audio attachment indicator"))
                             }
 
                             // Image indicator
@@ -110,17 +111,28 @@ struct DiaryEntryRow: View {
             }
         }
         .padding()
-        // P1-Home-8 整张 row 给 mood gradient 极淡背景 — entry.moodColor tint 0.06,
-        // 让"心情色"从只在 thumbnail 旁的小色块,提升为整 row 的氛围。强度低,不抢内容主体。
+        // P1-Home-8 整张 row 给 mood gradient 淡背景 — entry.moodColor tint 0.10。
+        // 2026-05-12:MoodIndicator(色点 + 文字 label)删除后,row mood 信号只剩这层 tint,
+        // 从 0.06 → 0.10 让 mood 仍可一眼分辨;低于 0.15 仍不抢内容主体。
         .liquidGlassCard(
             cornerRadius: LumoryCornerRadius.card,
             tint: Color.moodSpectrum(value: entry.moodValue),
-            tintStrength: 0.06,
+            tintStrength: 0.10,
             interactive: true
         )
         .onAppear {
             if isSummaryLoading {
                 startShimmerAnimation()
+            }
+        }
+        // **P1 fix (2026-05-13 superreview)**:summary writeback 后 isSummaryLoading 翻 false,
+        // 但 repeatForever 动画上下文仍持有 shimmerPhase;LazyVStack reuse 时 onAppear 未必再
+        // fire。显式 onChange 启停,reset 走 zero-duration withAnimation 打断 repeat 链。
+        .onChange(of: isSummaryLoading) { _, loading in
+            if loading {
+                startShimmerAnimation()
+            } else {
+                stopShimmerAnimation()
             }
         }
         .task(id: thumbnailFileName) {
@@ -180,10 +192,16 @@ struct DiaryEntryRow: View {
         }
     }
 
+    private func stopShimmerAnimation() {
+        withAnimation(.linear(duration: 0)) {
+            shimmerPhase = 0
+        }
+    }
+
     private var dateBadge: some View {
         VStack(spacing: 2) {
             Text(dayString)
-                .font(.system(size: 24, weight: .bold))
+                .font(LumoryFonts.entryDateBadge)
                 .foregroundColor(.primary)
 
             Text(monthString)
@@ -227,39 +245,8 @@ struct DiaryEntryRow: View {
     }
 }
 
-// MARK: - Supporting Views
-struct MoodIndicator: View {
-    let value: Double
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(Color.moodSpectrum(value: value))
-                .frame(width: 8, height: 8)
-
-            Text(moodText)
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-    }
-
-    private var moodText: String {
-        switch value {
-        case 0..<0.2:
-            return NSLocalizedString("mood.veryBad", value: "很差", comment: "Mood: very bad")
-        case 0.2..<0.4:
-            return NSLocalizedString("mood.bad", value: "较差", comment: "Mood: bad")
-        case 0.4..<0.6:
-            return NSLocalizedString("mood.neutral", value: "一般", comment: "Mood: neutral")
-        case 0.6..<0.8:
-            return NSLocalizedString("mood.good", value: "不错", comment: "Mood: good")
-        case 0.8...1.0:
-            return NSLocalizedString("mood.veryGood", value: "很好", comment: "Mood: very good")
-        default:
-            return NSLocalizedString("mood.neutral", value: "一般", comment: "Mood: neutral")
-        }
-    }
-}
+// MoodIndicator struct(色点 + 文字 label)已删除(2026-05-12):整 row mood tint 已表达,
+// 不再需要内部小色点。
 
 #Preview {
     DiaryEntryRow(entry: {

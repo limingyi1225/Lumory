@@ -1,6 +1,6 @@
 ---
 name: sse-pipeline-reviewer
-description: Proactively review any change to Lumory's SSE / AI streaming pipeline (server proxy + client parser + UI consumers). Use IMMEDIATELY after edits to server/index.js, Chronote/Services/OpenAIService.swift, Chronote/Services/NetworkRetryHelper.swift, Chronote/Services/AIService.swift, Chronote/Services/AppSecrets.swift, ecosystem.config.js, or any consumer of streamReportEvents / askEvents (NarrativeReader, AskPastView, InsightsEngine).
+description: Proactively review any change to Lumory's SSE / AI streaming pipeline (server proxy + client parser + UI consumers). Use IMMEDIATELY after edits to server/index.js, Chronote/Services/OpenAIService.swift, Chronote/Services/NetworkRetryHelper.swift, Chronote/Services/AIService.swift, Chronote/Services/AppSecrets.swift, ecosystem.config.js, or any consumer of streamReportEvents / askEvents (NarrativeSummaryCard, AskPastView, InsightsEngine).
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -63,7 +63,7 @@ tools: Read, Grep, Glob, Bash
 
 ### 7. 流式事件契约(StreamEvent)
 
-文件:[AIService.swift](Chronote/Services/AIService.swift) + 消费者(NarrativeReader / AskPastView / InsightsEngine)
+文件:[AIService.swift](Chronote/Services/AIService.swift) + 消费者(NarrativeSummaryCard / AskPastView / InsightsEngine)
 
 - **`AsyncStream<StreamEvent>`** 是契约,事件类型至少含 `.chunk(text)` / `.truncated` / 错误终态
 - **`.truncated` 必须由 UI 消费端 set `isIncomplete` flag 显示警示条**,**绝不能**在 chunk 流里 yield 中文错误字符串当文本(老 bug,被显式 fix 过)

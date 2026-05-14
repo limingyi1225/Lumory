@@ -12,6 +12,7 @@ struct MarkdownText: View {
     let markdown: String
     var inlineFont: Font = .body
     var lineSpacing: CGFloat = 4
+    var preserveLineBreaks: Bool = false
 
     // **blocks 缓存**：body 每次重评都 full-parse 的 O(n) 扫描成本在流式下不可接受。
     // 缓存从 task(id:) 异步填充；init/body 都不做 markdown 解析，避免 SwiftUI 重建 view
@@ -19,10 +20,11 @@ struct MarkdownText: View {
     @State private var cachedBlocks: [Block] = []
     @State private var cacheKey: String?
 
-    init(markdown: String, inlineFont: Font = .body, lineSpacing: CGFloat = 4) {
+    init(markdown: String, inlineFont: Font = .body, lineSpacing: CGFloat = 4, preserveLineBreaks: Bool = false) {
         self.markdown = markdown
         self.inlineFont = inlineFont
         self.lineSpacing = lineSpacing
+        self.preserveLineBreaks = preserveLineBreaks
     }
 
     var body: some View {
@@ -113,21 +115,23 @@ struct MarkdownText: View {
     }
 
     private func refreshCache(for value: String) async {
-        guard cacheKey != value else { return }
+        let key = "\(preserveLineBreaks)|\(value)"
+        guard cacheKey != key else { return }
 
         if value.isEmpty {
             cachedBlocks = []
-            cacheKey = value
+            cacheKey = key
             return
         }
 
+        let preserveLineBreaks = preserveLineBreaks
         let blocks = await Task.detached(priority: .userInitiated) {
-            Self.parse(value)
+            Self.parse(value, preserveLineBreaks: preserveLineBreaks)
         }.value
 
         guard !Task.isCancelled else { return }
         cachedBlocks = blocks
-        cacheKey = value
+        cacheKey = key
     }
 
     // MARK: Block model
@@ -144,7 +148,7 @@ struct MarkdownText: View {
     // MARK: Parsing
 
     /// 行扫描式 parser。性能：O(行数)。为 AI 流式响应优化——不抛错，容忍未闭合的 ```块。
-    nonisolated static func parse(_ input: String) -> [Block] {
+    nonisolated static func parse(_ input: String, preserveLineBreaks: Bool = false) -> [Block] {
         let raw = input.replacingOccurrences(of: "\r\n", with: "\n")
         let lines = raw.components(separatedBy: "\n")
 
@@ -155,7 +159,8 @@ struct MarkdownText: View {
 
         func flushParagraph() {
             guard !paragraph.isEmpty else { return }
-            let joined = paragraph.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            let separator = preserveLineBreaks ? "\n" : " "
+            let joined = paragraph.joined(separator: separator).trimmingCharacters(in: .whitespacesAndNewlines)
             if !joined.isEmpty {
                 blocks.append(.paragraph(Self.inlineAttributed(joined)))
             }

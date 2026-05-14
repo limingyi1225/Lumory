@@ -37,12 +37,20 @@ struct ThemeMergeIntoSheet: View {
     /// 弹 alert 显式列出附带搬移的标签,让用户确认。空 = 无需弹。
     @State private var pendingMergeTarget: InsightsEngine.Theme?
     @State private var pendingMergeCollateral: [String] = []
+    @State private var isConfirming = false
 
     private var filteredCandidates: [InsightsEngine.Theme] {
+        // wave17 双重保险:caller(InsightsView / ThemeFilteredEntriesView)用 `$0.id != source.id` 即
+        // **严格 name 相等** filter,但如果 themes 列表里出现 source 的别名形态(如 source="Abby" 但
+        // themes 里同时有"Abby"和"宝贝"未折叠成同 bucket 的异常),严格 name filter 抓不到 → 用户
+        // 在 sheet 里能看到自己 / 自己的别名,合并到自己变 noop。这里用 canonical 二次 filter 兜底。
+        let resolver = ThemeAliasResolver.shared
+        let sourceCanon = resolver.canonicalize(source.name)
         let trimmed = searchText.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return candidates }
-        return candidates.filter {
-            $0.name.localizedCaseInsensitiveContains(trimmed)
+        return candidates.filter { candidate in
+            guard resolver.canonicalize(candidate.name) != sourceCanon else { return false }
+            if trimmed.isEmpty { return true }
+            return candidate.name.localizedCaseInsensitiveContains(trimmed)
         }
     }
 
@@ -84,6 +92,7 @@ struct ThemeMergeIntoSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(NSLocalizedString("取消", comment: "Cancel")) { dismiss() }
+                        .disabled(isConfirming)
                 }
             }
             .alert(
@@ -138,7 +147,7 @@ struct ThemeMergeIntoSheet: View {
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .liquidGlassCard(cornerRadius: 14, tint: Color.moodSpectrum(value: source.avgMood), tintStrength: 0.16, interactive: false)
+            .liquidGlassCard(cornerRadius: LumoryCornerRadius.card, tint: Color.moodSpectrum(value: source.avgMood), tintStrength: 0.16, interactive: false)
         }
     }
 
@@ -170,7 +179,11 @@ struct ThemeMergeIntoSheet: View {
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .liquidGlassCard(cornerRadius: 14, tint: Color.moodSpectrum(value: target.avgMood), tintStrength: 0.10, interactive: true)
+            // wave17 — 整张卡 hit area。`liquidGlassCard(interactive: true)` 加的玻璃高光层会让
+            // hit testing 只命中 Image / Text 实际 pixel,中间空白区域被认为透明不响应 → 用户反馈
+            // "只能点右边小标识"。`.contentShape` 显式声明卡矩形整片都是 button area。
+            .contentShape(RoundedRectangle(cornerRadius: LumoryCornerRadius.card, style: .continuous))
+            .liquidGlassCard(cornerRadius: LumoryCornerRadius.card, tint: Color.moodSpectrum(value: target.avgMood), tintStrength: 0.10, interactive: true)
         }
         .buttonStyle(PressableScaleButtonStyle())
     }
@@ -201,7 +214,7 @@ struct ThemeMergeIntoSheet: View {
     // MARK: Actions
 
     private func select(_ target: InsightsEngine.Theme) {
-        guard pendingMergeTarget == nil else { return }
+        guard !isConfirming, pendingMergeTarget == nil else { return }
         // mergeThemes 语义:source 若是某 group 的 alias / canonical,**整组**搬到 target。
         // 没被告知的话 long-press 合并感觉只搬一个名字。这里先 preview,有附带搬移就弹 alert。
         let collateral = ThemeAliasResolver.shared.collateralLabels(forMerging: source.name, into: target.name)
@@ -214,6 +227,8 @@ struct ThemeMergeIntoSheet: View {
     }
 
     private func performConfirm(target: InsightsEngine.Theme) {
+        guard !isConfirming else { return }
+        isConfirming = true
         let outcome = onConfirm(target)
         #if canImport(UIKit)
         if outcome.isSuccess {

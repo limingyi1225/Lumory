@@ -1,4 +1,5 @@
 import Foundation
+import CoreData
 
 /// 删除日记后必跑的"派生缓存清理"统一入口。
 ///
@@ -29,6 +30,13 @@ enum EntryWipeOrchestrator {
     ///
     /// `await` 直到所有清理完成 — 调用方应在 `viewContext.save()` 成功分支 await 它,失败分支 rollback 不调。
     static func performBulkWipeCleanup() async {
+        // **P1 fix (2026-05-13 superreview)**:写日记后触发 60s NarrativePrecompute debounce 窗口内
+        // → 用户立刻删全部日记 → 老 task 完成 stream 后写一条 narrative 引用 ghost entry IDs。
+        // SettingsView.resetNarrativeCache 单独的"清除 AI 回顾缓存"按钮已修过这条 race
+        // ([SettingsView.swift:654]),bulk wipe 路径(SettingsEntryDeletionService.deleteAll +
+        // DatabaseRecoveryService.completeRecreateRecovery)漏。await 等老 task 完整退出 +
+        // 世代号推过去后才继续 5 件套清理。
+        await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
         ReminderService.shared.requestReschedule()
         ThemeAliasResolver.shared.resetForBulkEntryWipe()
         PromptSuggestionEngine.shared.clearCache()
@@ -65,5 +73,26 @@ enum EntryWipeOrchestrator {
         // 在今天剩余时间显示用已删 entry 算的 placeholder。`invalidateCaches()` 让下一次 widget refresh
         // 走 full path 重抓。
         Task { await WidgetSnapshotService.shared.invalidateCaches() }
+        // 单删一篇日记后,现有 narrative body 可能引用 ghost entry 内容。这里只让旧
+        // narrative 退出"浓缩卡 cache"资格,不删除 AIConversation 历史记录。
+        Task { await Self.invalidateNarrativeCacheOnEntryChange() }
+    }
+
+    /// **entry 内容变化(单删 / 编辑文字 / 日期 / 心情 / 摘要)时**调:cancel 在飞 precompute
+    /// 防 ghost 写盘 + 标记旧 narrative 不再当浓缩卡 cache 使用。
+    ///
+    /// 单条 entry 内容变(文字改写 / mood 改 / themes 改)足以让现存 narrative 的 body
+    /// 引用过期。旧 AIConversation 仍保留在历史回顾里,但 `NarrativeCacheService.latest`
+    /// 会跳过 invalidation marker 之前的记录。
+    static func invalidateNarrativeCacheOnEntryChange() async {
+        // **P2 fix (2026-05-14 codex review)**:marker + 通知必须在 await cancel **之前**写。
+        // `cancelPendingAndBumpGeneration` 内 `await task?.value` 会等在飞的 precompute stream
+        // 退出 —— 这期间若 invalidation marker 还没写,用户编辑/删除后立刻打开 Insights,
+        // `NarrativeCacheService.latest()` 仍会命中编辑前的旧 narrative(ghost content window)。
+        // marker 是同步写 UserDefaults,提前即可关掉这个窗口;cancel + 世代号仍负责挡住在飞
+        // task 写盘(它还有 `invalidatedBefore >= streamStartTime` guard 兜底)。
+        NarrativeCacheService.markInvalidatedForEntryChange()
+        NotificationCenter.default.post(name: .lumoryNarrativeCacheInvalidated, object: nil)
+        await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
     }
 }

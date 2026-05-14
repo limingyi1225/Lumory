@@ -54,20 +54,6 @@ struct BucketGroupingTests {
         #expect(bucket == expected)
     }
 
-    @Test func week_bucketsToFirstWeekday() {
-        let date = makeDate(year: 2024, month: 6, day: 15, hour: 14, minute: 30) // Saturday
-        let bucket = InsightsEngine.startOfBucket(date, bucket: .week, calendar: calendar)
-        // Gregorian first weekday = 1 (Sun). Week containing Sat June 15 2024 starts Sun June 9.
-        let expected = makeDate(year: 2024, month: 6, day: 9, hour: 0, minute: 0)
-        #expect(bucket == expected)
-    }
-
-    @Test func month_bucketsToFirstOfMonth() {
-        let date = makeDate(year: 2024, month: 6, day: 15)
-        let bucket = InsightsEngine.startOfBucket(date, bucket: .month, calendar: calendar)
-        let expected = makeDate(year: 2024, month: 6, day: 1)
-        #expect(bucket == expected)
-    }
 }
 
 // MARK: - InsightsEngine: aggregateMoodSeries
@@ -205,13 +191,6 @@ struct TimeRangeTests {
         #expect(TimeRange.all.dateInterval.start < TimeRange.year.dateInterval.start)
     }
 
-    @Test func chartBucket_scalesWithRange() {
-        // 月用 day；季用 week；年/全部用 month —— 让点数稳定在 ~30 以内。
-        #expect(TimeRange.month.chartBucket == .day)
-        #expect(TimeRange.quarter.chartBucket == .week)
-        #expect(TimeRange.year.chartBucket == .month)
-        #expect(TimeRange.all.chartBucket == .month)
-    }
 }
 
 // MARK: - LumoryAdaptivePresentation
@@ -236,88 +215,6 @@ struct LumoryAdaptivePresentationTests {
             isPad: false,
             horizontalSizeClassIsRegular: false
         ))
-    }
-}
-
-// MARK: - CorrelationFactGenerator
-
-struct CorrelationFactGeneratorTests {
-    @Test func emptyInputs_returnsEmpty() {
-        let facts = CorrelationFactGenerator.generate(
-            points: [],
-            themes: [],
-            stats: InsightsEngine.WritingStats.empty
-        )
-        #expect(facts.isEmpty)
-    }
-
-    @Test func withPoints_alwaysIncludesOverall() {
-        let points = [
-            InsightsEngine.MoodPoint(date: makeDate(year: 2024, month: 6, day: 1), mood: 0.8, entryCount: 1),
-            InsightsEngine.MoodPoint(date: makeDate(year: 2024, month: 6, day: 2), mood: 0.7, entryCount: 1)
-        ]
-        let facts = CorrelationFactGenerator.generate(
-            points: points,
-            themes: [],
-            stats: InsightsEngine.WritingStats.empty
-        )
-        #expect(facts.contains { $0.kind == .overall })
-        #expect(facts.first(where: { $0.kind == .overall })?.isPositive == true)
-    }
-
-    @Test func negativeAverage_markedAsNotPositive() {
-        let points = [
-            InsightsEngine.MoodPoint(date: makeDate(year: 2024, month: 6, day: 1), mood: 0.1, entryCount: 1),
-            InsightsEngine.MoodPoint(date: makeDate(year: 2024, month: 6, day: 2), mood: 0.3, entryCount: 1)
-        ]
-        let facts = CorrelationFactGenerator.generate(
-            points: points,
-            themes: [],
-            stats: InsightsEngine.WritingStats.empty
-        )
-        let overall = facts.first(where: { $0.kind == .overall })
-        #expect(overall?.isPositive == false)
-    }
-
-    @Test func streakBelowThreshold_omitsStreakFact() {
-        let stats = InsightsEngine.WritingStats(
-            totalEntries: 2, currentStreak: 2, longestStreak: 2, totalWords: 100, avgMood: 0.5
-        )
-        let facts = CorrelationFactGenerator.generate(points: [], themes: [], stats: stats)
-        #expect(!facts.contains { $0.kind == .streak })
-    }
-
-    @Test func streakAtThreeOrMore_includesStreakFact() {
-        let stats = InsightsEngine.WritingStats(
-            totalEntries: 5, currentStreak: 5, longestStreak: 5, totalWords: 500, avgMood: 0.6
-        )
-        let facts = CorrelationFactGenerator.generate(points: [], themes: [], stats: stats)
-        #expect(facts.contains { $0.kind == .streak })
-    }
-
-    @Test func idsAreStableAcrossInvocations() {
-        // 相同输入应得到相同 id —— SwiftUI diff 不会因重新生成而抖动。
-        let stats = InsightsEngine.WritingStats(
-            totalEntries: 4, currentStreak: 4, longestStreak: 4, totalWords: 400, avgMood: 0.7
-        )
-        let first = CorrelationFactGenerator.generate(points: [], themes: [], stats: stats)
-        let second = CorrelationFactGenerator.generate(points: [], themes: [], stats: stats)
-        #expect(first.map(\.id) == second.map(\.id))
-    }
-
-    @Test func twoThemes_emitsBestAndWorst() {
-        let range = DateInterval(
-            start: makeDate(year: 2024, month: 6, day: 1),
-            end: makeDate(year: 2024, month: 6, day: 30)
-        )
-        let themes = [
-            InsightsEngine.Theme(name: "work", count: 10, uniqueDays: 5, avgMood: 0.3, moodLow: 0.3, moodHigh: 0.3, lowCount: 10, highCount: 0, entryIds: [], trend: Array(repeating: 0.3, count: 6)),
-            InsightsEngine.Theme(name: "family", count: 8, uniqueDays: 4, avgMood: 0.9, moodLow: 0.9, moodHigh: 0.9, lowCount: 0, highCount: 8, entryIds: [], trend: Array(repeating: 0.9, count: 6))
-        ]
-        let facts = CorrelationFactGenerator.generate(points: [], themes: themes, stats: .empty)
-        #expect(facts.contains { $0.kind == .bestMoodTheme })
-        #expect(facts.contains { $0.kind == .worstMoodTheme })
-        _ = range // silence unused
     }
 }
 
@@ -632,80 +529,68 @@ struct FirstValidScoreTests {
 
 struct SuggestionContextFingerprintTests {
     @Test func sameInputsProduceSameFingerprint() {
-        let ctx1 = makeContext(totalEntries: 10, themeNames: ["Abby", "工作"], latestDay: makeDate(year: 2024, month: 6, day: 15))
-        let ctx2 = makeContext(totalEntries: 10, themeNames: ["Abby", "工作"], latestDay: makeDate(year: 2024, month: 6, day: 15))
+        let ctx1 = makeContext(latestDay: makeDate(year: 2024, month: 6, day: 15))
+        let ctx2 = makeContext(latestDay: makeDate(year: 2024, month: 6, day: 15))
         #expect(ctx1.makeFingerprint() == ctx2.makeFingerprint())
     }
 
-    @Test func themeNameChangeFlipsFingerprint() {
-        let a = makeContext(totalEntries: 10, themeNames: ["Abby", "工作"], latestDay: makeDate(year: 2024, month: 6, day: 15))
-        let b = makeContext(totalEntries: 10, themeNames: ["Abby", "健身"], latestDay: makeDate(year: 2024, month: 6, day: 15))
-        #expect(a.makeFingerprint() != b.makeFingerprint())
-    }
-
-    @Test func entryCountChangeFlipsFingerprint() {
-        // fingerprint 通过最新 entry id 感知"加了新条目",不直接依赖 totalEntries 计数,
-        // 所以这里用不同 entryId 模拟真实场景(加新日记 → 新 UUID → fingerprint 翻转)。
+    @Test func newEntryFlipsFingerprint() {
+        // fingerprint 通过最新 entry id 感知"加了新条目"。
         // 注意 fingerprint 只取 uuidString.prefix(8),两个 UUID 必须在前 8 字符不同。
         let oldId = UUID(uuidString: "11111111-0000-0000-0000-000000000001")!
         let newId = UUID(uuidString: "22222222-0000-0000-0000-000000000002")!
-        let a = makeContext(totalEntries: 10, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 15), entryId: oldId)
-        let b = makeContext(totalEntries: 11, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 15), entryId: newId)
+        let a = makeContext(latestDay: makeDate(year: 2024, month: 6, day: 15), entryId: oldId)
+        let b = makeContext(latestDay: makeDate(year: 2024, month: 6, day: 15), entryId: newId)
         #expect(a.makeFingerprint() != b.makeFingerprint())
     }
 
     @Test func newEntryDateFlipsFingerprint() {
         // fingerprint 把 latestDay 折成 ISO 周(YYYY-Www),所以这里要选跨周的两个日期才能
         // 测出语义。06-15(W24,周六)→ 06-22(W25,周六)。
-        let a = makeContext(totalEntries: 10, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 15))
-        let b = makeContext(totalEntries: 10, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 22))
+        let a = makeContext(latestDay: makeDate(year: 2024, month: 6, day: 15))
+        let b = makeContext(latestDay: makeDate(year: 2024, month: 6, day: 22))
         #expect(a.makeFingerprint() != b.makeFingerprint())
     }
 
-    @Test func themeCasingDoesNotFlipFingerprint() {
-        // "abby" 和 "Abby" 应视为同一主题
-        let a = makeContext(totalEntries: 10, themeNames: ["Abby"], latestDay: makeDate(year: 2024, month: 6, day: 15))
-        let b = makeContext(totalEntries: 10, themeNames: ["abby"], latestDay: makeDate(year: 2024, month: 6, day: 15))
+    @Test func sameWeekDifferentDayDoesNotFlipFingerprint() {
+        // 同一 ISO 周内任意一天都不应触发刷新,避免用户在一周内反复看到重生成。
+        let a = makeContext(latestDay: makeDate(year: 2024, month: 6, day: 10))  // 周一
+        let b = makeContext(latestDay: makeDate(year: 2024, month: 6, day: 14))  // 周五
         #expect(a.makeFingerprint() == b.makeFingerprint())
     }
 
+    @Test func todayWeekFlipsFingerprint_withoutNewEntry() {
+        let latest = makeDate(year: 2024, month: 6, day: 10)
+        let a = makeContext(latestDay: latest, today: makeDate(year: 2024, month: 6, day: 14))
+        let b = makeContext(latestDay: latest, today: makeDate(year: 2024, month: 6, day: 17))
+        #expect(a.makeFingerprint() != b.makeFingerprint())
+    }
+
     @Test func insufficientSignalFlagsCorrectly() {
-        let few = makeContext(totalEntries: 2, themeNames: [], latestDay: makeDate(year: 2024, month: 6, day: 15))
-        let enough = makeContext(totalEntries: 3, themeNames: [], latestDay: makeDate(year: 2024, month: 6, day: 15))
+        let few = makeContext(entryCount: 2)
+        let enough = makeContext(entryCount: 3)
         #expect(few.hasEnoughSignal == false)
         #expect(enough.hasEnoughSignal == true)
     }
 
     private func makeContext(
-        totalEntries: Int,
-        themeNames: [String],
-        latestDay: Date,
-        entryId: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        latestDay: Date = Date(),
+        today: Date? = nil,
+        entryId: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+        entryCount: Int = 5
     ) -> SuggestionContext {
-        let themes = themeNames.enumerated().map { i, name in
-            InsightsEngine.Theme(
-                name: name,
-                count: 5 - i,
-                uniqueDays: 5 - i,
-                avgMood: 0.5,
-                moodLow: 0.5,
-                moodHigh: 0.5,
-                lowCount: 0,
-                highCount: 0,
-                entryIds: [],
-                trend: Array(repeating: 0.5, count: 6)
+        // 制造 `entryCount` 篇日记,第一篇用指定 id 和 latestDay(其他篇日期/id 不影响指纹)。
+        let recent: [DiaryEntryData] = (0..<entryCount).map { i in
+            DiaryEntryData(
+                id: i == 0 ? entryId : UUID(),
+                date: latestDay,
+                text: "",
+                moodValue: 0.5,
+                summary: ""
             )
         }
-        let recent = [
-            DiaryEntryData(id: entryId, date: latestDay, text: "", moodValue: 0.5, summary: "")
-        ]
         return SuggestionContext(
-            topThemes: themes,
-            moodAvg30d: 0.5,
-            moodHighEntry: nil,
-            moodLowEntry: nil,
-            currentStreak: 3,
-            totalEntries: totalEntries,
+            today: today ?? latestDay,
             recentEntries: recent,
             language: "zh"
         )
@@ -735,6 +620,33 @@ struct SuggestionBundleCodableTests {
         #expect(both.hasUsableContent)
         #expect(!noPresets.hasUsableContent)
         #expect(!noPlaceholders.hasUsableContent)
+    }
+}
+
+// MARK: - Insights preset chip hydration
+
+struct InsightsPresetChipTests {
+    @Test func presetChipQuestions_usesFirstThreeCachedPresets() {
+        let bundle = SuggestionBundle(
+            askPastPresets: ["q1?", "q2?", "q3?", "q4?"],
+            homePlaceholders: ["p1"],
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            fingerprint: "f",
+            language: "zh"
+        )
+        #expect(InsightsView.presetChipQuestions(from: bundle) == ["q1?", "q2?", "q3?"])
+    }
+
+    @Test func presetChipQuestions_emptyOrMissingCacheHidesBlock() {
+        let empty = SuggestionBundle(
+            askPastPresets: [],
+            homePlaceholders: ["p1"],
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            fingerprint: "f",
+            language: "zh"
+        )
+        #expect(InsightsView.presetChipQuestions(from: nil).isEmpty)
+        #expect(InsightsView.presetChipQuestions(from: empty).isEmpty)
     }
 }
 

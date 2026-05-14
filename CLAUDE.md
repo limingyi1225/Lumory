@@ -62,7 +62,7 @@ iOS:
 
 ### 测试覆盖缺口
 
-- **`parseImportedDiaries` 错误路径 + `StreamEvent.truncated` 端到端消费侧测试** — `MockAIService` / `ThemeAliasAITestDouble` 能注入 throw / `.truncated` 事件,但 `NarrativeReader` / `AskPastView` 消费侧无单测断言 `isIncomplete` flag 翻 true。需要先建 view-state 观察基础设施(ViewInspector 或自写 binding-tap helper)。
+- **`parseImportedDiaries` 错误路径 + `StreamEvent.truncated` view-side 端到端测试** — Service-side(`NarrativePrecomputeService` 消费 .truncated 写 `payload.isIncomplete=true / truncatedReason`)已补完单测(2026-05-13 superreview round 1);view-side(`NarrativeSummaryCard` / `AskPastView` 消费侧让 isIncomplete flag 翻 true + 渲染 incompleteFooter)仍需 ViewInspector 或自写 binding-tap helper 才能断言。`parseImportedDiaries` 错误路径同样未补。
 - **`ReminderService.currentRescheduleGen` race stale 场景测试** — `ThemeAliasJudgeService.scanGen` 已覆盖(`scanGen_staleCompletionDoesNotClearNewerTaskHandle`,通过 `simulateConcurrentScanStartForTesting` 注入),但 `ReminderService` 没装 race test seam(强耦 UN center,要 mock UN 才能干净测)。下次拆 ReminderService 时一并解决。
 
 ### 隐私 hardening
@@ -82,8 +82,9 @@ iOS:
   - `xcodebuildmcp` — 封装 `xcodebuild` / `simctl` / UI 自动化。**优先用它的工具**而不是 Bash 跑 `xcodebuild`。坑:(1) `build_run_sim({extraArgs: [...]})` 的 extraArgs 是**编译 flag**,不是 app 启动参数 —— 塞 `-LumoryUITestSampleData YES` 会被 xcodebuild 拒。要传 app 启动参数走三步:`build_sim` → `install_app_sim({appPath: ".../Debug-iphonesimulator/Lumory.app"})` → `launch_app_sim({args: ["-LumoryUITestSampleData", "YES"]})`。`session_set_defaults({bundleId: "Mingyi.Lumory"})` 一次,后续不用再传。(2) 默认配置不暴露 tap/gesture,`snapshot_ui` 只读但可用;真要驱动 UI 走 computer-use 或 ChronoteUITests。(3) Sim 窗口可能投到"External Display"虚拟屏,computer-use 看不到但 `xcodebuildmcp.snapshot_ui` 走 simctl 是 headless 的不受影响。
   - `context7`(插件)— 查 SwiftUI / CoreData / CloudKit / Express 5 等官方文档时用,避免训练截止日之后的 API 漂移。
 - **Skills** 在 `.claude/skills/`(共 4 个):`screenshot`(截图流水线 + 坑,"截图/上架截图"自动触发)/ `megareview`(整库 bug+优化+功能机会审计,分波 Opus subagent)/ `superreview`(uncommitted changes 最严 review)/ `sync-to-mac`(双 Mac 协作 git 同步,push/pull/ship)。
-- **Subagents** 在 `.claude/agents/`:
-  - `coredata-migration-reviewer`:**改 `.xcdatamodeld` / `DiaryEntry+Extensions.swift` / `PersistenceController.swift` / 任何动 `DiaryEntry` schema 的服务后,主动召唤跑一遍审查**,别等出事。
-  - `sse-pipeline-reviewer`:改 `OpenAIService.swift` / `OpenAI/*.swift` / `NetworkRetryHelper.swift` / `server/index.js` 的 SSE 流水线后召唤,按客户端 SSEParser + 后端 `res.destroy(error)` + UI 消费侧 `.truncated` 处理审查。
-- **可用的 `subagent_type` 池**(harness allowlist,**派单前别瞎猜**):`general-purpose` / `Explore` / `Plan` / `coredata-migration-reviewer` / `sse-pipeline-reviewer` / `code-simplifier:code-simplifier` / `feature-dev:*`(含 `feature-dev:code-reviewer` / `feature-dev:code-explorer` / `feature-dev:code-architect`)/ `plugin-dev:*` / `agent-sdk-dev:*` / `codex:codex-rescue` / `claude-code-guide` / `statusline-setup` / **`superpowers:code-reviewer`**(注意 `superpowers:` 前缀,不是裸 `code-reviewer`)。**裸 `code-reviewer` / `debugger` / `security-auditor` / `test-automator` / `architect-review` / `performance-engineer` / `database-optimizer` 这些行业常见名字都不在池里**(直接 hard error)—— code review 类视角走 `superpowers:code-reviewer` 或 `feature-dev:code-reviewer`;security / test-gap / architecture / perf review 这类专项视角走 `general-purpose`,焦点写在 prompt 里。
+- **Subagents** 项目级定义在 `.claude/agents/`(`coredata-migration-reviewer.md` / `sse-pipeline-reviewer.md`)。**但**:这些 `.md` 文件**不会**被当前 harness 自动注册成 `subagent_type` —— 它们的内容只是项目自留文档,提示"改这块代码该怎么审"。
+- **`Agent` 工具实际接受的 `subagent_type` 池**(2026-05-13 verified by hard-error 多次):**只有** `general-purpose` / `Explore` / `Plan` / `claude` / `claude-code-guide` / `statusline-setup`。
+  - **不要瞎猜**这些名字以外的:`coredata-migration-reviewer` / `sse-pipeline-reviewer` / `superpowers:code-reviewer` / `codex:codex-rescue` / `feature-dev:*` / `plugin-dev:*` / `agent-sdk-dev:*` / `code-simplifier:*` 全部**不在池里**,提交会 hard error。
+  - **裸的行业常见名**`code-reviewer / debugger / security-auditor / test-automator / architect-review / performance-engineer / database-optimizer` 也**不在池里**。
+  - **怎么办**:全部 code review / coredata / SSE / security / test-gap / architecture / perf 视角统统走 `general-purpose`,把 focus + 项目约定写进 prompt 里。`.claude/agents/*.md` 的内容可以**抄进 prompt**(指明"按 coredata-migration-reviewer 角度审")。读 / 搜代码走 `Explore`,设计实现计划走 `Plan`。
 - **Hooks**:`.claude/hooks/server-lint.sh`(PostToolUse)— 编辑 `server/*.js` 后静默跑 `eslint --fix` + `prettier --write`,失败不阻塞对话。改 hook 脚本记得 `chmod +x`。

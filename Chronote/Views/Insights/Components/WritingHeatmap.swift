@@ -2,94 +2,56 @@ import SwiftUI
 
 // MARK: - WritingHeatmap
 //
-// 第四块：类 GitHub contribution graph。
-// 布局：每列 = 一周（7 格，顶部到底部是 firstWeekday 到最后一日），横向滚动。
-// Hero 数字：连续天数 + 累计条目数 + 累计字数。
-// 输入：stats + 一组 (date, mood, wordCount) dailyCell。
+// GitHub contribution graph 风格的 22 周写作节奏色块图。
+// 用户决定 2026-05-12 删 heroRow(原"🔥 连续 / 📖 累计 / Aa 字数"三个彩色 stat block)—
+// 三种饱和度不同的色 icon 像游戏成就栏,跟 Lumory 反思 / 私人语气不合;streak=0 时的
+// 熄灭火焰是负反馈。本期 entry 数已经在 NarrativeSummaryCard 底部 caption 里 inline,
+// 全局累计 / streak 不再单独 vanity-display(用户主动想看可走 Settings)。
+// 输入只剩 cells(每日 mood + wordCount)。
 
-struct DailyCell: Identifiable, Equatable, Hashable {
-    let date: Date
-    let mood: Double
-    let wordCount: Int
-    var id: Date { date }
-}
+// DailyCell 已挪到 Chronote/Services/InsightsResultCache.swift(2026-05-13 superreview P1 fix)。
+// Service 层不应反向引用 View 层类型。
 
 struct WritingHeatmap: View {
-    let stats: InsightsEngine.WritingStats
     let cells: [DailyCell]
     let weeksToShow: Int
+    /// tap / 长按 + 拖动 释放 时触发,InsightsView 接住打开 PointDetailSheet。
+    /// **只对 `hasEntry && !isFuture` 触发**,空格 / 未来格不响应。
+    /// nil = 不挂手势(向后兼容潜在的其他 caller)。
+    let onSelectDay: ((Date) -> Void)?
 
     @State private var builtDays: [HeatCellModel] = []
     @State private var lastCellsIdentity: Int = -1
+    // **P2 fix (2026-05-13 superreview)**:`monthLabelRuns` 之前是 computed property,每次
+    // SwiftUI body diff 都重扫 22 week × 2 次 Calendar.component → ~100-200µs。跟 `builtDays`
+    // 同源,memoize 进 @State 跟 rebuildIfNeeded 一起刷。
+    @State private var monthLabelRunsCache: [MonthRun] = []
 
     // 布局常量
     private static let cellSide: CGFloat = 12
     private static let cellSpacing: CGFloat = 3
     private static let rowCount: Int = 7
+    private static let gridCoordinateSpace: String = "lumory.heatmapGrid"
     private static var gridHeight: CGFloat {
         CGFloat(rowCount) * cellSide + CGFloat(rowCount - 1) * cellSpacing
     }
 
-    init(stats: InsightsEngine.WritingStats, cells: [DailyCell], weeksToShow: Int = 22) {
-        self.stats = stats
+    init(
+        cells: [DailyCell],
+        weeksToShow: Int = 22,
+        onSelectDay: ((Date) -> Void)? = nil
+    ) {
         self.cells = cells
         self.weeksToShow = weeksToShow
+        self.onSelectDay = onSelectDay
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            heroRow
-            heatmapGrid
-        }
-        .padding(16)
-        .insightsCard()
-        .onAppear { rebuildIfNeeded() }
-        .onChange(of: cells) { _, _ in rebuildIfNeeded() }
-    }
-
-    // MARK: Hero
-
-    private var heroRow: some View {
-        HStack(alignment: .center, spacing: 20) {
-            statBlock(
-                value: "\(stats.currentStreak)",
-                label: NSLocalizedString("连续天数", comment: "Current streak"),
-                icon: "flame.fill",
-                tint: .orange,
-                a11y: String(format: NSLocalizedString("当前连续 %d 天写作", comment: "A11y: streak"), stats.currentStreak)
-            )
-            Divider().frame(height: 40)
-            statBlock(
-                value: "\(stats.totalEntries)",
-                label: NSLocalizedString("累计条目", comment: "Total entries"),
-                icon: "book.fill",
-                tint: .indigo,
-                a11y: String(format: NSLocalizedString("累计 %d 条日记", comment: "A11y: total entries"), stats.totalEntries)
-            )
-            Divider().frame(height: 40)
-            statBlock(
-                value: compactNumber(stats.totalWords),
-                label: NSLocalizedString("累计字数", comment: "Total words"),
-                icon: "textformat",
-                tint: .teal,
-                a11y: String(format: NSLocalizedString("累计 %d 字", comment: "A11y: total words"), stats.totalWords)
-            )
-        }
-    }
-
-    private func statBlock(value: String, label: String, icon: String, tint: Color, a11y: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4) {
-                Image(systemName: icon).foregroundStyle(tint)
-                Text(value)
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-            }
-            Text(label).font(.caption).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(a11y)
+        heatmapGrid
+            .padding(16)
+            .insightsCard()
+            .onAppear { rebuildIfNeeded() }
+            .onChange(of: cells) { _, _ in rebuildIfNeeded() }
     }
 
     // MARK: Heatmap grid
@@ -98,11 +60,6 @@ struct WritingHeatmap: View {
         // 一周一列（7 行），横向滚动
         let rows = Array(repeating: GridItem(.fixed(Self.cellSide), spacing: Self.cellSpacing), count: Self.rowCount)
         return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(NSLocalizedString("书写热力", comment: "Writing heatmap"))
-                    .font(.subheadline.weight(.medium))
-                Spacer()
-            }
             ScrollView(.horizontal, showsIndicators: false) {
                 // P1-Ins-6 月份 label + 网格放同 ScrollView 里,横滑同步。每个 label 宽度
                 // = 该月覆盖的周数对应的格子总宽,左对齐让"几月"贴在那个月第一列上方。
@@ -114,12 +71,55 @@ struct WritingHeatmap: View {
                         }
                     }
                     .padding(.horizontal, 1)
+                    // tap 手势挂在 grid 内容上,coordinateSpace 命名后 SpatialTapGesture 拿到的
+                    // location 相对 LazyHGrid 内容(不受 ScrollView contentOffset 影响)→ 反推
+                    // cell 索引用网格数学(cellAt)。**必须用 simultaneousGesture 而非 gesture**,
+                    // 否则会拦截外层 ScrollView 的纵向滚动手势,用户下滑碰到热力图就卡住。
+                    .coordinateSpace(name: Self.gridCoordinateSpace)
+                    .simultaneousGesture(tapGesture)
                 }
             }
             .frame(height: Self.gridHeight + 22)
             .scrollBounceBehavior(.basedOnSize)
             .defaultScrollAnchor(.trailing)  // 初次加载锚定到最新（最右）
         }
+    }
+
+    // MARK: Tap 手势
+    //
+    // SpatialTapGesture 在 LazyHGrid 整体上挂(simultaneously,不抢 ScrollView 滚动手势),
+    // 拿到 location 后用网格数学反推 cell index — 比给每个 12pt 格子单独挂 tap 容错率高。
+    // hasEntry == false 或 isFuture 不响应。
+
+    private var tapGesture: some Gesture {
+        SpatialTapGesture(coordinateSpace: .named(Self.gridCoordinateSpace))
+            .onEnded { event in
+                guard let onSelectDay,
+                      let target = cellAt(point: event.location),
+                      target.hasEntry, !target.isFuture else { return }
+                HapticManager.shared.impact(.light)
+                onSelectDay(target.date)
+            }
+    }
+
+    /// 反推手指落点对应哪个 cell。LazyHGrid(rows:7) 是 column-major:
+    ///   builtDays[col * 7 + row] 对应第 col 列第 row 行。
+    /// 命中条件除了 index 在范围内,还要落点真在格子内(不是 spacing 间隙)— 用 modulo
+    /// 检查 (x % colStride) < cellSide 等。否则用户在 spacing 上 release 也会随机捕获到一格。
+    private func cellAt(point: CGPoint) -> HeatCellModel? {
+        let colStride = Self.cellSide + Self.cellSpacing
+        let rowStride = Self.cellSide + Self.cellSpacing
+        guard point.x >= 0, point.y >= 0 else { return nil }
+        guard point.x.truncatingRemainder(dividingBy: colStride) < Self.cellSide,
+              point.y.truncatingRemainder(dividingBy: rowStride) < Self.cellSide else { return nil }
+        let col = Int(point.x / colStride)
+        let row = Int(point.y / rowStride)
+        guard col >= 0, row >= 0, row < Self.rowCount else { return nil }
+        let weekCount = builtDays.count / Self.rowCount
+        guard col < weekCount else { return nil }
+        let index = col * Self.rowCount + row
+        guard index < builtDays.count else { return nil }
+        return builtDays[index]
     }
 
     /// P1-Ins-6 月份 label 行 — 把连续同月的周聚合成一个 label,左对齐贴第一列。
@@ -130,7 +130,7 @@ struct WritingHeatmap: View {
     @ViewBuilder
     private var monthLabelsRow: some View {
         HStack(alignment: .bottom, spacing: Self.cellSpacing) {
-            ForEach(monthLabelRuns, id: \.startWeekIndex) { run in
+            ForEach(monthLabelRunsCache, id: \.startWeekIndex) { run in
                 Text(run.label)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -148,7 +148,8 @@ struct WritingHeatmap: View {
     }
 
     /// 把 builtDays 按周扫描,生成"连续同月"的 run 列表。每 run 一个 label。
-    private var monthLabelRuns: [MonthRun] {
+    /// rebuildIfNeeded 调用,结果缓存进 monthLabelRunsCache 供 body 直接读。
+    private func computeMonthLabelRuns() -> [MonthRun] {
         guard !builtDays.isEmpty else { return [] }
         let calendar = Calendar.current
         let weekCount = builtDays.count / Self.rowCount
@@ -206,6 +207,8 @@ struct WritingHeatmap: View {
 
     @ViewBuilder
     private func cell(for day: HeatCellModel) -> some View {
+        // tap 手势挂在 LazyHGrid 整体上(见 heatmapGrid)用网格数学反推 cell — cell 自己不挂手势,
+        // 12pt 格子手指难精确按到。
         RoundedRectangle(cornerRadius: 3, style: .continuous)
             .fill(fillFor(day))
             .frame(width: Self.cellSide, height: Self.cellSide)
@@ -216,6 +219,16 @@ struct WritingHeatmap: View {
             .opacity(day.isFuture ? 0 : 1)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(dayA11yLabel(day))
+            // **P2 fix (2026-05-14 superreview round 3)**:整网格 tap 走 SpatialTapGesture 反推
+            // cell 打开 PointDetailSheet,VoiceOver 用户聚焦有日记的格子时没有等价 button action。
+            // 给 `hasEntry && !isFuture` 的 cell 加 button trait + accessibilityAction,让 VO
+            // 双击能进详情。空格 / 未来格不加(跟 tap 手势的响应条件一致)。
+            .accessibilityAddTraits(day.hasEntry && !day.isFuture ? .isButton : [])
+            .accessibilityAction {
+                guard day.hasEntry, !day.isFuture else { return }
+                HapticManager.shared.impact(.light)
+                onSelectDay?(day.date)
+            }
     }
 
     private func fillFor(_ day: HeatCellModel) -> Color {
@@ -249,6 +262,8 @@ struct WritingHeatmap: View {
         guard identity != lastCellsIdentity else { return }
         lastCellsIdentity = identity
         builtDays = buildDays()
+        // 跟 builtDays 同源,一并 memoize。
+        monthLabelRunsCache = computeMonthLabelRuns()
     }
 
     /// 构建对齐到周边界的 weeksToShow × 7 格子。
@@ -298,14 +313,5 @@ struct WritingHeatmap: View {
             )
         }
         return dateStr + "，" + NSLocalizedString("无日记", comment: "A11y heat cell empty")
-    }
-
-    private func compactNumber(_ number: Int) -> String {
-        if number >= 10000 {
-            return String(format: "%.1fw", Double(number) / 10000.0)
-        } else if number >= 1000 {
-            return String(format: "%.1fk", Double(number) / 1000.0)
-        }
-        return "\(number)"
     }
 }

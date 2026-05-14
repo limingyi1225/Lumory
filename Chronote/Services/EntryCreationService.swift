@@ -120,6 +120,13 @@ enum EntryCreationService {
             }
         }
 
+        // wave14 — 写日记成功后,fire-and-forget 触发 .month 浓缩重生(60s debounce + 守卫)。
+        // 让用户下次进 InsightsView 顶部能看到反映新日记的浓缩。.all/.quarter/.year 不挂自动,
+        // 用户主动点"为我浓缩"才生成。
+        Task.detached(priority: .background) {
+            await NarrativePrecomputeService.shared.requestRefreshIfNeeded(for: .month)
+        }
+
         return .saved(entryID)
     }
 

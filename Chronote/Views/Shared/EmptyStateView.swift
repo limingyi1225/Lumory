@@ -11,10 +11,10 @@ import SwiftUI
 //
 // 老 init `(systemImage:title:message:)` 保留向后兼容,新代码用全参数版。
 //
-// 接入清单(8 处自绘空态):
+// 接入清单(7 处自绘空态):
 //   AskPastView 空 presets / ThemeFilteredEntriesView / PointDetailSheet /
 //   ThemeMergeIntoSheet / SuggestionTargetPickerSheet / ThemeCardList /
-//   ThemeAliasManagementView / CorrelationChipList
+//   ThemeAliasManagementView
 
 struct EmptyStateView: View {
     enum Size {

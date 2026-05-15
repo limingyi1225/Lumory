@@ -230,6 +230,9 @@ struct AdvancedSettingsView: View {
         isResettingNarrative = true
         defer { isResettingNarrative = false }
         await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
+        // wave18 — 同时 cancel 用户主动触发的在飞生成(NarrativeGenerationCoordinator),
+        // 否则它会在下面 delete + save 后写回一条 narrative,清除失效。
+        await NarrativeGenerationCoordinator.shared.cancelAll()
         let request = NSFetchRequest<AIConversation>(entityName: "AIConversation")
         request.predicate = NSPredicate(format: "kind == %@", AIConversation.Kind.narrative.rawValue)
         do {

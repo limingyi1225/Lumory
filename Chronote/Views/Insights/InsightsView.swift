@@ -80,8 +80,7 @@ struct InsightsView: View {
                                 range: range,
                                 dateInterval: range.dateInterval,
                                 entryCount: entryCount,
-                                mostRecentEntryDate: rangeMostRecentEntryDate,
-                                engine: engine
+                                mostRecentEntryDate: rangeMostRecentEntryDate
                             )
                         } else {
                             SkeletonNarrativeSummaryCard()

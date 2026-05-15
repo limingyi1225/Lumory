@@ -64,7 +64,6 @@ struct NarrativeDetailSheet: View {
         if let headline = payload.headline, !headline.isEmpty {
             Text(headline)
                 .font(LumoryFonts.narrativeBodyTitle)
-                .italic()
                 .foregroundStyle(.primary.opacity(0.85))
                 .lineSpacing(6)
                 .padding(.vertical, 8)

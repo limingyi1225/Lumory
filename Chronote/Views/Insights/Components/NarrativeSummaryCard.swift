@@ -27,9 +27,8 @@ import Combine
 //
 // **detail sheet 用 item: 模式**(NarrativeDetailSubject)而非 Bool + force unwrap —
 // payload 是 snapshot 拷贝,sheet 期间 parent state 变化(range reload / stream 完成)
-// 不影响 detail 渲染。重新生成回调流:detail set parent intent + dismiss → parent
-// onChange(detailSubject 归 nil) 检查 intent flag 后才 startStream,避免 fullScreenCover
-// 生命周期跟 stream task .onDisappear cancel 打架(iPad 尤其关键)。
+// 不影响 detail 渲染。(wave17 已删 detail 内"重新生成"按钮,对应的 sheet-close intent
+// 回调流同步移除。)
 
 /// detail sheet 的 lumoryAdaptiveModal item — payload snapshot 拷贝 + UUID id。
 struct NarrativeDetailSubject: Identifiable {
@@ -42,22 +41,20 @@ struct NarrativeSummaryCard: View {
     let dateInterval: DateInterval
     let entryCount: Int
     let mostRecentEntryDate: Date?
-    let engine: InsightsEngine
 
     @Environment(\.managedObjectContext) private var viewContext
 
     @State private var cachedNarrative: AIConversation.NarrativePayload?
-    @State private var isStreaming: Bool = false
-    @State private var streamTask: Task<Void, Never>?
-    @State private var streamCleanupTask: Task<Void, Never>?
-    @State private var streamRunID: UUID?
-    @State private var isIncomplete: Bool = false
-    @State private var incompleteReason: String = ""
     @State private var sparkBreathing: Bool = false
     /// detail sheet present subject。non-nil = sheet 显示中。
     @State private var detailSubject: NarrativeDetailSubject?
     // wave17 — detail 右上角"重新生成"按钮已删,对应的 sheet-close dispatch 同步移除。
     // 想重生成走 Settings 的"清除 AI 回顾缓存" → 卡 fallback 到"生成回顾" CTA → tap 再走流。
+
+    // wave18 — streaming 生命周期从卡片 @State 抬进 NarrativeGenerationCoordinator 单例:
+    // 切 range / 关 Insights sheet 不再打断生成。卡片退化成观察者 —— isStreaming /
+    // streamFailureReason 从 coordinator 派生,生成结果走 CoreData save → hydrateFromCache 回灌。
+    private let coordinator = NarrativeGenerationCoordinator.shared
 
     var body: some View {
         Group {
@@ -68,16 +65,9 @@ struct NarrativeSummaryCard: View {
             }
         }
         .task(id: range) {
-            // range 切换:cancel 旧 stream + 清流式 state + 重新 hydrate cache。
-            let oldStreamTask = streamTask
-            oldStreamTask?.cancel()
-            streamCleanupTask?.cancel()
-            streamCleanupTask = Task {
-                await oldStreamTask?.value
-            }
-            streamTask = nil
-            streamRunID = nil
-            isStreaming = false
+            // wave18 — range 切换**不再 cancel 在飞 stream**。streaming 生命周期归
+            // NarrativeGenerationCoordinator,切 range 时它在后台继续跑完 + persist;卡片
+            // 只重置自己的纯 UI 动画态,按新 range 重新 hydrate cache。
             sparkBreathing = false
             hydrateFromCache()
 
@@ -93,14 +83,21 @@ struct NarrativeSummaryCard: View {
         // 把本 range 的真 cache 误判 outdated 抹成 nil;range 没再变就不会重 hydrate,
         // summary 永久消失。(用户现象:月→无 summary 的"年"→回月,summary 没了;
         // 月→entryCount 恰好相等的"季"→回月却正常 —— 同一个 bug 的两面。)
-        // 补 onChange:reload 回填本 range 正确的 entryCount/mostRecent 后重新 hydrate。
-        // 不并进 `.task(id:)` 的 composite id —— 那会让 entryCount 变动也触发 stream
-        // 生命周期 cancel,后台写日记 bump count 时误杀 in-flight stream。
+        // 补 onChange:reload 回填本 range 正确的 entryCount/mostRecent 后重新 hydrate cache。
         .onChange(of: entryCount) { _, _ in
             hydrateFromCache()
         }
         .onChange(of: mostRecentEntryDate) { _, _ in
             hydrateFromCache()
+        }
+        // wave18 — 生成结束(coordinator 把 range 移出 generating)立即从 viewContext 回灌刚
+        // 写盘的 narrative。coordinator 的 persist 在「移出 generating」之前完成,所以这里
+        // hydrate 能 fetch 到 fresh record,不必等 .onReceive 的 150ms debounce,避免「生成
+        // 回顾」CTA 闪一帧。
+        .onChange(of: isStreaming) { _, streaming in
+            if !streaming {
+                hydrateFromCache()
+            }
         }
         // **P0 fix (2026-05-13 superreview)**:`.NSManagedObjectContextDidSave` 由 saving context 的
         // 线程 post(NarrativePrecomputeService 的 bg.save 在 bg queue / InsightsEngine 的
@@ -142,12 +139,12 @@ struct NarrativeSummaryCard: View {
         .onReceive(NotificationCenter.default.publisher(for: .lumoryNarrativeCacheInvalidated)) { _ in
             hydrateFromCache()
         }
-        // **不挂 .onDisappear cancel stream**(2026-05-14 codex review):本卡是 LazyVStack 顶部
-        // 子项,onDisappear 在用户下滑到主题/热力图区时也会触发(不只 sheet 关闭)。在这里
-        // cancel 会让"点生成 → 下滑看主题"静默丢掉本次生成,recap 不写盘。改为:让 stream
-        // 跑完 —— 滚走时后台继续,完成后 persist + 上面的 onReceive 回灌卡片;sheet 关掉也跑完
-        // (~30s API,但 recap 下次打开就在)。range 切换由 `.task(id: range)` 负责 cancel +
-        // 清 streamRunID,不依赖 onDisappear。
+        // **不挂 .onDisappear cancel stream**:streaming 生命周期归 NarrativeGenerationCoordinator
+        // (一个 @MainActor 单例),不随本卡 view 实例存亡。下滑看主题、切 range、关 Insights
+        // sheet —— 生成都在后台继续跑完 + persist;重开 InsightsView 新卡片观察
+        // coordinator.generating 仍能显示「生成中」skeleton,完成后走 onChange / onReceive 回灌。
+        // (wave18 前 stream 锁在卡片 @State:切 range 会 cancel、关 sheet 状态丢失 ——
+        // 见 NarrativeGenerationCoordinator.swift 顶部注释。)
         .lumoryAdaptiveModal(item: $detailSubject) { subject in
             NarrativeDetailSheet(payload: subject.payload)
                 .environment(\.managedObjectContext, viewContext)
@@ -155,6 +152,32 @@ struct NarrativeSummaryCard: View {
     }
 
     // MARK: - State predicates
+
+    /// 是否正在生成本 range 的 narrative。streaming 生命周期归 NarrativeGenerationCoordinator,
+    /// 卡片只观察 —— 切 range / 关 sheet 重开,只要 coordinator 还在生成,这里就是 true。
+    private var isStreaming: Bool {
+        coordinator.generating.contains(range)
+    }
+
+    /// 本 range 上一次生成失败 / 截断且**没产出可持久化 body** 的原因。`occurredAt` 比
+    /// `cachedNarrative.generatedAt` 早 → 说明之后有更新的 cache 写进来了(重试成功 /
+    /// precompute 后台补上),失败标记作废。
+    private var streamFailureReason: String? {
+        guard let failure = coordinator.streamFailure[range] else { return nil }
+        if let generatedAt = cachedNarrative?.generatedAt, generatedAt >= failure.occurredAt {
+            return nil
+        }
+        return failure.reason
+    }
+
+    /// incomplete = 在飞失败标记 || 已持久化 payload 自带 incomplete。
+    private var isIncomplete: Bool {
+        streamFailureReason != nil || (cachedNarrative?.isIncomplete ?? false)
+    }
+
+    private var incompleteReason: String {
+        streamFailureReason ?? cachedNarrative?.truncatedReason ?? ""
+    }
 
     private func hydrateFromCache() {
         let latest = NarrativeCacheService.latest(for: range, in: viewContext)
@@ -175,12 +198,9 @@ struct NarrativeSummaryCard: View {
         // 已有部分 body)被整个抹掉,`displayHeadline` 的 fallback body 路径永远跑不到。
         // 改用 body 判定:有 body 就 hydrate 进 cachedNarrative,headline 缺失由 displayHeadline
         // 内部 `NarrativeStreamSplitter.fallbackHeadline` 兜底。
+        // (wave18:isIncomplete / incompleteReason 改成从 coordinator + cachedNarrative 派生的
+        // 计算属性,这里不再写 transient state。)
         cachedNarrative = (payload?.body.isEmpty == false) ? payload : nil
-        // hydrate 持久化的 isIncomplete / truncatedReason 到 transient state,否则用户重开
-        // InsightsView 时 cache 是 incomplete 但卡看起来"完整"(因为 isIncomplete=false
-        // footer 不显)。
-        isIncomplete = cachedNarrative?.isIncomplete ?? false
-        incompleteReason = cachedNarrative?.truncatedReason ?? ""
     }
 
     /// 给收起态卡显示 + detail sheet 标题用。优先 cached headline;v2 老 cache headline=nil
@@ -218,8 +238,8 @@ struct NarrativeSummaryCard: View {
                     } else if !displayHeadline.isEmpty {
                         headlineView
                     } else if isIncomplete {
-                        // **codex review fix**:首次 stream 失败(.failed 把 isIncomplete=true 但
-                        // body 空 → persistNarrativeIfNeeded return)。现在不能默默走 notGeneratedView,
+                        // **codex review fix**:首次 stream 失败(.failed → coordinator 把
+                        // streamFailure[range] 挂上、body 空不写盘)。现在不能默默走 notGeneratedView,
                         // 否则用户看到的状态是"没生成过",根本不知道刚才失败了。显错误 + 重试按钮。
                         streamFailedView
                     } else {
@@ -253,7 +273,7 @@ struct NarrativeSummaryCard: View {
             //   - streaming:自然忽略
             //
             // failed 状态下 streamFailedView 内嵌"重试"按钮自带 hit-test,onTapGesture 不会
-            // 截断它;卡空白区域 tap 也走 startStream,跟按钮语义一致。
+            // 截断它;卡空白区域 tap 也走 startGeneration,跟按钮语义一致。
             // (2026-05-13 superreview:之前 `else if isIncomplete` / `else if !isIncomplete`
             // body 完全相同 + 注释跟实际行为相反,合并掉。)
             guard !isStreaming else { return }
@@ -261,7 +281,7 @@ struct NarrativeSummaryCard: View {
             if !displayHeadline.isEmpty, let payload = cachedNarrative {
                 detailSubject = NarrativeDetailSubject(payload: payload)
             } else {
-                startStream()
+                startGeneration()
             }
         }
         // VoiceOver:整卡是个隐式 button(自定义 onTapGesture 不带 trait),手动加 isButton + hint
@@ -303,10 +323,9 @@ struct NarrativeSummaryCard: View {
 
             Text(displayHeadline)
                 // Direction A 升级 (2026-05-12):16 → 19pt — 让 hero headline 真正承担 hero
-                // 视觉份量,而不是被下面"事实层"卡片压住。serif italic + medium 保留诗意感,
+                // 视觉份量,而不是被下面"事实层"卡片压住。serif + medium 保留诗意感,
                 // lineSpacing 配合放大微调到 5。
                 .font(LumoryFonts.narrativeHeadline)
-                .italic()
                 .lineSpacing(5)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .lineLimit(2)
@@ -363,7 +382,7 @@ struct NarrativeSummaryCard: View {
     // MARK: - 未生成态(三段式跟 headline 同款 layout,只是文字是 CTA placeholder)
 
     /// 跟 `headlineView` 同款 `[✨] [text] [↗]` 三列,文字换成"生成回顾" placeholder 风。
-    /// 整卡 onTapGesture 在未生成态下 dispatch 到 startStream — 不再做嵌套紫色 capsule
+    /// 整卡 onTapGesture 在未生成态下 dispatch 到 startGeneration — 不再做嵌套紫色 capsule
     /// 按钮(那是用按钮重复表达卡本身可点击,头重脚轻)。
     private var notGeneratedView: some View {
         HStack(alignment: .firstTextBaseline, spacing: Self.sparkRowSpacing) {
@@ -412,7 +431,7 @@ struct NarrativeSummaryCard: View {
             }
             Button {
                 HapticManager.shared.impact(.light)
-                startStream()
+                startGeneration()
             } label: {
                 Text(NSLocalizedString("narrative.summary.regenerate", comment: ""))
                     .font(.subheadline.weight(.semibold))
@@ -439,7 +458,7 @@ struct NarrativeSummaryCard: View {
             Spacer()
             Button {
                 HapticManager.shared.impact(.light)
-                startStream()
+                startGeneration()
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.caption.weight(.semibold))
@@ -467,107 +486,16 @@ struct NarrativeSummaryCard: View {
 
     // MARK: - Streaming
 
-    private func startStream() {
-        // 防重入:已有 in-flight stream 时按用户语义视为"重试" — 取消旧的再起。
-        streamTask?.cancel()
-
-        let runID = UUID()
-        // **P1 fix (2026-05-14 superreview round 3)**:记 stream 开始时间,用于完成后判断
-        // entry 集合是否在生成期间被改动(见 persistNarrativeIfNeeded)。
-        let streamStartTime = Date()
-        streamRunID = runID
-        isStreaming = true
-        isIncomplete = false
-        incompleteReason = ""
-
-        streamTask = Task { @MainActor in
-            // wave15 — 改成累 rawOutput 然后 done 后一次 split,不再 chunk-by-chunk 拆段。
-            // 实现简化、避免 marker 跨 chunk 解析复杂度;streaming 期间靠 thinking 占位。
-            var rawOutput = ""
-
-            streamLoop: for await event in engine.streamNarrativeEvents(in: dateInterval) {
-                if Task.isCancelled { break }
-                guard streamRunID == runID else { return }
-                switch event {
-                case .chunk(let text):
-                    // 模型 runaway / 协议失序时 rawOutput 不能无限累;超过本地 cap 后
-                    // 保留 cap 内内容并显式标记 incomplete,避免把半截 cache 当完整回顾。
-                    if NarrativeStreamLimits.append(text, to: &rawOutput) {
-                        isIncomplete = true
-                        if incompleteReason.isEmpty {
-                            incompleteReason = NarrativeStreamLimits.localTruncationReason
-                        }
-                    }
-                case .truncated(let reason):
-                    isIncomplete = true
-                    incompleteReason = reason
-                case .failed(let error):
-                    isIncomplete = true
-                    incompleteReason = error.localizedDescription
-                case .done:
-                    // **P2 fix (2026-05-14 superreview round 3)**:labeled break 跳出 for-await。
-                    // 当前 InsightsEngine 在 .done 后会 finish continuation,但 .done 是 terminal
-                    // event,显式 break 防未来实现忘 finish 时卡死在 loop。
-                    break streamLoop
-                }
-            }
-            guard streamRunID == runID else { return }
-            isStreaming = false
-            await persistNarrativeIfNeeded(rawOutput: rawOutput, runID: runID, streamStartTime: streamStartTime)
-            // **P1 fix (2026-05-13 superreview round 2)**:`persistNarrativeIfNeeded` 中间 await
-            // `cancelPendingAndBumpGeneration` — 期间新 task 可起并设新 streamRunID + 覆盖 streamTask。
-            // 老 task 醒来不能无条件清。"自家清自家":runID 比对通过才清。
-            if streamRunID == runID {
-                streamRunID = nil
-                streamTask = nil
-            }
-        }
-    }
-
-    /// 流结束写盘 v3 record(含 headline)。fire-and-forget,失败仅 Log。
-    private func persistNarrativeIfNeeded(rawOutput: String, runID: UUID, streamStartTime: Date) async {
-        let (headline, body) = NarrativeStreamSplitter.split(rawOutput: rawOutput)
-        guard !body.isEmpty else { return }
-        await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
-        guard streamRunID == runID, !Task.isCancelled else { return }
-
-        // **P1 fix (2026-05-14 superreview round 3)**:stream 跑了几十秒,期间用户可能删/编辑了
-        // entry → `markInvalidatedForEntryChange` 推进 invalidation marker。本次 body 是基于
-        // stream 开始时的旧 entry 快照生成的,若 marker 已晚于 streamStartTime,说明 entry 集合
-        // 中途变了 → 丢弃本次输出,不写盘。否则旧正文配上新 `createdAt` 会重新成为 fresh cache,
-        // 用户看到引用已删/旧文字的 ghost 回顾。
-        if let invalidated = NarrativeCacheService.invalidatedBeforeDate(),
-           invalidated >= streamStartTime {
-            Log.info("[NarrativeSummaryCard] entry set changed during stream, discard stale narrative", category: .ai)
-            return
-        }
-
-        let payload = AIConversation.NarrativePayload(
-            rangeStart: dateInterval.start,
-            rangeEnd: dateInterval.end,
-            body: body,
-            isIncomplete: isIncomplete,
-            truncatedReason: incompleteReason.isEmpty ? nil : incompleteReason,
-            rangeKind: range.rawValue,
+    /// 把生成委托给 NarrativeGenerationCoordinator(单例,不随本卡 view 实例存亡)。同 range
+    /// 已有在飞 task → coordinator 当「重试」cancel 旧的再起。结果不靠返回值 —— coordinator
+    /// persist 到 viewContext 后,卡片靠 `.onChange(of: isStreaming)` / `.onReceive` 回灌。
+    private func startGeneration() {
+        coordinator.start(
+            range: range,
+            dateInterval: dateInterval,
             entryCount: entryCount,
-            sourceLatestEntryDate: mostRecentEntryDate,
-            generatedAt: Date(),
-            headline: headline
+            mostRecentEntryDate: mostRecentEntryDate
         )
-        do {
-            _ = try AIConversation.insertNarrative(
-                in: viewContext,
-                title: range.narrativeTitleLabel,
-                payload: payload,
-                citedEntryIds: []
-            )
-            try viewContext.save()
-            // 写盘完成后立即让卡当前显示新生成内容。
-            cachedNarrative = payload
-        } catch {
-            viewContext.rollback()
-            Log.error("[NarrativeSummaryCard] persist failed: \(error)", category: .persistence)
-        }
     }
 }
 

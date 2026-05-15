@@ -9,6 +9,10 @@ enum SettingsEntryDeletionService {
         // **先 cancel + bump generation,再 delete + save** —— 让 bg writer 在 actor 守卫前
         // 停掉。performBulkWipeCleanup 内也仍调一次 cancel(幂等,无害)。
         await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
+        // wave18 — 用户主动触发的生成也归 coordinator,跟 precompute 一起 cancel + drain,
+        // 否则在飞 task 会在 delete + save 后写回 narrative(performBulkWipeCleanup 内也再调
+        // 一次,幂等无害)。
+        await NarrativeGenerationCoordinator.shared.cancelAll()
 
         let attachmentSnapshots = entries.map {
             EntryAttachmentSnapshot(imageFileNames: $0.imageFileNameArray, audioFileName: $0.audioFileName)

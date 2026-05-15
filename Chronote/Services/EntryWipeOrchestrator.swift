@@ -37,6 +37,8 @@ enum EntryWipeOrchestrator {
         // DatabaseRecoveryService.completeRecreateRecovery)漏。await 等老 task 完整退出 +
         // 世代号推过去后才继续 5 件套清理。
         await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
+        // wave18 — 用户主动触发的生成归 NarrativeGenerationCoordinator,跟 precompute 一起停。
+        await NarrativeGenerationCoordinator.shared.cancelAll()
         ReminderService.shared.requestReschedule()
         ThemeAliasResolver.shared.resetForBulkEntryWipe()
         PromptSuggestionEngine.shared.clearCache()

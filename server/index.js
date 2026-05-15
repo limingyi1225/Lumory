@@ -459,19 +459,21 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         res.off('close', abortUpstream);
         // (2026-05-15 superreview-2 P1)区分 client mid-stream 中断和真上游错误。
         // 前者每次用户切后台都会触发,不该灌 ERROR log 导致 PagerDuty 阈值告警麻木。
-        if (error?.code === 'CLIENT_DISCONNECT') {
-          req.log.info('client disconnect mid-stream — cleanup ran');
-        } else {
-          req.log.error({ err: safeUpstreamError(error) }, 'upstream stream errored');
-        }
         // 不能写 `data: [DONE]`—— 那是 SSE 的**成功**终止帧，iOS 端的
         // `streamChat` 看到 `[DONE]` 会 `break` 并 `return result`，把半截
         // 流当完整响应回调给用户。硬破连接让客户端 `bytes.lines` 抛错，
         // 被 NetworkRetryHelper 接住重试；重试到头会把错误冒到 UI。
-        // (2026-05-15 superreview-2 P2)client 已断时 res 已 destroyed,destroy(error) 是
-        // no-op,但显式 guard 让意图清晰且省一次内部异常。
-        if (!res.destroyed) {
-          res.destroy(error);
+        if (error?.code === 'CLIENT_DISCONNECT') {
+          // sentinel 是从 line 419 的 `if (res.destroyed)` 分支制造的,
+          // 此时 res 必已 destroyed,不需要再 destroy。只 cleanup + log。
+          req.log.info('client disconnect mid-stream — cleanup ran');
+        } else {
+          req.log.error({ err: safeUpstreamError(error) }, 'upstream stream errored');
+          // 真上游错误:client 可能还活着,需要 destroy res 让客户端 SSEParser
+          // 抛错被 NetworkRetryHelper 接住。`!res.destroyed` guard 防 race。
+          if (!res.destroyed) {
+            res.destroy(error);
+          }
         }
       });
     } else {

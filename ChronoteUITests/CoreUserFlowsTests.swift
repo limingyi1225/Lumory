@@ -95,7 +95,7 @@ final class CoreUserFlowsTests: XCTestCase {
         XCTAssertTrue(settingsButton.waitForExistence(timeout: 3), "关闭 Settings 后应回到 Home")
     }
 
-    // MARK: - 5. AskPast Streaming smoke
+    // MARK: - 3. AskPast Streaming smoke
 
     /// 进 Insights → 找 AskPast preset chip → tap → 验"正在思考"占位 UI 出现。
     /// **不验完整流式响应**,因为 CI 不调真 OpenAI。

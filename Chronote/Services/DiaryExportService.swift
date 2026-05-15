@@ -8,17 +8,33 @@ struct DiaryExportEntrySnapshot: Sendable {
     let text: String?
     let summary: String?
     let moodValue: Double
-
-    init(_ entry: DiaryEntry) {
-        self.date = entry.date
-        self.text = entry.text
-        self.summary = entry.summary
-        self.moodValue = entry.moodValue
-    }
 }
 
 /// Service to handle exporting diary entries to a text file.
 class DiaryExportService {
+
+    /// (2026-05-15 superreview-3 P1)从 background context 走 `NSDictionaryResultType` 抓
+    /// 字段值直接构造 Snapshot,**不实例化 NSManagedObject**。
+    /// 旧实现 `entries.map { Snapshot($0) }` 在主 actor 上遍历 FetchedResults 触发全表 fault
+    /// 到主线程 row cache,抵消上游 `fetchBatchSize=100` 优化。这里整段后台 dict-fetch,
+    /// 主线程零开销;跟 `WidgetSnapshotService` / `StreakMilestoneService.computeCurrentStreak` 同 idiom。
+    nonisolated static func fetchAllSnapshots(persistence: PersistenceController) async -> [DiaryExportEntrySnapshot] {
+        await persistence.container.performBackgroundTask { context in
+            let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            request.resultType = .dictionaryResultType
+            request.propertiesToFetch = ["date", "text", "summary", "moodValue"]
+            request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: true)]
+            guard let dicts = try? context.fetch(request) else { return [] }
+            return dicts.map { dict in
+                DiaryExportEntrySnapshot(
+                    date: dict["date"] as? Date,
+                    text: dict["text"] as? String,
+                    summary: dict["summary"] as? String,
+                    moodValue: (dict["moodValue"] as? Double) ?? 0.5
+                )
+            }
+        }
+    }
     /// Errors raised when creating an export file.
     enum ExportError: Error {
         /// Disk is full / out of space (`NSFileWriteOutOfSpaceError`, `ENOSPC`, etc.).

@@ -137,29 +137,21 @@ final class NarrativeGenerationCoordinator {
         streamStartTime: Date
     ) async {
         // wave15 idiom — 累 rawOutput,done 后 NarrativeStreamSplitter 一次 split。
-        var rawOutput = ""
-        var isIncomplete = false
-        var incompleteReason = ""
+        // `.chunk` / `.truncated` 状态机抽进 `NarrativeStreamAccumulator`,与 precompute 共享。
+        // `.failed` 在这里把 error 字符串塞 truncatedReason 继续等 done(让 UI 显失败原因),
+        // 跟 precompute 的"立刻 return + 记 backoff"语义有意识地不同。
+        var acc = NarrativeStreamAccumulator()
 
         streamLoop: for await event in engine.streamNarrativeEvents(in: dateInterval) {
             if Task.isCancelled { break }
             guard isCurrent(range, generation) else { return }
             switch event {
             case .chunk(let text):
-                // 模型 runaway / 协议失序时 rawOutput 不能无限累;超过本地 cap 后保留 cap
-                // 内内容并显式标记 incomplete,避免把半截 cache 当完整回顾。
-                if NarrativeStreamLimits.append(text, to: &rawOutput) {
-                    isIncomplete = true
-                    if incompleteReason.isEmpty {
-                        incompleteReason = NarrativeStreamLimits.localTruncationReason
-                    }
-                }
+                acc.appendChunk(text)
             case .truncated(let reason):
-                isIncomplete = true
-                incompleteReason = reason
+                acc.markTruncated(reason: reason)
             case .failed(let error):
-                isIncomplete = true
-                incompleteReason = error.localizedDescription
+                acc.markTruncated(reason: error.localizedDescription)
             case .done:
                 break streamLoop
             }
@@ -173,9 +165,9 @@ final class NarrativeGenerationCoordinator {
             mostRecentEntryDate: mostRecentEntryDate,
             generation: generation,
             streamStartTime: streamStartTime,
-            rawOutput: rawOutput,
-            isIncomplete: isIncomplete,
-            incompleteReason: incompleteReason
+            rawOutput: acc.rawOutput,
+            isIncomplete: acc.isIncomplete,
+            truncatedReason: acc.truncatedReason
         )
     }
 
@@ -190,7 +182,7 @@ final class NarrativeGenerationCoordinator {
         streamStartTime: Date,
         rawOutput: String,
         isIncomplete: Bool,
-        incompleteReason: String
+        truncatedReason: String?
     ) async {
         let (headline, body) = NarrativeStreamSplitter.split(rawOutput: rawOutput)
 
@@ -198,9 +190,9 @@ final class NarrativeGenerationCoordinator {
         // 让卡片显 streamFailedView / 重试;无失败原因(纯空 .done)→ 不挂,卡片回落 notGenerated。
         guard !body.isEmpty else {
             if isCurrent(range, generation) {
-                streamFailure[range] = incompleteReason.isEmpty
-                    ? nil
-                    : StreamFailure(reason: incompleteReason, occurredAt: Date())
+                streamFailure[range] = truncatedReason.map {
+                    StreamFailure(reason: $0, occurredAt: Date())
+                }
             }
             return
         }
@@ -225,7 +217,7 @@ final class NarrativeGenerationCoordinator {
             rangeEnd: dateInterval.end,
             body: body,
             isIncomplete: isIncomplete,
-            truncatedReason: incompleteReason.isEmpty ? nil : incompleteReason,
+            truncatedReason: truncatedReason,
             rangeKind: range.rawValue,
             entryCount: entryCount,
             sourceLatestEntryDate: mostRecentEntryDate,

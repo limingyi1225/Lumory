@@ -132,9 +132,8 @@ actor NarrativePrecomputeService {
 
         // wave15 — 累 rawOutput,done 后用 NarrativeStreamSplitter 一次 split。
         // 不再 chunk-by-chunk 拆段(streaming 期间 UI 也只显 thinking 占位)。
-        var rawOutput = ""
-        var isIncomplete = false
-        var incompleteReason: String?
+        // `.chunk` / `.truncated` 状态机抽进 `NarrativeStreamAccumulator`,与 coordinator 共享。
+        var acc = NarrativeStreamAccumulator()
         // **P1 fix (2026-05-14 superreview round 3)**:记 stream 开始时间,完成后判断 entry
         // 集合是否在生成期间被改动(见下方 invalidatedBeforeDate 守卫)。
         let streamStartTime = Date()
@@ -147,17 +146,9 @@ actor NarrativePrecomputeService {
             guard isCurrentGeneration(generation) else { return }
             switch event {
             case .chunk(let text):
-                // 模型卡死不发 done / runaway 输出时 rawOutput 不能无限累。超过本地
-                // cap 后保留可用前缀并显式写 incomplete,避免半截内容被缓存成完整回顾。
-                if NarrativeStreamLimits.append(text, to: &rawOutput) {
-                    isIncomplete = true
-                    if incompleteReason == nil {
-                        incompleteReason = NarrativeStreamLimits.localTruncationReason
-                    }
-                }
+                acc.appendChunk(text)
             case .truncated(let reason):
-                isIncomplete = true
-                incompleteReason = reason
+                acc.markTruncated(reason: reason)
             case .failed(let error):
                 Log.warning("[NarrativePrecompute] stream failed for \(range.rawValue): \(error)", category: .ai)
                 // **P1 fix (2026-05-13 superreview)**:backoff 写入也要 generation guard,
@@ -174,7 +165,9 @@ actor NarrativePrecomputeService {
             }
         }
 
-        let (headline, body) = NarrativeStreamSplitter.split(rawOutput: rawOutput)
+        let isIncomplete = acc.isIncomplete
+        let incompleteReason = acc.truncatedReason
+        let (headline, body) = NarrativeStreamSplitter.split(rawOutput: acc.rawOutput)
         guard !body.isEmpty else {
             Log.warning("[NarrativePrecompute] empty body for \(range.rawValue), skip persist", category: .ai)
             // **P2 fix (2026-05-13 superreview round 2)**:.truncated 时 body 空(stream 在

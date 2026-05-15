@@ -42,6 +42,33 @@ final class AppLockService: ObservableObject {
     /// (2026-05-15 megareview P1-3)
     private var activeAuthContext: LAContext?
 
+    // MARK: - Test seams (DEBUG-only)
+
+    #if DEBUG
+    /// **Test-only**:替代 `.shared` singleton — 用注入 UserDefaults 起独立实例隔离 enable flag。
+    /// 用 random suite name 避免污染 `.standard` / `AppGroup.userDefaults`。
+    static func makeForTesting(defaults: UserDefaults) -> AppLockService {
+        AppLockService(defaults: defaults)
+    }
+
+    /// **Test-only**:测 P1-3 — disable() 调时把 in-flight LAContext invalidate。
+    /// 模拟"用户拨 ON → Face ID 弹窗冒出 → 用户立刻拨 OFF"场景。
+    func simulateInFlightAuthContextForTesting(_ context: LAContext) {
+        activeAuthContext = context
+    }
+
+    /// **Test-only**:观察 activeAuthContext 是否被清。
+    var activeAuthContextForTesting: LAContext? { activeAuthContext }
+
+    /// **Test-only**:不走 LocalAuthentication,直接 set isEnabled / isLocked。
+    /// 给"已启用状态下 lockOnBackground / unlock 自动逻辑"测试用。
+    func setStateForTesting(enabled: Bool, locked: Bool) {
+        isEnabled = enabled
+        isLocked = locked
+        defaults.set(enabled, forKey: enabledKey)
+    }
+    #endif
+
     private init(defaults: UserDefaults = AppGroup.userDefaults) {
         self.defaults = defaults
         let enabled = defaults.bool(forKey: enabledKey)

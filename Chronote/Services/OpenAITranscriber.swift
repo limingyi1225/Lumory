@@ -175,6 +175,22 @@ final class OpenAITranscriber: TranscriberProtocol {
         default:           return "application/octet-stream"
         }
     }
+
+    // MARK: - Test seams (DEBUG-only)
+
+    #if DEBUG
+    /// **Test-only**:暴露 `prepareUpload` 给单测验"25MB 阈值 / missing-file / multipart 形状"。
+    /// 返一个 Sendable 元组(避免暴露 private `PreparedUpload` 结构本身)。
+    /// 单测验证:body 非空 + boundary 形如 "Lumory-..." + size 阈值。
+    nonisolated static func prepareUploadForTesting(fileURL: URL) throws -> (bodyByteCount: Int, boundary: String, mimeType: String) {
+        let prepped = try prepareUpload(fileURL: fileURL)
+        let mime = mimeTypeFor(fileExtension: fileURL.pathExtension)
+        return (bodyByteCount: prepped.body.count, boundary: prepped.boundary, mimeType: mime)
+    }
+
+    /// **Test-only**:暴露 25MB 阈值给单测验"刚好超 / 刚好等"边界。
+    nonisolated static var maxFileBytesForTesting: Int64 { maxFileBytes }
+    #endif
 }
 
 // MARK: - multipart helpers

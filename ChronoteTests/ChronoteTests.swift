@@ -2179,6 +2179,41 @@ struct ThemeAliasJudgeServiceTests {
         }
         #expect(didFail, "Expected failed scan phase")
     }
+
+    /// **P1-4 (2026-05-15 megareview)**:60s throttle 必须落 UserDefaults,App 被 kill / 冷启动
+    /// 后仍生效。原 in-memory 实现:午休前写一篇 → 系统 jetsam kill → 午休后写一篇 → throttle 失效
+    /// → 整 inventory 上送 OpenAI 一次,白付 cost + 频繁 PII 暴露。
+    @Test func judgeAfterWrite_throttlePersistsAcrossInstances() async throws {
+        let throttleKey = "lumory.themeAliasJudge.lastJudgeAt"
+        // 清理 UserDefaults.standard 残留(跨测试隔离)
+        UserDefaults.standard.removeObject(forKey: throttleKey)
+        defer { UserDefaults.standard.removeObject(forKey: throttleKey) }
+
+        let persistence = PersistenceController(inMemory: true)
+        try seedEntries(persistence, [
+            (["Person A"], makeDate(year: 2024, month: 6, day: 1))
+        ])
+        let ai1 = ThemeAliasAITestDouble()
+        ai1.judgeResult = []
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+
+        // Phase 1: service A 第一次 judgeAfterWrite → 触发 AI 调用 + 写 UserDefaults timestamp
+        let serviceA = ThemeAliasJudgeService(persistence: persistence, ai: ai1, resolver: resolver)
+        await serviceA.judgeAfterWrite(entryID: UUID(), newTags: ["FreshTag"])
+
+        #expect(ai1.judgeCalls == 1, "first judgeAfterWrite should call AI")
+        let storedTimestamp = UserDefaults.standard.double(forKey: throttleKey)
+        #expect(storedTimestamp > 0, "throttle timestamp must be written to UserDefaults (P1-4)")
+
+        // Phase 2: 模拟"App 被 kill 后冷启动" → 起 fresh service B,共用同一 UserDefaults
+        let ai2 = ThemeAliasAITestDouble()
+        ai2.judgeResult = []
+        let serviceB = ThemeAliasJudgeService(persistence: persistence, ai: ai2, resolver: resolver)
+        await serviceB.judgeAfterWrite(entryID: UUID(), newTags: ["AnotherFreshTag"])
+
+        #expect(ai2.judgeCalls == 0,
+                "fresh-instance judgeAfterWrite within 60s must be throttled by persisted timestamp (P1-4 — was broken pre-fix)")
+    }
 }
 
 private final class ThemeAliasAITestDouble: AIServiceProtocol {

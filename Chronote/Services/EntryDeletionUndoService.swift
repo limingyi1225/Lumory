@@ -89,6 +89,21 @@ final class EntryDeletionUndoService {
 
     private init() {}
 
+    // MARK: - Test seams (DEBUG-only)
+
+    #if DEBUG
+    /// **Test-only**:观察 pending 快照(只读)— 用来断言 register/commit/undo 后的状态。
+    var pendingSnapshotForTesting: EntryDeletionSnapshot? { pending }
+    /// **Test-only**:观察 commitTask 是否还在飞 — 断言 cancel 行为。
+    var commitTaskIsActiveForTesting: Bool { commitTask != nil }
+    /// **Test-only**:把内部状态 reset 到 init 状态,跨 test 隔离 singleton 污染。
+    func resetForTesting() {
+        commitTask?.cancel()
+        commitTask = nil
+        pending = nil
+    }
+    #endif
+
     /// 注册一条删除,启动 4 秒撤销窗口。
     /// 已有 pending → 立即 commit 上一条(不能让两个同时排队,否则 attachment 清理顺序错乱)。
     ///

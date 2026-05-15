@@ -132,10 +132,15 @@ struct DiaryExportView: View {
     private func performExport() {
         isExporting = true
 
-        exportTask = Task {
+        // (2026-05-15 superreview-2 P1)主线程先把 entries 拍 Sendable snapshot,
+        // 然后 Task.detached 把"sort 全表 + lines.joined 大字符串拼接 + 写盘"完全
+        // 挪到后台线程,避免几千篇日记导出时主线程 watchdog kill。NSManagedObject 不 Sendable,
+        // 必须先在主 actor 上转 DTO 才能跨边界。
+        let snapshots = entries.map { DiaryExportEntrySnapshot($0) }
+
+        exportTask = Task.detached(priority: .userInitiated) {
             // Generate content
-            let entriesArray = Array(entries)
-            let content = DiaryExportService.generateExportContent(from: entriesArray)
+            let content = DiaryExportService.generateExportContent(from: snapshots)
             // 用户 Cancel 按钮 → cancel 这个 task。share sheet 不弹,文件不创建。
             if Task.isCancelled { return }
 

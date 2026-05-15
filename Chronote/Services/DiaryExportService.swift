@@ -1,6 +1,22 @@
 import Foundation
 import CoreData
 
+/// (2026-05-15 superreview-2 P1)Sendable snapshot 让 generateExportContent 能跑 Task.detached
+/// 后台线程,主线程零卡顿。`DiaryEntry` 是 `NSManagedObject` 跨 actor 边界违法。
+struct DiaryExportEntrySnapshot: Sendable {
+    let date: Date?
+    let text: String?
+    let summary: String?
+    let moodValue: Double
+
+    init(_ entry: DiaryEntry) {
+        self.date = entry.date
+        self.text = entry.text
+        self.summary = entry.summary
+        self.moodValue = entry.moodValue
+    }
+}
+
 /// Service to handle exporting diary entries to a text file.
 class DiaryExportService {
     /// Errors raised when creating an export file.
@@ -17,10 +33,10 @@ class DiaryExportService {
     /// Export files older than this are auto-cleaned on each export call.
     private static let cleanupAgeSeconds: TimeInterval = 7 * 24 * 60 * 60
 
-    /// Generates the export content string from a list of diary entries.
-    /// - Parameter entries: The diary entries to export, sorted by date.
-    /// - Returns: A formatted string containing all diary entries.
-    static func generateExportContent(from entries: [DiaryEntry]) -> String {
+    /// (2026-05-15 superreview-2 P1)`nonisolated` 让 caller 能 Task.detached 后台跑,
+    /// 避免主线程一次性拼 ~MB 级 String + sort N entries 卡 watchdog。caller 必须在主线程
+    /// 先把 `[DiaryEntry]` 转成 `[DiaryExportEntrySnapshot]`(`NSManagedObject` 不 Sendable)。
+    nonisolated static func generateExportContent(from entries: [DiaryExportEntrySnapshot]) -> String {
         let dateFormatter = LumoryDateFormatters.longDateShortTime
 
         var lines: [String] = []
@@ -73,7 +89,7 @@ class DiaryExportService {
     /// - Note: 历史上还有一个 `createExportFileThrowing` 暴露 `ExportError.diskFull`,
     ///   但所有 call site 都只看 nil/non-nil,disk-full 极小概率 + 系统已有自身 alert,
     ///   2026-05 删了那条 throwing 路径,inline 进 wrapper。
-    static func createExportFile(content: String) -> URL? {
+    nonisolated static func createExportFile(content: String) -> URL? {
         do {
             let folder = try ensureExportFolder()
 

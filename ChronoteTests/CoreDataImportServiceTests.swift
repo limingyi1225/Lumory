@@ -2,14 +2,20 @@
 //  CoreDataImportServiceTests.swift
 //  ChronoteTests
 //
-//  Tests for `CoreDataImportService.importEntries`:
+//  **Scope**:锁住 `CoreDataImportService.importEntries` wrapper 的 rethrow + isImporting
+//  状态复位 + 多种 dedup 路径(NFC/NFD / 同 day+text / chunk 成功)。**仅 wrapper 行为**。
+//
 //   - 解析失败(network / parse / etc) → 重抛 DiaryImportError + isImporting/Progress 复位
 //   - parsed.isEmpty → 返 .empty(没识别到日记是合法情况,不算 error)
 //   - 同 day + 同 text → 第二条被 fingerprint 去重(skipped)
 //   - NFD 文本被规范化成 NFC → 两条本质同一篇,去重生效
 //   - 整批 import 成功 → 每条都进 viewContext + counts 对得上
 //
-//  **CLAUDE.md backlog**:`parseImportedDiaries` 错误路径覆盖 — 本文件锁住 contract。
+//  **未覆盖**(CLAUDE.md backlog 仍开着,**不要据此勾掉那条**):
+//  `Chronote/Services/OpenAI/OpenAIService+Import.swift` 的 `parseImportedDiaries` parser
+//  本体错误路径(malformed JSON / 部分截断 / 5xx HTML)。本文件用 `ImportTestDouble` 直接注入
+//  parser 抛错,**绕过了真 parser**。要勾掉 backlog 那条,需要单独加 URLProtocol mock + 真
+//  错误响应 fixtures 测 `OpenAIService+Import`。
 //
 
 import XCTest

@@ -2,21 +2,23 @@
 //  CoreUserFlowsTests.swift
 //  ChronoteUITests
 //
-//  五条核心用户路径的 UI smoke test。megareview OPT-HIGH-7 / 测试覆盖 reviewer 都点名:
-//  这些路径用户每天都触发,但**之前完全没有 UI 测试**,任何 HomeView/DiaryDetailView/Settings
-//  refactor 静默踩坑都没信号。
+//  核心用户路径的 UI smoke test。megareview OPT-HIGH-7 / 测试覆盖 reviewer 都点名:
+//  这些路径用户每天都触发,但**之前完全没有 UI 测试**。
 //
+//  **真验路径(3 条)**:
 //   1. ✏️ Compose → Save:主写流(最高频用户路径)
-//   2. ↩️ Delete + Undo:swipe → 撤销 toast → 行复原
-//   3. 📝 Edit Diary → Save:tap → edit → save
-//   4. 🗑️ Settings → 删除全部日记:批量 destructive 路径(P1-9 fix 也跑这条)
-//   5. 💭 AskPast Streaming smoke:进 Insights → 提问 → 看到"正在思考"占位(不验完整流)
+//   2. 🗑️ Settings 入口打开/关闭:navigation push/pop 不崩
+//   3. 💭 AskPast Streaming smoke:进 Insights → 提问 → 看到 AskPast UI(不验完整流)
+//
+//  **已知缺口 / 待补(superreview 2026-05-15 P1 砍掉 always-pass smoke 后)**:
+//   - ❌ Delete + Undo:swipe + toast 自动化 CI 不稳,需要专 a11y identifier 锁 swipe action
+//   - ❌ Edit Diary → Save:NavigationStack push 后 toolbar query 不稳,需 detail view 加 a11y id
+//   - ❌ Settings 删除全部 destructive flow:alert button label 跨 iOS 版本不一致
+//  这三条核心逻辑都在 `SettingsEntryDeletionService` / `EntryDeletionUndoService` / `DiaryDetailView.saveChanges`
+//  各自的 service-level 单测覆盖(`EntryDeletionUndoServiceTests` 等)。UI 自动化待 a11y id 补齐再加。
 //
 //  **样例数据**:`-LumoryUITestSampleData YES` 启动参数让 PersistenceController.shared
 //  用 in-memory store + seed 90 条样例日记(主角"林子衿")。每个 test 自起 app,互不影响。
-//
-//  **AskPast 5 不验流式完成** — 真 OpenAI 后端不在 CI 链路,test 只验 UI 状态机走到 "thinking" 占位
-//  就够。完整 streaming + 答案 assertion 留给 integration test。
 //
 
 import XCTest
@@ -62,39 +64,13 @@ final class CoreUserFlowsTests: XCTestCase {
                       "新写的日记应该出现在时间线 (probe=\(probe))")
     }
 
-    // MARK: - 2. Timeline rendering smoke (Delete + Undo 简化)
+    // (2026-05-15 superreview-2 P1)旧 test 2/3 是 always-pass smoke,
+    // assertion 跟 docstring 承诺路径完全脱钩 — `cells+buttons>5` 任何启动都过,
+    // `app.state==.runningForeground` 是 launched 默认。砍掉避免假阳信号。
+    // 真 Delete+Undo / Edit→Save 路径在 service-level 单测覆盖,UI 自动化待
+    // a11y identifier 补齐(详见文件 header)。
 
-    /// **简化版**:删除-撤销整条流程在 CI 上稳定 swipe + 找 toast 困难(SwiftUI swipeActions 在不同
-    /// 测试环境表现不一)。先用一个更稳的 smoke:确认 timeline rows 渲染出来 + 行数 > 1。
-    /// 完整 swipe-undo-restore 流程留给手测 / 截图测试。
-    @MainActor
-    func testHomeTimeline_seededEntriesRender() throws {
-        let app = launchSeededApp()
-        // seeded 模式种了 ~90 条;`cells` 或 `buttons` 应该有 ≥ 2 个可见(滚动 viewport 内)。
-        // 抓 buttons.count ≥ 2(composer 工具栏 + 至少一条 timeline row)。
-        let visibleCells = app.cells.count
-        let visibleButtons = app.buttons.count
-        XCTAssertGreaterThan(visibleCells + visibleButtons, 5,
-                             "seeded mode 应该渲染出 timeline + 工具栏元素(cells=\(visibleCells) buttons=\(visibleButtons))")
-    }
-
-    // MARK: - 3. Edit smoke(简化版)
-
-    /// **简化版**:tap 第一条 timeline row → app 不崩,事后仍可响应交互。
-    /// 完整 edit + save flow 留给手测 — XCUITest 在 NavigationStack push 后顶栏 query 不稳
-    /// (有时父 toolbar 元素仍在 query 树里),核心 service 单测已覆盖 saveChanges 逻辑。
-    @MainActor
-    func testHomeTapRow_doesNotCrashAndAppRemainsResponsive() throws {
-        let app = launchSeededApp()
-        let firstCell = firstTimelineCell(in: app)
-        firstCell.tap()
-        usleep(800_000)
-        // 验 app 没崩 — XCUIApplication.state 仍是 running,任何 hittable 元素都可枚举。
-        XCTAssertEqual(app.state, .runningForeground, "tap row 后 app 应仍 runningForeground")
-        XCTAssertGreaterThan(app.buttons.count, 0, "tap 后 app 仍应有可见 button 元素(界面没冻死)")
-    }
-
-    // MARK: - 4. Settings page smoke(简化版)
+    // MARK: - 2. Settings page smoke(简化版)
 
     /// **简化版**:打开 Settings → 关闭 → 回 Home。完整"删除全部"flow UI 路径在不同 iOS 版本上
     /// alert 按钮 label 多变,验它的整链条 CI 不稳。核心 deleteAll service 路径走 unit test 即可
@@ -184,20 +160,4 @@ final class CoreUserFlowsTests: XCTestCase {
         usleep(800_000)
     }
 
-    /// 抓时间线第一条 cell — seeded 模式下 entries 渲染成 List/ForEach row。
-    /// 找最靠上的可点 staticText,fallback 到首个 cell。
-    @MainActor
-    private func firstTimelineCell(in app: XCUIApplication) -> XCUIElement {
-        // 时间线 row 在 SwiftUI 里通过 staticText 暴露文字,先找 staticText
-        // 然后 swipe 用 cell 容器。优先用第一条 cell。
-        let cells = app.cells
-        if cells.firstMatch.waitForExistence(timeout: 5), cells.firstMatch.isHittable {
-            return cells.firstMatch
-        }
-        // 退化:用第一个非空 staticText 在主时间线下方
-        let texts = app.staticTexts
-        let candidate = texts.element(boundBy: 5) // 跳过顶部 UI 文字
-        XCTAssertTrue(candidate.waitForExistence(timeout: 3), "时间线没找到可见 row")
-        return candidate
-    }
 }

@@ -244,6 +244,10 @@ const globalIPLimiter = rateLimit({
 
 // Health check. 不走鉴权，方便 PM2 / 负载均衡健康探活。
 app.get('/health', (_req, res) => {
+  // (2026-05-15 superreview-2 P1)response body 含 `unhandledRejectionCount` /
+  // `activeStreams.size` 实时计数,任何上游 cache(Cloudflare Page Rule /
+  // nginx proxy_cache)缓存了运维拿到的就是冻结值,告警基线失真 → 强制不缓存。
+  res.setHeader('Cache-Control', 'no-store');
   res.json({
     status: 'ok',
     message: 'Backend is running',
@@ -410,10 +414,13 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         // emit 'ERR_STREAM_DESTROYED'。早期 return + 主动 destroy upstream 关 race。
         //
         // (2026-05-15 superreview P1)`destroy()` 无 arg 只 emit 'close',不触发 'end' / 'error'
-        // → `activeStreams.delete()` 永不跑,在飞 stream 引用 leak 到进程重启。传 Error 让
-        // line 435 'error' handler 跑 cleanup;destroy 本身幂等。
+        // → `activeStreams.delete()` 永不跑。传 Error 让 line 'error' handler 跑 cleanup。
+        // (2026-05-15 superreview-2 P1)用 sentinel `code: CLIENT_DISCONNECT` 而非 message 字符串
+        // 让 'error' handler 区分"客户端中断"(降级 log.info)和"真上游错误"(log.error)。
         if (res.destroyed) {
-          upstream.data.destroy(new Error('client disconnected'));
+          const clientDisconnect = new Error('client disconnected');
+          clientDisconnect.code = 'CLIENT_DISCONNECT';
+          upstream.data.destroy(clientDisconnect);
           return;
         }
         const text = chunk.toString('utf8');
@@ -450,12 +457,22 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       upstream.data.on('error', (error) => {
         activeStreams.delete(upstream.data);
         res.off('close', abortUpstream);
-        req.log.error({ err: safeUpstreamError(error) }, 'upstream stream errored');
+        // (2026-05-15 superreview-2 P1)区分 client mid-stream 中断和真上游错误。
+        // 前者每次用户切后台都会触发,不该灌 ERROR log 导致 PagerDuty 阈值告警麻木。
+        if (error?.code === 'CLIENT_DISCONNECT') {
+          req.log.info('client disconnect mid-stream — cleanup ran');
+        } else {
+          req.log.error({ err: safeUpstreamError(error) }, 'upstream stream errored');
+        }
         // 不能写 `data: [DONE]`—— 那是 SSE 的**成功**终止帧，iOS 端的
         // `streamChat` 看到 `[DONE]` 会 `break` 并 `return result`，把半截
         // 流当完整响应回调给用户。硬破连接让客户端 `bytes.lines` 抛错，
         // 被 NetworkRetryHelper 接住重试；重试到头会把错误冒到 UI。
-        res.destroy(error);
+        // (2026-05-15 superreview-2 P2)client 已断时 res 已 destroyed,destroy(error) 是
+        // no-op,但显式 guard 让意图清晰且省一次内部异常。
+        if (!res.destroyed) {
+          res.destroy(error);
+        }
       });
     } else {
       req.log.info('non-streaming request started');

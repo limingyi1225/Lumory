@@ -35,8 +35,13 @@ struct NarrativeStreamAccumulator {
     }
 
     /// 处理 `.truncated(reason)` event。reason 直接覆盖(服务器原因比本地 cap fallback 准)。
+    /// **空字符串当 "没传"**:reason 来自不受信外部(SSE 服务器 / `Error.localizedDescription`),
+    /// 万一上游真发了空字符串,继续把 isIncomplete 翻 true 但**不**覆盖既有 reason(也不
+    /// 写空字符串当 reason),防止 UI 渲染空白失败 banner。
     mutating func markTruncated(reason: String) {
         isIncomplete = true
-        truncatedReason = reason
+        if !reason.isEmpty {
+            truncatedReason = reason
+        }
     }
 }

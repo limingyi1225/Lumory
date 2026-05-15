@@ -143,6 +143,12 @@ app.use(
 // Tracker for in-flight SSE upstream streams so graceful shutdown can abort them.
 const activeStreams = new Set();
 
+// (2026-05-15 superreview P1)`unhandledRejection` 改 log-only(见 line 758)是有意识的
+// trade-off,但缺监控阈值 → 真出现持续 promise 链 bug 时 PM2 健康检查照样过,silent failure。
+// 暴露到 `/health` 供运维抓阈值告警。计数器存进程内,重启清零(对齐 PM2 重启语义)。
+
+let unhandledRejectionCount = 0;
+
 // Shared-secret 鉴权中间件：time-safe compare 避免 timing attack 逐字节泄漏。
 // 不挂在 /health 上，方便负载均衡 / PM2 健康检查。
 function requireAppSecret(req, res, next) {
@@ -238,7 +244,12 @@ const globalIPLimiter = rateLimit({
 
 // Health check. 不走鉴权，方便 PM2 / 负载均衡健康探活。
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', message: 'Backend is running' });
+  res.json({
+    status: 'ok',
+    message: 'Backend is running',
+    unhandledRejectionCount,
+    activeStreams: activeStreams.size,
+  });
 });
 
 // 鉴权挂到整个 /api；通过鉴权后再计入 globalIPLimiter，避免未授权流量耗尽正常用户配额。
@@ -397,8 +408,12 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         // (2026-05-15 megareview P2-22)res 已被 client-disconnect 销毁,abortUpstream 已发但
         // upstream 还可能 flush 一个 in-flight chunk;此时 res.write() 在已销毁 socket 上
         // emit 'ERR_STREAM_DESTROYED'。早期 return + 主动 destroy upstream 关 race。
+        //
+        // (2026-05-15 superreview P1)`destroy()` 无 arg 只 emit 'close',不触发 'end' / 'error'
+        // → `activeStreams.delete()` 永不跑,在飞 stream 引用 leak 到进程重启。传 Error 让
+        // line 435 'error' handler 跑 cleanup;destroy 本身幂等。
         if (res.destroyed) {
-          upstream.data.destroy();
+          upstream.data.destroy(new Error('client disconnected'));
           return;
         }
         const text = chunk.toString('utf8');
@@ -756,7 +771,11 @@ if (require.main === module) {
   // 代理场景下 unhandledRejection 几乎都是非致命的(下游 OpenAI 抛错没 catch 等),不应等同
   // `uncaughtException`。`uncaughtException` 仍 fatal — 那个真的可能让进程处于 corrupt 状态。
   process.on('unhandledRejection', (reason) => {
-    log.error({ err: safeUpstreamError(reason) }, 'unhandledRejection (continuing — not fatal)');
+    unhandledRejectionCount += 1;
+    log.error(
+      { err: safeUpstreamError(reason), count: unhandledRejectionCount },
+      'unhandledRejection (continuing — not fatal)'
+    );
   });
   process.on('uncaughtException', (err) => {
     log.fatal({ err: safeUpstreamError(err) }, 'uncaughtException');

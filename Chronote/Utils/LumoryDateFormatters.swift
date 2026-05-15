@@ -2,14 +2,8 @@ import Foundation
 
 // MARK: - LumoryDateFormatters
 //
-// **P1-T10 收编**:5 处独立 DateFormatter 缓存(HomeView / DiaryEntryRow / DiaryPreviewView /
-// DiaryDetailView / CitationEntryCard / 等)合并到这一处。
-//
-// `DateFormatter` 实例**线程安全 since iOS 7**,但创建有 ~1ms 开销。每次 row 重 diff 都 new 一个
-// 在长 list 里是真热路径浪费(reviewer 在 DiaryEntryRow.swift:194-210 注释里也提过)。
-//
-// 这里所有 formatter 都是 module-level `let`,启动时一次性初始化,跨 view 共享。
-// 如果以后要按用户语言动态切 formatter,加一层 computed property 拉 `Locale.current` 即可。
+// `DateFormatter` 线程安全 since iOS 7,构造 ~1ms ICU 加载。集中共享避免长 list /
+// 30fps 播放进度 body eval 重建。语言敏感的 accessor 见下方 MARK 段。
 
 enum LumoryDateFormatters {
     /// "上午 9:30" / "9:30 AM" — DiaryEntryRow / HomeView 时间戳。
@@ -93,23 +87,10 @@ enum LumoryDateFormatters {
         return f
     }()
 
-    /// `.long` date-only,按 `appLanguage` 锁定语言。DiaryDetailView hero 顶部。
-    static func longDate(language: String) -> DateFormatter {
-        cachedFormatter(key: "longDate-\(language)") {
-            let f = DateFormatter()
-            f.locale = Locale(identifier: language)
-            f.dateStyle = .long
-            f.timeStyle = .none
-            return f
-        }
-    }
-
     // MARK: - Language-aware accessors
     //
-    // 上面的 token 用 `Locale.current`(系统当前)— 用户在 App 内通过 `@AppStorage("appLanguage")`
-    // 主动切语言时跟系统不一定一致。Home / Detail / EntryRow 这类 list cell 必须按 `appLanguage`
-    // 显示 weekday / monthDay,不能跟系统 locale 走。下面这一组按 language 缓存,
-    // SwiftUI body 反复 evaluate 时不会重建 formatter。
+    // 上面的 token 走 `Locale.current`(系统);用户用 `@AppStorage("appLanguage")` 在 App 内切语言
+    // 时跟系统可能不一致 → list cell 必须按 `appLanguage` 显示走下面的组,带 language 缓存。
 
     private static let languageCacheLock = NSLock()
     private static var languageCache: [String: DateFormatter] = [:]
@@ -172,6 +153,17 @@ enum LumoryDateFormatters {
             let f = DateFormatter()
             f.locale = Locale(identifier: language)
             f.timeStyle = .short
+            return f
+        }
+    }
+
+    /// `.long` date-only,按 `appLanguage` 锁定语言。DiaryDetailView hero 顶部。
+    static func longDate(language: String) -> DateFormatter {
+        cachedFormatter(key: "longDate-\(language)") {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: language)
+            f.dateStyle = .long
+            f.timeStyle = .none
             return f
         }
     }

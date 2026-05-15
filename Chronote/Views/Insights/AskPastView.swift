@@ -581,7 +581,7 @@ struct AskPastView: View {
         if let lowDay = moodPoints.min(by: { $0.mood < $1.mood }), lowDay.mood < 0.4 {
             out.append(String(
                 format: NSLocalizedString("%@ 那天我为什么情绪低？", comment: "Preset low day"),
-                Self.dateFormatter.string(from: lowDay.date)
+                LumoryDateFormatters.monthDay.string(from: lowDay.date)
             ))
         }
 
@@ -613,7 +613,6 @@ struct AskPastView: View {
         return Array(out.prefix(4))
     }
 
-    private static var dateFormatter: DateFormatter { LumoryDateFormatters.monthDay }
 }
 
 private struct AskPastMessageRow: View, Equatable {

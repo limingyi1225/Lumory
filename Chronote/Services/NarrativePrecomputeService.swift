@@ -165,15 +165,13 @@ actor NarrativePrecomputeService {
             }
         }
 
-        let isIncomplete = acc.isIncomplete
-        let incompleteReason = acc.truncatedReason
         let (headline, body) = NarrativeStreamSplitter.split(rawOutput: acc.rawOutput)
         guard !body.isEmpty else {
             Log.warning("[NarrativePrecompute] empty body for \(range.rawValue), skip persist", category: .ai)
             // **P2 fix (2026-05-13 superreview round 2)**:.truncated 时 body 空(stream 在
             // `[BODY]` 标记前被截) → 不写盘但也得记 backoff,否则 60s debounce 后又重试同款
             // 失败路径,反复烧 API。failed 路径已写 backoff,这里语义对齐。
-            if isIncomplete, isCurrentGeneration(generation) {
+            if acc.isIncomplete, isCurrentGeneration(generation) {
                 lastFailureAtByRange[range] = Date()
             }
             return
@@ -214,8 +212,8 @@ actor NarrativePrecomputeService {
 
         // local copies for sendable closure
         let finalHeadline = headline
-        let finalIsIncomplete = isIncomplete
-        let finalIncompleteReason = incompleteReason
+        let finalIsIncomplete = acc.isIncomplete
+        let finalTruncatedReason = acc.truncatedReason
         let title = range.narrativeTitleLabel
 
         let didPersist: Bool = await bg.perform {
@@ -225,7 +223,7 @@ actor NarrativePrecomputeService {
                     rangeEnd: finalInterval.end,
                     body: body,
                     isIncomplete: finalIsIncomplete,
-                    truncatedReason: finalIncompleteReason,
+                    truncatedReason: finalTruncatedReason,
                     rangeKind: range.rawValue,
                     entryCount: finalCount,
                     sourceLatestEntryDate: finalMostRecent,

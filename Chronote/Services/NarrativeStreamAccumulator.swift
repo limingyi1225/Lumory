@@ -2,19 +2,10 @@ import Foundation
 
 // MARK: - NarrativeStreamAccumulator
 //
-// `NarrativePrecomputeService` 和 `NarrativeGenerationCoordinator` 都消费同一个
-// `engine.streamNarrativeEvents` 的 `.chunk` / `.truncated` 事件序列,两边各 10 行重复
-// 状态机(累 rawOutput + cap 守卫 + 翻 isIncomplete + 记 truncatedReason)。抽进这个
-// 值类型一处维护:
-//
-//   - `.chunk` → 走 `NarrativeStreamLimits.append` cap 守卫,溢出自动翻 incomplete +
-//     首次溢出时挂 `localTruncationReason`。
-//   - `.truncated(reason)` → 服务器或上游显式截断,翻 incomplete + 覆盖 reason
-//     (后到的服务器原因比本地 cap 的 fallback 准确)。
-//
-// **不管 `.failed` 和 `.done`** —— 两边语义故意不同:Precompute 失败立刻 abort + 记 backoff,
-// Coordinator 把 error 字符串塞进 truncatedReason 继续等 `.done` 让 UI 看到失败原因。这部分
-// 留给 caller 自己处理,不抽。
+// `NarrativePrecomputeService` 和 `NarrativeGenerationCoordinator` 共用的 `.chunk` /
+// `.truncated` 折叠器。**故意不管 `.failed` 和 `.done`** —— 两边语义不同:Precompute 失败
+// 立刻 abort + 记 backoff(后台静默);Coordinator 把 error 塞 truncatedReason 继续等
+// `.done`(UI 要看到失败原因)。这部分留给 caller 自己写。
 
 struct NarrativeStreamAccumulator {
     private(set) var rawOutput: String = ""

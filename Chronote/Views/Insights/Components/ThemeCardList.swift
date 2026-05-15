@@ -292,7 +292,7 @@ private struct ThemeCardPreview: View {
                 .frame(width: 6, height: 6)
                 .padding(.top, 6)
             VStack(alignment: .leading, spacing: 3) {
-                Text(Self.dateFormatter.string(from: snip.date))
+                Text(LumoryDateFormatters.monthDay.string(from: snip.date))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Text(snip.text)
@@ -305,8 +305,6 @@ private struct ThemeCardPreview: View {
             Spacer(minLength: 0)
         }
     }
-
-    private static var dateFormatter: DateFormatter { LumoryDateFormatters.monthDay }
 
     private func loadSnippets() async {
         // 取最近 3 条 —— 长按 preview 不需要全部

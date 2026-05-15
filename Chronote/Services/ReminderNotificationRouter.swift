@@ -1,7 +1,5 @@
 import Foundation
-#if canImport(UserNotifications)
 import UserNotifications
-#endif
 
 // MARK: - ReminderNotificationRouter
 //
@@ -14,7 +12,6 @@ import UserNotifications
 //
 // 共享 focus 入口:reminder 通知点击 **和** widget URL `lumory://compose` 都走 `requestComposeFocus()`。
 
-#if canImport(UserNotifications)
 final class ReminderNotificationRouter: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     static let shared = ReminderNotificationRouter()
 
@@ -86,26 +83,3 @@ final class ReminderNotificationRouter: NSObject, ObservableObject, UNUserNotifi
         }
     }
 }
-#else
-final class ReminderNotificationRouter: ObservableObject {
-    static let shared = ReminderNotificationRouter()
-    @Published private(set) var composeFocusRequestID: UUID?
-
-    static func shouldFocusComposer(
-        identifier: String,
-        categoryIdentifier: String,
-        userInfo: [AnyHashable: Any]
-    ) -> Bool {
-        identifier.hasPrefix("lumory.reminder.")
-            || categoryIdentifier == "lumory.reminder.compose"
-            || userInfo["lumory.intent"] as? String == "compose"
-    }
-
-    @MainActor
-    func consumeComposeFocusRequest() -> UUID? {
-        nil
-    }
-
-    nonisolated func requestComposeFocus() {}
-}
-#endif

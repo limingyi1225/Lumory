@@ -412,12 +412,14 @@ final class InsightsEngine {
             var topHeap: [(id: NSManagedObjectID, score: Float)] = []
             topHeap.reserveCapacity(topK)
             var withoutVecCount = 0
+            var maxScore: Float = -.infinity
             for entry in scanned {
                 guard let vec = entry.embeddingVector else {
                     withoutVecCount += 1
                     continue
                 }
                 let score = Self.cosineSimilarity(qVec, vec)
+                if score > maxScore { maxScore = score }
                 if topHeap.count < topK {
                     let insertAt = topHeap.firstIndex(where: { $0.score < score }) ?? topHeap.count
                     topHeap.insert((entry.objectID, score), at: insertAt)
@@ -430,6 +432,23 @@ final class InsightsEngine {
 
             let withVecCount = totalCount - withoutVecCount
             let coverage = Double(withVecCount) / Double(max(1, totalCount))
+
+            // **P1 fix (2026-05-15 megareview)**:`cosineSimilarity` 在维度不匹配时返 0(legacy
+            // embedding 用旧 dim 写过,index 仍有 embedding 字段但跟当前 query dim 不对齐)。
+            // 全 0 score 时 bounded heap 仍然填满前 K 条按日期降序的 entry,返回成"语义最相关"
+            // 假象,完全误导用户。检测 max score 接近 0(真实文本嵌入余弦相似度几乎不可能精确为 0)
+            // → 当作维度错配 / 索引坏 → 返空 + 把 coverage 标 0 让 UI 走"索引不完整"banner。
+            // 真实空相关性场景由前面的 `withoutVecCount == totalCount` 路径覆盖。
+            if withVecCount > 0 && maxScore < 1e-6 {
+                Log.warning("[InsightsEngine] searchSemantic: max cosine ≈ 0 across \(withVecCount) embeddings — dimension mismatch likely; returning empty", category: .ai)
+                return SemanticSearchResult(
+                    ids: [],
+                    indexCoverage: 0.0,
+                    totalCount: totalCount,
+                    queryEmbedded: true
+                )
+            }
+
             // 注意:**不**保留 unindexed 槽位 — 搜索是按相关度排,不是 AI grounding。
             // 覆盖率不足时 UI 显示 banner 让用户主动去 Settings 重建。
             return SemanticSearchResult(

@@ -394,6 +394,13 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       let sawDone = false;
       let sseBuffer = '';
       upstream.data.on('data', (chunk) => {
+        // (2026-05-15 megareview P2-22)res 已被 client-disconnect 销毁,abortUpstream 已发但
+        // upstream 还可能 flush 一个 in-flight chunk;此时 res.write() 在已销毁 socket 上
+        // emit 'ERR_STREAM_DESTROYED'。早期 return + 主动 destroy upstream 关 race。
+        if (res.destroyed) {
+          upstream.data.destroy();
+          return;
+        }
         const text = chunk.toString('utf8');
         const frames = (sseBuffer + text).split(/\r?\n\r?\n/);
         sseBuffer = frames.pop() || '';
@@ -744,9 +751,12 @@ if (require.main === module) {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGHUP', () => shutdown('SIGHUP'));
 
+  // (2026-05-15 megareview OPT-MID-6)`unhandledRejection` 改 log-only,不再触发 shutdown。
+  // 老路径:任何 await 路径上的野 promise 拒绝 → 整个 server 重启 → 所有在飞 SSE 流被打断。
+  // 代理场景下 unhandledRejection 几乎都是非致命的(下游 OpenAI 抛错没 catch 等),不应等同
+  // `uncaughtException`。`uncaughtException` 仍 fatal — 那个真的可能让进程处于 corrupt 状态。
   process.on('unhandledRejection', (reason) => {
-    log.error({ err: safeUpstreamError(reason) }, 'unhandledRejection');
-    shutdown('unhandledRejection');
+    log.error({ err: safeUpstreamError(reason) }, 'unhandledRejection (continuing — not fatal)');
   });
   process.on('uncaughtException', (err) => {
     log.fatal({ err: safeUpstreamError(err) }, 'uncaughtException');

@@ -625,6 +625,15 @@ struct DiaryDetailView: View {
     }
     
     private func saveChanges() {
+        // **P1 fix (2026-05-15 megareview)**:`body` 顶部已 guard `entry.isDeleted` 自动 dismiss,
+        // 但键盘升起 + body 不重 eval 期间,CloudKit pull 删了这条 entry → 用户点保存 →
+        // 写入 tombstoned object → 要么静默"复活"、要么 save 抛 merge conflict 被显示为模糊"保存失败"。
+        // 这里再 guard 一次,有效兜底"body guard 之后到 save 调用之间"的 race 窗口。
+        guard !entry.isDeleted, entry.managedObjectContext != nil else {
+            Log.info("[DiaryDetailView] entry 在保存前已被删除/失效, 跳过 save 并 dismiss", category: .ui)
+            dismiss()
+            return
+        }
         // text 变化了就需要在后台重跑 themes + embedding（否则 Insight 主题聚合和
         // Ask Past 的语义检索会继续用旧内容的索引）。先捕获对比值，再写 Core Data。
         let textChanged = entry.wrappedText != editedText
@@ -709,6 +718,11 @@ struct DiaryDetailView: View {
             }
         } catch {
             Log.error("[DiaryDetailView] 保存更改失败: \(error)", category: .ui)
+            // **P1 fix (2026-05-15 megareview)**:save 抛异常时,前面 line 638-644 已经把 editedText/
+            // editedDate/editedMoodValue/normalizedSummary 写进 in-memory entry。如果不 rollback,
+            // 用户屏幕显示的还是脏写值(看起来像保存成功),下次重开才发现是旧内容。`viewContext.rollback()`
+            // 把 in-memory 状态拨回 disk 真值,跟 `deleteEntry` catch 的处理对齐。
+            viewContext.rollback()
             // **明确告知用户保存失败**——不能静默，否则用户以为改动已入库但下次打开还是旧内容。
             // 用人话 fallback 而不是 NSError.localizedDescription("Cocoa error 134200" 类技术码对终端用户毫无意义)。
             saveError = NSLocalizedString("保存失败,可能是磁盘空间不足或同步冲突。请稍后重试。", comment: "Generic save failure fallback")

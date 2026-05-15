@@ -32,9 +32,11 @@ enum WordCountBackfillService {
             container.performBackgroundTask { context in
                 let request = NSFetchRequest<DiaryEntry>(entityName: "DiaryEntry")
                 // 仅拉 wordCount == 0 且 text 非空 / 非 nil 的——已经算过的不动，避免浪费。
-                // 这样哪怕用户日记里 *真的* 就 0 字（比如只有图片或音频），我们也不误报。
-                // 不用 predicate 过滤 text，因为 Core Data text IS NULL / EMPTY 在 SQLite 下要写两段。
-                request.predicate = NSPredicate(format: "wordCount == 0")
+                // image-only / audio-only entry 的 text == "" / nil, wordCount 永远是 0,
+                // 不加 text guard 会在每次启动 + 每次 NSPersistentStoreRemoteChange 反复 fetch 它们,
+                // countWords 返 0 也没东西写。EmbeddingBackfill/ThemeBackfill 用了同样的 predicate
+                // 形式跑得很好。(2026-05-15 megareview OPT-MID-3 fix)
+                request.predicate = NSPredicate(format: "wordCount == 0 AND text != nil AND text != %@", "")
                 request.fetchBatchSize = 200
 
                 var processed = 0

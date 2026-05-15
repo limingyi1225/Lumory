@@ -115,7 +115,15 @@ Diary Entries:
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("keep-alive", forHTTPHeaderField: "Connection")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        request.httpBody = try? jsonEncoder.encode(requestBody)
+        // (2026-05-15 megareview P2-2)显式 catch encode 失败,而不是 `try?` 让空 body 飞出去再被
+        // server 400 当普通错误处理。失败要 emit .failed event 给 caller 否则它永远以为流没起来。
+        do {
+            request.httpBody = try jsonEncoder.encode(requestBody)
+        } catch {
+            Log.error("[OpenAIService] streaming httpBody encode 失败: \(error)", category: .ai)
+            await MainActor.run { onEvent(.failed(BackendErrorMapper.error(forStatus: -1))) }
+            return
+        }
 
         Log.info("[OpenAIService] 发送流式请求，模型: \(requestBody.model), stream: \(requestBody.stream)", category: .ai)
 
@@ -424,7 +432,15 @@ Diary Entries:
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                 request.applyBackendAuth()
-                request.httpBody = try? self.jsonEncoder.encode(body)
+                // (2026-05-15 megareview P2-2)同 generateReportFromData,显式 catch encode 失败。
+                do {
+                    request.httpBody = try self.jsonEncoder.encode(body)
+                } catch {
+                    Log.error("[OpenAIService] streamChatEvents httpBody encode 失败: \(error)", category: .ai)
+                    continuation.yield(.failed(BackendErrorMapper.error(forStatus: -1)))
+                    continuation.finish()
+                    return
+                }
 
                 // 重试保护：一旦已经向 caller yield 过任意 chunk，就不允许再重试——
                 // 否则 NetworkRetryHelper 会把整个请求从头回放，caller 把新 chunk 累加进

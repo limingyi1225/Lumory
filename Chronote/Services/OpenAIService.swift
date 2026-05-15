@@ -92,7 +92,15 @@ final class OpenAIService: AIServiceProtocol {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.applyBackendAuth()
-        request.httpBody = try? jsonEncoder.encode(requestBody)
+        // (2026-05-15 megareview P2-2)`try?` 改 `do/try/catch` —— 原 `try?` 编码失败时 httpBody 是 nil,
+        // 服务器返 400 messages-array-missing,被 BackendErrorMapper 当成普通 400 不重试,客户端只看到
+        // "no content" 模糊错。理论上 Codable 固定 struct 几乎不会失败,但显式 catch 让真失败可诊断。
+        do {
+            request.httpBody = try jsonEncoder.encode(requestBody)
+        } catch {
+            Log.error("[OpenAIService] chat httpBody encode 失败: \(error)", category: .ai)
+            return nil
+        }
 
         do {
             Log.info("[OpenAIService] 执行非流式请求", category: .ai)

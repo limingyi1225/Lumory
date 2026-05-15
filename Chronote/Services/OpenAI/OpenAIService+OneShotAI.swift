@@ -254,7 +254,13 @@ extension OpenAIService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.applyBackendAuth()
         let body = RequestBody(model: "text-embedding-3-small", input: payload)
-        request.httpBody = try? jsonEncoder.encode(body)
+        // (2026-05-15 megareview P2-2)同 `chat()`,显式 catch 让 encode 失败可诊断。
+        do {
+            request.httpBody = try jsonEncoder.encode(body)
+        } catch {
+            Log.error("[OpenAIService] embed httpBody encode 失败: \(error)", category: .ai)
+            return nil
+        }
 
         // **不用 [weak self]**：OpenAIService.shared 是进程级 singleton，self 永不释放。
         // Release `-O` 下 Swift ARC optimizer 在"singleton 方法 + escaping closure + `[weak self]`"

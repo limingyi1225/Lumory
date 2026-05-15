@@ -578,7 +578,9 @@ struct SettingsView: View {
     private func deleteAllEntries() async -> Bool {
         isDeletingAllEntries = true
         defer { isDeletingAllEntries = false }
-        return await SettingsEntryDeletionService.deleteAll(entries: Array(entries), viewContext: viewContext)
+        // (2026-05-15 megareview P1-9)`SettingsEntryDeletionService.deleteAll` 内部重新 fetch 一次,
+        // 抓 alert 弹窗到用户确认中间 CloudKit 同步进的新 entry,不再依赖这里传 snapshot。
+        return await SettingsEntryDeletionService.deleteAll(viewContext: viewContext)
     }
 }
 

@@ -36,6 +36,10 @@ final class StreakMilestoneService: ObservableObject {
     private let defaults: UserDefaults
     private let celebratedKey = "lumory.celebratedMilestones.v1"
     private var celebrated: Set<Int>
+    /// (2026-05-15 megareview P2-12)持当前 evaluate task,新请求进来就 cancel 老的。
+    /// 原 fire-and-forget 让用户连写 3 篇 → 3 个并发 streak fetch 跑全表 dict-fetch,只一个能改 UI
+    /// (celebrated.insert 主线程 serialize),其余两个是纯浪费。
+    private var evaluateTask: Task<Void, Never>?
 
     private init(defaults: UserDefaults = AppGroup.userDefaults) {
         self.defaults = defaults
@@ -51,12 +55,15 @@ final class StreakMilestoneService: ObservableObject {
     /// `persistence` 取一次 streak 比单纯传值更稳:多端同步 / 删除编辑等 race 时 streak 应基于真实
     /// CoreData 状态算,不能信调用方传进来的 stale 值。
     func evaluateAfterSave(persistence: PersistenceController, latestEntryMood: Double) {
-        Task { [weak self] in
+        // Cancel-and-replace:连写多篇时只有最新一次 evaluate 算到完。
+        // (2026-05-15 megareview P2-12)
+        evaluateTask?.cancel()
+        evaluateTask = Task { [weak self] in
             guard let self else { return }
             let streak = await Self.computeCurrentStreak(persistence: persistence)
-            await MainActor.run {
-                self.handleStreak(streak, moodValue: latestEntryMood)
-            }
+            // 取消的 task 不写 UI(已被新 evaluate 替换,streak 算到一半的数据无意义)。
+            guard !Task.isCancelled else { return }
+            self.handleStreak(streak, moodValue: latestEntryMood)
         }
     }
 

@@ -26,6 +26,16 @@ extension Data {
             imageData = resized.jpegData(compressionQuality: compression)
         }
 
+        // q-floor 0.3 后仍超 size 限制时,留信号让调用方/查日志的人能察觉(否则用户磁盘
+        // 上反复出现 500KB+ 图片,无解释)。不抛错,因为压缩失败仍是 best-effort 返大块好过
+        // 不返。(2026-05-15 megareview P2-4)
+        if let data = imageData, data.count > maxSizeKB * 1024 {
+            Log.warning(
+                "[ImageCompression] q-floor 0.3 reached but data still \(data.count / 1024)KB > target \(maxSizeKB)KB",
+                category: .ui
+            )
+        }
+
         return imageData
     }
 }

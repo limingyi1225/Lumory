@@ -64,8 +64,21 @@ final class ThemeAliasJudgeService: ObservableObject {
     /// minJudgeInterval 内的二次调用直接 return(actuallyNew 短路 / inventory 短路 / AI 调用 全跳过)。
     /// 60s 是经验值:用户写完一篇后 1 分钟内通常不会写出**完全不同**的新主题,
     /// 即使 60s 内连续写 5 篇,真正新主题也会在第 6 分钟的下次 judge 一次性 cover。
-    private var lastJudgeAfterWriteAt: Date?
+    ///
+    /// **P1 fix (2026-05-15 megareview)**:落 UserDefaults,App 被 jetsam kill / 用户手动 kill /
+    /// 冷启动后 throttle 仍有效。原 in-memory 实现 connected sequence(午休前写一篇 → 系统 kill
+    /// → 午休后写一篇)就失效,白付 OpenAI cost + 频繁 PII 上送。
+    private var lastJudgeAfterWriteAt: Date? {
+        didSet {
+            if let date = lastJudgeAfterWriteAt {
+                UserDefaults.standard.set(date.timeIntervalSince1970, forKey: Self.lastJudgeAtKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.lastJudgeAtKey)
+            }
+        }
+    }
     private let minJudgeInterval: TimeInterval = 60
+    private static let lastJudgeAtKey = "lumory.themeAliasJudge.lastJudgeAt"
 
     init(
         persistence: PersistenceController = .shared,
@@ -77,6 +90,11 @@ final class ThemeAliasJudgeService: ObservableObject {
         // Swift 6: 默认参数表达式是 nonisolated context,直接写 `.shared` 命中 MainActor 错误。
         // init 本身已经被 @MainActor 隔离(class 标签),内部访问 .shared 合法。
         self.resolver = resolver ?? ThemeAliasResolver.shared
+        // Hydrate throttle from disk (P1 fix). `didSet` 不在 init 内 fire,这里直接读 UserDefaults。
+        let storedTimestamp = UserDefaults.standard.double(forKey: Self.lastJudgeAtKey)
+        if storedTimestamp > 0 {
+            self.lastJudgeAfterWriteAt = Date(timeIntervalSince1970: storedTimestamp)
+        }
     }
 
     // MARK: - On-write entry point

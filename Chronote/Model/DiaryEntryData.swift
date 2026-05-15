@@ -31,19 +31,6 @@ struct DiaryEntryData {
         self.wordCount = wordCount
     }
     
-    /// 同步的纯函数构造器——**调用方必须保证已经在 entry.managedObjectContext 的队列里**。
-    /// 把 CoreData 字段拷成值类型时把新加的 themes/embedding/wordCount 一并带上，
-    /// 避免经 DiaryEntryData 再写回 CoreData 时用默认值清零这三列。
-    static func from(fetchedEntry: DiaryEntry) -> DiaryEntryData {
-        DiaryEntryData(
-            id: fetchedEntry.id ?? UUID(),
-            date: fetchedEntry.date ?? Date(),
-            text: fetchedEntry.text ?? "",
-            moodValue: fetchedEntry.moodValue,
-            summary: fetchedEntry.summary ?? "",
-            themes: fetchedEntry.themeArray,
-            embedding: fetchedEntry.embeddingVector,
-            wordCount: Int(fetchedEntry.wordCount)
-        )
-    }
+    // (2026-05-15 megareview OPT-MID-1)`from(fetchedEntry:)` 已删 — grep 全仓 0 caller。
+    // 所有构造都走 init 直接传字段,这个便利构造函数从未被引用。原实现保留在 git history。
 }

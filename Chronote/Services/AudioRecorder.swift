@@ -135,7 +135,11 @@ final class AudioRecorder: NSObject, ObservableObject {
                     self?.handleMeterUpdate()
                 }
             }
-            RunLoop.current.add(timer, forMode: .common)
+            // RunLoop.main 显式,不用 .current —— startRecording 当前 @MainActor 保证 current
+            // 等于 main,但任何 future `MainActor.assumeIsolated` 调用路径会让 .current 是别的
+            // RunLoop,timer 静默不 fire。`ThemeAliasResolver.scheduleCoolUntilExpiry` 已经是这个
+            // pattern,这里对齐。(2026-05-15 megareview P2-7)
+            RunLoop.main.add(timer, forMode: .common)
             meterTimer = timer
             timerLock.unlock()
             // NOTE：这里不用 defer 是因为后面还有 setActive / record 等可能抛异常的调用位于 lock 外，

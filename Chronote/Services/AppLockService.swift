@@ -36,6 +36,11 @@ final class AppLockService: ObservableObject {
     ///   - disable() 调用 bump 让正在 await 的 enable 不 commit。
     /// 防"反复拨 / 拨 on 后立刻拨 off → 旧 enable 完成覆盖最新 disable"竞态。
     private var enableGen: Int = 0
+    /// 当前 in-flight `authenticate` 持有的 LAContext。提到 ivar 是为了 `disable()` 能
+    /// `.invalidate()` 关掉系统 Face ID / passcode 弹窗 —— 否则用户拨 ON → 弹窗冒出 → 立刻
+    /// 拨 OFF,代码内 isEnabled 已 false 但弹窗仍卡屏要等用户验完才消失,验完"什么也没发生"。
+    /// (2026-05-15 megareview P1-3)
+    private var activeAuthContext: LAContext?
 
     private init(defaults: UserDefaults = AppGroup.userDefaults) {
         self.defaults = defaults
@@ -84,6 +89,11 @@ final class AppLockService: ObservableObject {
         // bump enableGen 把任何 in-flight enable 标 stale,防"用户拨 on → Face ID 弹出 → 用户 cancel
         // 拨 off → enable 内还在 await canEvaluatePolicy,完成后看不到 disable 又写 isEnabled=true"。
         enableGen &+= 1
+        // **关闭仍卡屏的系统认证弹窗**(P1-3,2026-05-15 megareview)。如果 enable 流程在 evaluatePolicy
+        // 挂起期间 disable 被调,LAContext.invalidate() 让系统认证 UI 立刻消失,evaluatePolicy
+        // 用户感知是"拨 OFF 后弹窗也马上没了",而不是"还要验一次脸"。
+        activeAuthContext?.invalidate()
+        activeAuthContext = nil
         defaults.set(false, forKey: enabledKey)
         isEnabled = false
         isLocked = false
@@ -138,7 +148,9 @@ final class AppLockService: ObservableObject {
 
     private func authenticate(reason: String) async -> Bool {
         let context = LAContext()
-        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+        // 把 context 提到 ivar,disable() 能 invalidate 关掉弹窗。(P1-3,2026-05-15 megareview)
+        activeAuthContext = context
+        let result: Bool = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, error in
                 if let error {
                     Log.info("[AppLockService] evaluatePolicy: success=\(success) error=\(error.localizedDescription)", category: .general)
@@ -146,5 +158,10 @@ final class AppLockService: ObservableObject {
                 cont.resume(returning: success)
             }
         }
+        // 用完释放,且只在仍是同一个 context 时释放(避免覆盖 disable() 已设的 nil)。
+        if activeAuthContext === context {
+            activeAuthContext = nil
+        }
+        return result
     }
 }

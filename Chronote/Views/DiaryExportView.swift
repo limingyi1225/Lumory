@@ -5,9 +5,15 @@ struct DiaryExportView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
     
-    @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
-    ) private var entries: FetchedResults<DiaryEntry>
+    // (2026-05-15 megareview P1-8)`fetchBatchSize: 100` 防多年用户开导出 sheet 时 fault 整张表
+    // 进 row cache。export 本体走 `runExport()` 内 Task,这里 sheet 只显示 count + date range,
+    // batch 拉头页就够。完整 OOM 修复(stream-to-file)是 epic 改动,先用 batchSize 兜底。
+    @FetchRequest(fetchRequest: {
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+        request.fetchBatchSize = 100
+        return request
+    }()) private var entries: FetchedResults<DiaryEntry>
     
     @State private var isExporting = false
     @State private var showExportError = false

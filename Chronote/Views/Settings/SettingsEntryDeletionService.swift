@@ -2,7 +2,7 @@ import CoreData
 
 @MainActor
 enum SettingsEntryDeletionService {
-    static func deleteAll(entries: [DiaryEntry], viewContext: NSManagedObjectContext) async -> Bool {
+    static func deleteAll(viewContext: NSManagedObjectContext) async -> Bool {
         // **P1 fix (2026-05-13 superreview round 2)**:原顺序"delete + save → 之后 await
         // performBulkWipeCleanup 内才 cancelPending",中间窗口 NarrativePrecompute 在飞 task
         // 可能正在写 fresh narrative,delete + save 完成后才被 bulk wipe 后续 clear 绕弯抓。
@@ -13,6 +13,20 @@ enum SettingsEntryDeletionService {
         // 否则在飞 task 会在 delete + save 后写回 narrative(performBulkWipeCleanup 内也再调
         // 一次,幂等无害)。
         await NarrativeGenerationCoordinator.shared.cancelAll()
+
+        // **P1 fix (2026-05-15 megareview)**:不再信任 caller 传 snapshot,**在 cancel & save 边界
+        // 之间重新 fetch 一次**抓"alert 弹窗到用户确认中间 CloudKit 同步进新 entry"的 race。
+        // 原实现:caller `SettingsView.deleteAllEntries` 在 alert tap 时刻 snapshot `Array(entries)`,
+        // 之间隔了 alert 等用户秒级时间,新 entry 同步进来后没在快照里 → 没被删 → UI 说"全删了"
+        // 但实际幸存。Settings 全删是确定的 destructive 操作,re-fetch 拿到当前所有再删才符合直觉。
+        let allEntriesRequest = NSFetchRequest<DiaryEntry>(entityName: "DiaryEntry")
+        let entries: [DiaryEntry]
+        do {
+            entries = try viewContext.fetch(allEntriesRequest)
+        } catch {
+            Log.error("[SettingsView] 删除前重新 fetch 失败: \(error)", category: .ui)
+            return false
+        }
 
         let attachmentSnapshots = entries.map {
             EntryAttachmentSnapshot(imageFileNames: $0.imageFileNameArray, audioFileName: $0.audioFileName)

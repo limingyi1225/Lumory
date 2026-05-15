@@ -362,16 +362,9 @@ final class ThemeAliasResolver: ObservableObject {
         save()
     }
 
-    /// 用户点"稍后" —— 留在队列尾,在某些 UI 里弱化展示。
-    func snooze(_ suggestion: PendingSuggestion) {
-        // 把它移到队尾(相当于"我先不处理这条")
-        if let i = pending.firstIndex(where: { $0.id == suggestion.id }) {
-            let item = pending.remove(at: i)
-            pending.append(item)
-        }
-        bumpDismissCount()
-        save()
-    }
+    // (2026-05-15 megareview OPT-MID-1)`snooze(_:)` 已删 — grep 全仓 0 caller。
+    // 设计是给"稍后"按钮用,UI 实际没采用此 affordance(用户在管理页直接 confirm/reject)。
+    // 原实现保留在 git history。
 
     /// 一次清空所有 pending —— 给"扫描结果太多想全部丢掉"的用户。
     /// 不写 negativePairs(用户没说"这些都不是同一实体",只是不想现在处理)。

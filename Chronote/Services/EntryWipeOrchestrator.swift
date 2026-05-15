@@ -95,6 +95,11 @@ enum EntryWipeOrchestrator {
         // task 写盘(它还有 `invalidatedBefore >= streamStartTime` guard 兜底)。
         NarrativeCacheService.markInvalidatedForEntryChange()
         NotificationCenter.default.post(name: .lumoryNarrativeCacheInvalidated, object: nil)
+        // **P1 fix (2026-05-15 megareview)**:编辑路径(narrativeInputChanged → 文字/日期/心情/摘要)
+        // 也必须清 InsightsResultCache。否则 SWR hit 路径会在 ~300-600ms 内展示编辑前的
+        // themes / dailyCells / entryCount / mostRecentEntryDate(用 reload() 后台 query 覆盖前可见)。
+        // 删除路径已经通过 performBulk/SingleDeleteCleanup 清过 InsightsResultCache;唯独编辑路径漏。
+        InsightsResultCache.shared.clear()
         await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
     }
 }

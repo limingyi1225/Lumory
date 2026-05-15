@@ -179,9 +179,9 @@ final class EmbeddingBackfillService: ObservableObject {
                 return true
             }
             entry.setEmbedding(vector)
-            if entry.wordCount == 0 {
-                entry.recomputeWordCount()
-            }
+            // (2026-05-15 megareview OPT-MID-4)`recomputeWordCount` 移除 ——
+            // 职责归 `WordCountBackfillService`(启动 + remote-change 自动跑)。原来这里捎带
+            // 做导致两条 backfill 路径都能写 wordCount,职责不清。
             do {
                 try context.save()
                 return true

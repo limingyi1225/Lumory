@@ -24,12 +24,19 @@ struct HomeView: View {
     // 历史上同时开 FetchRequest animation、List 原生 row-removal、`withAnimation { delete }`
     // 三层动画时序会错开导致行错位。把 FetchRequest 的 animation 撤掉后，动画由 List + `withAnimation`
     // 两层控制就够，且 `ForEach(entries, id: \.objectID)` 也能恢复正常 identity。
-    @FetchRequest(
-        sortDescriptors: [
+    // (2026-05-15 megareview OPT-HIGH-1)`fetchBatchSize: 50` — 不再首次访问就全表实例化。
+    // FetchedResults 仍按需 fault 进每个 entry,但 batch 50 让长 timeline 在 scroll 时按页拉,
+    // 避免冷启动 + 大量(年级别)日记一次性把整张表 hydrate。`fetchRequest:` initializer 是
+    // 唯一允许传 batchSize 的入口(SwiftUI 的 sortDescriptors: + animation: convenience 都吞掉 batch)。
+    @FetchRequest(fetchRequest: {
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.sortDescriptors = [
             NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false),
             NSSortDescriptor(keyPath: \DiaryEntry.id, ascending: false)
         ]
-    ) private var entries: FetchedResults<DiaryEntry>
+        request.fetchBatchSize = 50
+        return request
+    }()) private var entries: FetchedResults<DiaryEntry>
     
     // AI 服务从 SwiftUI Environment 注入，默认指向 `OpenAIService.shared`。
     // 生产零行为变化；测试 / Preview 里可以 `.environment(\.aiService, MockAIService())` 替换。
@@ -148,6 +155,15 @@ struct HomeView: View {
         if recorder.isRecording {
             Task { await handleStopRecording() }
         } else {
+            // **P1 fix (2026-05-15 megareview)**:开始录音前还要 guard `!recordingVM.isTranscribing`。
+            // 上一条 take 的转写还在跑(磁盘文件已删但 network task 在 fly)时,新录音的 transcription
+            // 完成 callback 仍可能用旧 currentAudioFileName 比对绕开 stale-guard。开始录音前确保
+            // 没有任何 transcription 在飞,避免两条 transcription path 互相干扰共享 `inputText`。
+            // mic 按钮的 disabled 状态只检查 audioRecordings.count >= 1,没看 isTranscribing。
+            guard !recordingVM.isTranscribing else {
+                Log.info("[HomeView] mic tap ignored: prior transcription still in flight", category: .ui)
+                return
+            }
             let didStart = recorder.startRecording()
             if didStart {
                 #if canImport(UIKit)
@@ -849,6 +865,16 @@ struct HomeView: View {
     @MainActor
     private func processStoppedRecording(fileName: String, duration: TimeInterval) {
         Log.info("[HomeView processStoppedRecording: fileName=\(fileName), duration=\(duration)] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+
+        // **P1 fix (2026-05-15 megareview)**:发送流程进行中(`isSending=true`)时把中断录音追加到
+        // 刚被 `handleSendAction.removeAll()` 清空的 audioRecordings 列表会变孤儿(本次发送不消费它,
+        // 用户看不到)。发送中直接放弃这段录音 + 删盘上文件,而非默默挂在 UI 看不见的列表里。
+        // 极少触发(用户必须录完 → 立刻 send → 期间又触发 stop / interruption),但触发即数据残留。
+        if inputVM.isSending {
+            Log.info("[HomeView] processStoppedRecording: send in progress → discarding interrupted recording \(fileName)", category: .ui)
+            deleteAudioFileFromDocuments(fileName)
+            return
+        }
 
         // 标记正在转录
         recordingVM.isTranscribing = true

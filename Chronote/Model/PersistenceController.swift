@@ -469,23 +469,9 @@ extension URL {
         }
     }
 
-    /// Check if iCloud is available and accessible
-    static func isICloudAvailable() -> Bool {
-        guard let iCloudContainer = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") else {
-            return false
-        }
-
-        // Test if we can write to the iCloud container
-        let testFile = iCloudContainer.appendingPathComponent("test_access.tmp")
-        do {
-            try "test".write(to: testFile, atomically: true, encoding: .utf8)
-            try FileManager.default.removeItem(at: testFile)
-            return true
-        } catch {
-            Log.error("[PersistenceController] iCloud container not accessible: \(error)", category: .persistence)
-            return false
-        }
-    }
+    // (2026-05-15 megareview OPT-MID-1)`isICloudAvailable()` 已删 — grep 全仓 0 caller。
+    // SettingsView "iCloud 状态" 段改走 `CloudKitSyncMonitor` 提供的 live `syncStatus`,
+    // 这个一次性 probe 已经不再被读。原实现保留在 git history。
 }
 
 // MARK: - CloudKit Debugging
@@ -555,24 +541,9 @@ extension PersistenceController {
     }
 }
 
-// MARK: - Cleanup
-extension PersistenceController {
-    // Batch delete with performance optimization - uses background context for thread safety
-    func batchDelete<T: NSManagedObject>(_ type: T.Type, predicate: NSPredicate? = nil) async throws {
-        let objectIDArray: [NSManagedObjectID] = try await container.performBackgroundTask { context in
-            let fetchRequest = NSFetchRequest<NSFetchRequestResult>(entityName: String(describing: type))
-            fetchRequest.predicate = predicate
-
-            let batchDeleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
-            batchDeleteRequest.resultType = .resultTypeObjectIDs
-
-            let result = try context.execute(batchDeleteRequest) as? NSBatchDeleteResult
-            return result?.result as? [NSManagedObjectID] ?? []
-        }
-
-        await MainActor.run {
-            let changes = [NSDeletedObjectsKey: objectIDArray]
-            NSManagedObjectContext.mergeChanges(fromRemoteContextSave: changes, into: [container.viewContext])
-        }
-    }
-}
+// (2026-05-15 megareview OPT-MID-1)`batchDelete<T>` extension 已删 — grep 全仓 0 caller。
+// **删除原因不只是 dead**:这是 generic API,若 future 调用方误用在 `DiaryEntry` 上,
+// `NSBatchDeleteRequest` 不走 CoreData 对象生命周期(不发 willSave / didSave),会绕过
+// "五件套清理"(Reminder + ThemeAlias + Prompt + Insights + Widget)+ 不生成 CloudKit
+// tombstone(其他设备不同步),变成隐形数据腐蚀。所有 entry 删除都必须走
+// `EntryWipeOrchestrator`。原实现保留在 git history。

@@ -37,11 +37,9 @@ struct ParsedDiaryEntry: Sendable, Equatable {
     let text: String
 }
 
-struct AnalysisResult {
-    let summary: String?
-    let mood: Double
-    let themes: [String]
-}
+// (2026-05-15 megareview OPT-MID-1)`AnalysisResult` 结构 + `extension AIServiceProtocol { analyze }`
+// 默认实现 都删 — grep 全仓 0 caller(实际生产路径 EntryCreationService 各自并发调
+// summarize / analyzeMood / extractThemes,从来没走过 analyze 这条总入口)。原实现保留在 git history。
 
 // MARK: - Theme alias judge types
 //
@@ -174,17 +172,6 @@ protocol AIServiceProtocol {
     /// **不要再用旧的 static `DiaryImportService.parse`**——那条路径绕过了 DI、
     /// 也吞了所有错误。新路径走 `AIServiceProtocol`,Mock 注入对单测全程有效。
     func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry]
-}
-
-extension AIServiceProtocol {
-    /// 一次调用同时拿到摘要、心情、主题三件套。默认实现并发调用三个子接口，
-    /// OpenAI 实现可以覆盖以合并成单次请求省 token。
-    func analyze(text: String) async -> AnalysisResult {
-        async let summary = summarize(text: text)
-        async let mood = analyzeMood(text: text)
-        async let themes = extractThemes(text: text)
-        return await AnalysisResult(summary: summary, mood: mood, themes: themes)
-    }
 }
 
 struct MockAIService: AIServiceProtocol {

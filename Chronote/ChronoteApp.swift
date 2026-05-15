@@ -95,7 +95,7 @@ struct ChronoteApp: App {
         // Debug CloudKit issues
         #if DEBUG
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            print("[ChronoteApp] Running CloudKit diagnostics...")
+            Log.info("[ChronoteApp] Running CloudKit diagnostics...", category: .sync)
             PersistenceController.shared.debugCloudKitIssues()
         }
         #endif

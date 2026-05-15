@@ -16,10 +16,12 @@ module.exports = [
         Buffer: 'readonly',
         console: 'readonly',
         setTimeout: 'readonly',
+        setImmediate: 'readonly',
         // Node 18+ web APIs
         AbortController: 'readonly',
         FormData: 'readonly',
         Blob: 'readonly',
+        fetch: 'readonly',
       },
     },
     rules: {

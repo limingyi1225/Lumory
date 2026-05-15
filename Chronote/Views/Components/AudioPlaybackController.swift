@@ -73,6 +73,17 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
             return
         }
         if let player = audioPlayer, !player.isPlaying, currentPlayingFileName == fileName {
+            // (2026-05-15 megareview P2-5)resume 时重新激活 audio session。期间其他 App
+            // (电话 / 视频 / 媒体 App)可能已 deactivate 共享 session,直接 player.play() 在 inactive
+            // session 上无声音。重激活后再 play。
+            #if canImport(UIKit)
+            do {
+                try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                try AVAudioSession.sharedInstance().setActive(true)
+            } catch {
+                Log.warning("[AudioPlaybackController] resume: session reactivate failed: \(error)", category: .ui)
+            }
+            #endif
             player.play()
             isPlaying = true
             startDisplayLink()

@@ -319,6 +319,16 @@ extension DiaryEntry {
         }
     }
 
+    /// (2026-05-15 megareview OPT-HIGH-2)iCloud ubiquity container URL 缓存一次。
+    /// `FileManager.url(forUbiquityContainerIdentifier:)` 是 IPC 调用,每次 ~10ms;
+    /// 这个 path 进程内永远不变,thumbnail miss 时反复问让 fast-scroll 看见"placeholder 一闪再出图"。
+    /// `Lazy var` 不安全(static let 是,且 Swift 跑一次 thread-safe)。
+    private static let iCloudImagesDirectory: URL? = {
+        FileManager.default
+            .url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory")?
+            .appendingPathComponent("Documents/LumoryImages")
+    }()
+
     /// Loads image data from file name with caching — **静态版本**，不需要 DiaryEntry 实例。
     /// 用在后台 Task 里做缩略图加载（列表 cell）——避免捕获 managed object 跨线程。
     /// 逻辑和实例方法一致：iCloud / LumoryImages / 老位置依次回退。
@@ -326,9 +336,9 @@ extension DiaryEntry {
         let cacheKey = fileName as NSString
         if let cached = DiaryEntry.imageCache.object(forKey: cacheKey) as Data? { return cached }
 
-        // iCloud
-        if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-            let iCloudFileURL = iCloudURL.appendingPathComponent("Documents/LumoryImages").appendingPathComponent(fileName)
+        // iCloud(用静态缓存 URL,避免每次 ubiquity IPC 查询 — 见 iCloudImagesDirectory 注释)
+        if let iCloudDir = iCloudImagesDirectory {
+            let iCloudFileURL = iCloudDir.appendingPathComponent(fileName)
             if FileManager.default.fileExists(atPath: iCloudFileURL.path),
                let data = try? Data(contentsOf: iCloudFileURL) {
                 DiaryEntry.imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
@@ -422,16 +432,9 @@ extension DiaryEntry {
         }
     }
 
-    /// Deletes all images associated with this entry.
-    /// Also clears managed-object fields; callers must save the context or delete the entry afterward.
-    func deleteAllImages() {
-        for fileName in imageFileNameArray {
-            // Delete from disk
-            try? DiaryEntry.deleteImageFromDocuments(fileName)
-        }
-        imageFileNames = nil
-        imagesData = nil
-    }
+    // (2026-05-15 megareview OPT-MID-1)`deleteAllImages()` 已删 — grep 全仓 0 caller。
+    // 删除路径都直接调 `deleteImageFromDocuments` 配合 entry 自身删除,不走这个便利方法。
+    // 原实现保留在 git history。
 
     // MARK: - Helper Methods
     static func compressImageData(_ imageData: Data) -> Data {

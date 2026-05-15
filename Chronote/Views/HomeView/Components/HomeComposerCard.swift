@@ -378,8 +378,9 @@ struct HomeComposerCard: View {
             onMicTap()
         } label: {
             // .buttonStyle(.plain) 不应用系统默认的 disabled dim,所以同色 mic 在 disabled 时
-            // 视觉上跟 enabled 完全一样。显式 opacity 让"已有录音"态可见。
-            let isMicDisabled = recordingVM.audioRecordings.count >= 1 && !recorder.isRecording
+            // 视觉上跟 enabled 完全一样。显式 opacity 让"已有录音"或"上一条转写在飞"态可见。
+            let isMicDisabled = (recordingVM.audioRecordings.count >= 1 && !recorder.isRecording)
+                || (recordingVM.isTranscribing && !recorder.isRecording)
             Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic")
                 .font(LumoryFonts.composerToolbarIcon)
                 .foregroundStyle(recorder.isRecording ? .red : Color.primary.opacity(0.85))
@@ -389,7 +390,11 @@ struct HomeComposerCard: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(recordingVM.audioRecordings.count >= 1 && !recorder.isRecording)
+        // 已有录音 或 上一条转写还在飞 → disable。HomeView.handleMicTap 顶部也有
+        // `guard !recordingVM.isTranscribing` 守卫,这里只是让 UI 视觉/无障碍跟逻辑对齐,
+        // 否则用户按了没反应感觉是 bug。
+        .disabled((recordingVM.audioRecordings.count >= 1 && !recorder.isRecording)
+            || (recordingVM.isTranscribing && !recorder.isRecording))
         // P1-Home-14 disabled tap 教育 — 录音卡只能存一条,用户不知道为什么 mic 灰着。
         // overlay tap 在 disabled 时仍接收事件,弹 toast 解释。
         .overlay {
@@ -399,6 +404,15 @@ struct HomeComposerCard: View {
                     .onTapGesture {
                         LumoryToastCenter.shared.show(
                             NSLocalizedString("已有录音,删除当前录音才能重录", comment: "Recording slot occupied"),
+                            severity: .info
+                        )
+                    }
+            } else if recordingVM.isTranscribing && !recorder.isRecording {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        LumoryToastCenter.shared.show(
+                            NSLocalizedString("转写还在进行,稍后再录", comment: "Transcription in flight"),
                             severity: .info
                         )
                     }

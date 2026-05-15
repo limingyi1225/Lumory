@@ -433,13 +433,17 @@ final class InsightsEngine {
             let withVecCount = totalCount - withoutVecCount
             let coverage = Double(withVecCount) / Double(max(1, totalCount))
 
-            // **P1 fix (2026-05-15 megareview)**:`cosineSimilarity` 在维度不匹配时返 0(legacy
-            // embedding 用旧 dim 写过,index 仍有 embedding 字段但跟当前 query dim 不对齐)。
-            // 全 0 score 时 bounded heap 仍然填满前 K 条按日期降序的 entry,返回成"语义最相关"
-            // 假象,完全误导用户。检测 max score 接近 0(真实文本嵌入余弦相似度几乎不可能精确为 0)
-            // → 当作维度错配 / 索引坏 → 返空 + 把 coverage 标 0 让 UI 走"索引不完整"banner。
+            // **P1 fix (2026-05-15 megareview, refined by 2026-05-15 superreview P2)**:
+            // `cosineSimilarity` 在维度不匹配时返 0(legacy embedding 用旧 dim 写过,
+            // index 仍有 embedding 字段但跟当前 query dim 不对齐)。全 0 score 时 bounded heap
+            // 仍然填满前 K 条按日期降序的 entry,返回成"语义最相关"假象。
+            //
+            // 用 `abs()` —— query 跟所有 entry 都语义对立时 cosine 可能负且 max 仍接近 0
+            // (例:query="开心快乐" + 全是负面 entry → 所有 entry 都 cosine ≈ -0.x,maxScore 是
+            // 接近 -1 的值)。但 dim-mismatch 的 0 是真的接近 0,不是负值。**用 abs 抓 "全维度
+            // 错配返 0" 这个特征**,既能挡 dim-mismatch 又不误伤"全负相关"的合法语义场景。
             // 真实空相关性场景由前面的 `withoutVecCount == totalCount` 路径覆盖。
-            if withVecCount > 0 && maxScore < 1e-6 {
+            if withVecCount > 0 && abs(maxScore) < 1e-6 {
                 Log.warning("[InsightsEngine] searchSemantic: max cosine ≈ 0 across \(withVecCount) embeddings — dimension mismatch likely; returning empty", category: .ai)
                 return SemanticSearchResult(
                     ids: [],

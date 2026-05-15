@@ -20,6 +20,10 @@ enum SettingsEntryDeletionService {
         // 之间隔了 alert 等用户秒级时间,新 entry 同步进来后没在快照里 → 没被删 → UI 说"全删了"
         // 但实际幸存。Settings 全删是确定的 destructive 操作,re-fetch 拿到当前所有再删才符合直觉。
         let allEntriesRequest = NSFetchRequest<DiaryEntry>(entityName: "DiaryEntry")
+        // (2026-05-15 superreview P2)`@MainActor` 路径 sync fetch 全表 + 之后 fault 每条
+        // attachmentSnapshot,>5k entry 用户 tap 确认时 100-500ms 卡顿。batchSize 把 fault 分批,
+        // attachment snapshot 紧接着读 transient 字段 → 不会拉出 imagesData blob。
+        allEntriesRequest.fetchBatchSize = 200
         let entries: [DiaryEntry]
         do {
             entries = try viewContext.fetch(allEntriesRequest)

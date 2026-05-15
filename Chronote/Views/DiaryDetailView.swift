@@ -683,11 +683,14 @@ struct DiaryDetailView: View {
             }
         } catch {
             Log.error("[DiaryDetailView] 保存更改失败: \(error)", category: .ui)
-            // **P1 fix (2026-05-15 megareview)**:save 抛异常时,前面 line 638-644 已经把 editedText/
-            // editedDate/editedMoodValue/normalizedSummary 写进 in-memory entry。如果不 rollback,
-            // 用户屏幕显示的还是脏写值(看起来像保存成功),下次重开才发现是旧内容。`viewContext.rollback()`
-            // 把 in-memory 状态拨回 disk 真值,跟 `deleteEntry` catch 的处理对齐。
-            viewContext.rollback()
+            // **P1 fix (2026-05-15 megareview + superreview)**:save 抛异常时,前面 line 638-644 已经
+            // 把 editedText/editedDate/editedMoodValue/normalizedSummary 写进 in-memory entry。
+            // 不撤销则屏幕显示脏写值(看起来像保存成功),下次重开才发现旧内容。
+            //
+            // 用 `refresh(entry, mergeChanges: false)` 只回滚**当前 entry** 的 in-memory 状态,
+            // 不动 viewContext 里别的 entry。老用 `viewContext.rollback()` 会把整个共享 context
+            // (包括 refreshAIIndex / 别处 sheet 在飞的 best-effort 写)的 in-memory 改动全洗掉。
+            viewContext.refresh(entry, mergeChanges: false)
             // **明确告知用户保存失败**——不能静默，否则用户以为改动已入库但下次打开还是旧内容。
             // 用人话 fallback 而不是 NSError.localizedDescription("Cocoa error 134200" 类技术码对终端用户毫无意义)。
             saveError = NSLocalizedString("保存失败,可能是磁盘空间不足或同步冲突。请稍后重试。", comment: "Generic save failure fallback")

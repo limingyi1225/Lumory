@@ -92,6 +92,9 @@ struct HomeComposerCard: View {
         .background(Color.clear)
         .font(LumoryFonts.composerBody)
         .focused($isInputFocused)
+        // (2026-05-15 superreview-3 P1)显式 a11y id 让 UI test 能稳定锁定 composer,
+        // 而不是 `app.textFields.firstMatch` 撞错搜索栏 / 别的 TextField。
+        .accessibilityIdentifier("home.composer.text")
         // P1-Home-12 键盘 toolbar 加"完成"按钮 — 中文拼音输入法 candidate bar 占额外 36pt,
         // 用户要看下方滚动区必须先关键盘。"keyboard.chevron.compact.down" 是系统标准 dismiss 图标。
         .toolbar {

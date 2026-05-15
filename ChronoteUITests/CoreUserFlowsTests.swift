@@ -37,9 +37,9 @@ final class CoreUserFlowsTests: XCTestCase {
     func testComposeSave_textOnly_appearsInTimeline() throws {
         let app = launchSeededApp()
 
-        // 输入框是 HomeView 顶部的 TextField(axis: .vertical),没显式 a11y id。
-        // 走"第一个可见 TextField" — seeded mode 下时间线上方就是 composer。
-        let composer = app.textFields.firstMatch
+        // (2026-05-15 superreview-3 P1)显式 a11y id 抓 composer。原 `firstMatch`
+        // 可能撞搜索栏或其它 TextField → typeText 后 probe 假绑定,assertion 仍 pass(staticText 撞文本)。
+        let composer = app.textFields["home.composer.text"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), "composer text field 未出现")
         composer.tap()
 

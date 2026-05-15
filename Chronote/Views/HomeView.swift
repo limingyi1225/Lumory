@@ -827,7 +827,9 @@ struct HomeView: View {
             }
         } else {
             HomeTimelineList(
-                entries: Array(entries),
+                // (2026-05-15 superreview-3 P1)直接传 FetchedResults,避免每次 body re-eval
+                // 全表 materialize 抵消 fetchBatchSize=50。
+                entries: entries,
                 appLanguage: appLanguage,
                 onTap: { entry in
                     // 上次长按"编辑"后 onDisappear 还没跑完就再次点击,`shouldStartEditing` 残留 true,

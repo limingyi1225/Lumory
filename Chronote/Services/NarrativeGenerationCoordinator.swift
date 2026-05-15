@@ -151,7 +151,19 @@ final class NarrativeGenerationCoordinator {
             case .truncated(let reason):
                 acc.markTruncated(reason: reason)
             case .failed(let error):
-                acc.markTruncated(reason: error.localizedDescription)
+                // (2026-05-15 superreview-3 P1)三件事一起做:
+                // (1) `error.localizedDescription` 可能空(URLError 子类 / 没实现 LocalizedError
+                //     的 Swift Error)→ fallback 非空 reason 让 UI 失败 banner 能显示 + retry CTA
+                //     可点。否则 accumulator 防御吃掉空字符串 → coordinator persist `streamFailure[range]=nil`
+                //     → 卡片回落 notGenerated 用户看不到失败。
+                // (2) `.failed` 是 terminal event:服务器只 yield .failed 就 finish stream,
+                //     永远不会再来 .done,显式 break 避免 future caller 在循环里加新逻辑误以为还会等 done。
+                //     跟 NarrativePrecomputeService 的 `.failed → return` 语义对齐(那边 abort + backoff)。
+                let reason = error.localizedDescription.isEmpty
+                    ? NSLocalizedString("narrative.generation.failed", value: "回顾生成失败,稍后再试", comment: "Narrative streaming failed fallback")
+                    : error.localizedDescription
+                acc.markTruncated(reason: reason)
+                break streamLoop
             case .done:
                 break streamLoop
             }

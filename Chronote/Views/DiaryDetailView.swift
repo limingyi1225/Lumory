@@ -679,6 +679,11 @@ struct DiaryDetailView: View {
             if narrativeInputChanged {
                 // Narrative 输入包含日期 / 心情 / 摘要 / 正文。任一项变化都要让旧回顾退出
                 // 浓缩卡 cache,否则会继续显示旧日期、旧心情或旧摘要语义。
+                // (2026-05-15 superreview-3 P1)`invalidateNarrativeCacheOnEntryChange()`
+                // 名义只管 narrative,**编辑路径**的 InsightsResultCache 失效在这里 sync 调,
+                // 跟删除路径(performSingleDeleteCleanup)对齐。否则 SWR hit 在编辑后
+                // 300-600ms 内显示编辑前 themes/dailyCells/entryCount(megareview P1-7 fix)。
+                InsightsResultCache.shared.clear()
                 Task { await EntryWipeOrchestrator.invalidateNarrativeCacheOnEntryChange() }
             }
         } catch {

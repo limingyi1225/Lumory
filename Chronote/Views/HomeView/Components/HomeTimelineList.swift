@@ -2,10 +2,14 @@ import SwiftUI
 import CoreData
 
 /// 主时间线 list 内容。`ForEach` 输出多行,每行自带 list-row 修饰器(在 `HomeTimelineRow` 内)。
-/// 由调用方放在 `List { ... }` 内,parent 把 `@FetchedResults` 转 `[DiaryEntry]` 喂下去。
+///
+/// (2026-05-15 superreview-3 P1)接 `FetchedResults<DiaryEntry>` 直接迭代,不再走
+/// `Array(entries)` 全表 materialize。HomeView body 25+ 个 @State,任何变化都触发 body re-eval,
+/// 老 `Array(entries)` 把 fetchBatchSize=50 优化抹平(每次 body N/50 个 SQL roundtrip 全 fault)。
+/// SwiftUI ForEach 接受 `RandomAccessCollection` lazy 迭代,fetchBatchSize 真正生效。
 @available(iOS 17.0, *)
 struct HomeTimelineList: View {
-    let entries: [DiaryEntry]
+    let entries: FetchedResults<DiaryEntry>
     let appLanguage: String
     let onTap: (DiaryEntry) -> Void
     let onEdit: (DiaryEntry) -> Void

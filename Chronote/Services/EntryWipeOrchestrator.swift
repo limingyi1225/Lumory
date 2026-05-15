@@ -75,8 +75,8 @@ enum EntryWipeOrchestrator {
         // 在今天剩余时间显示用已删 entry 算的 placeholder。`invalidateCaches()` 让下一次 widget refresh
         // 走 full path 重抓。
         Task { await WidgetSnapshotService.shared.invalidateCaches() }
-        // 单删一篇日记后,现有 narrative body 可能引用 ghost entry 内容。这里只让旧
-        // narrative 退出"浓缩卡 cache"资格,不删除 AIConversation 历史记录。
+        // 单删一篇日记后,现有 narrative body 可能引用 ghost entry 内容。这里让旧
+        // narrative 退出"浓缩卡 cache"资格 + 清 InsightsResultCache(同一处)。
         Task { await Self.invalidateNarrativeCacheOnEntryChange() }
     }
 
@@ -93,13 +93,14 @@ enum EntryWipeOrchestrator {
         // `NarrativeCacheService.latest()` 仍会命中编辑前的旧 narrative(ghost content window)。
         // marker 是同步写 UserDefaults,提前即可关掉这个窗口;cancel + 世代号仍负责挡住在飞
         // task 写盘(它还有 `invalidatedBefore >= streamStartTime` guard 兜底)。
+        //
+        // (2026-05-15 superreview-3 P1)**InsightsResultCache.clear() 不在这里调** —— 函数
+        // 名义是"narrative 失效"。caller 路径各自负责调 clear:
+        //   - 单删/批删路径走 `performSingleDeleteCleanup` / `performBulkWipeCleanup`(已 sync clear)
+        //   - 编辑路径走 `DiaryDetailView.saveChanges`(显式 sync clear,见该处注释)
+        // 之前在这里 clear 让单删路径双触发 InsightsView 观察者两次 reload。
         NarrativeCacheService.markInvalidatedForEntryChange()
         NotificationCenter.default.post(name: .lumoryNarrativeCacheInvalidated, object: nil)
-        // **P1 fix (2026-05-15 megareview)**:编辑路径(narrativeInputChanged → 文字/日期/心情/摘要)
-        // 也必须清 InsightsResultCache。否则 SWR hit 路径会在 ~300-600ms 内展示编辑前的
-        // themes / dailyCells / entryCount / mostRecentEntryDate(用 reload() 后台 query 覆盖前可见)。
-        // 删除路径已经通过 performBulk/SingleDeleteCleanup 清过 InsightsResultCache;唯独编辑路径漏。
-        InsightsResultCache.shared.clear()
         await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
     }
 }

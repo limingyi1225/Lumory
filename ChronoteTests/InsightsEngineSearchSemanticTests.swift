@@ -213,6 +213,53 @@ struct InsightsEngineSearchSemanticTests {
         #expect(result.totalCount == 3)
     }
 
+    // MARK: - Dimension mismatch guard
+
+    /// 模拟 legacy embedding 用旧 dim 写过(8 维),后来切了新模型 query embed 走新 dim(16 维)。
+    /// cosineSimilarity 在 count 不等时返 0 → 全 0 max → searchSemantic 该 detect 并返空 + coverage=0
+    /// (而不是 silently 把 bounded heap 填满前 K 条按日期降序当"语义最相关"伪结果)。
+    private struct DimMismatchAI: AIServiceProtocol {
+        func summarize(text: String) async -> String? { nil }
+        func analyzeMood(text: String) async -> Double { 0.5 }
+        func extractThemes(text: String) async -> [String] { [] }
+        /// 返 8 维(跟 mockEmbed 的 16 维不匹配)
+        func embed(text: String) async -> [Float]? {
+            [Float](repeating: 0.5, count: 8)
+        }
+        func generateReportFromData(entries: [DiaryEntryData], onEvent: @escaping @MainActor (StreamEvent) -> Void) async {
+            await MainActor.run { onEvent(.done) }
+        }
+        func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+            AsyncStream { $0.finish() }
+        }
+        func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+            AsyncStream { $0.finish() }
+        }
+        func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] { [] }
+        func judgeThemeAliases(newTags: [String], inventory: [ThemeAliasJudgeCandidate]) async -> [ThemeAliasJudgeMatch] { [] }
+        func scanThemeAliasGroups(candidates: [ThemeAliasJudgeCandidate]) async throws -> [ThemeAliasJudgeGroup] { [] }
+        func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? { nil }
+    }
+
+    @Test func dimensionMismatch_returnsEmptyWithZeroCoverage() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let now = Date()
+        // 5 条都已索引,但走 16 维 mock embed。
+        for i in 0..<5 {
+            _ = makeEntry(in: context, text: "entry \(i)", date: now.addingTimeInterval(TimeInterval(-i * 86400)), withEmbedding: true)
+        }
+        try context.save()
+        // query embed 返 8 维 → 跟 entry 的 16 维 dim mismatch → cosineSimilarity 全返 0。
+        let engine = InsightsEngine(persistence: persistence, ai: DimMismatchAI())
+
+        let result = await engine.searchSemantic(query: "anything", topK: 10)
+        #expect(result.queryEmbedded, "AI 返了 vector(只是 dim 不对),queryEmbedded 仍 true")
+        #expect(result.ids.isEmpty, "dim-mismatch 守卫该挡住伪 top-K,实际 ids=\(result.ids)")
+        #expect(result.indexCoverage == 0.0, "守卫触发时 coverage 该被强制设 0 让 UI 走'索引不完整' banner,实际 \(result.indexCoverage)")
+        #expect(result.totalCount == 5)
+    }
+
     // MARK: - Ranking sanity check
 
     @Test func ranking_putsExactMatchFirst() async throws {

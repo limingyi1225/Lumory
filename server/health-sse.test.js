@@ -234,6 +234,107 @@ test('chat_streamingUpstreamError_destroysClientSocketWithoutSendingDone', async
   );
 });
 
+test('chat_clientDisconnectMidStream_releasesActiveStreamsReference', async (t) => {
+  // (2026-05-15 superreview P1#1)Regression test for the leak where
+  // `if (res.destroyed) { upstream.data.destroy(); return; }` used a no-arg
+  // `destroy()` that only emitted 'close', not 'end' or 'error'. That left
+  // the stream reference in `activeStreams` until process restart.
+  //
+  // Fix: pass an Error to destroy() so the 'error' handler runs the
+  // `activeStreams.delete()` cleanup. This test drives the path:
+  //   1. Upstream emits a frame.
+  //   2. Client receives it and destroys the request (mid-stream abort).
+  //   3. Server's `abortUpstream` fires, then next upstream chunk triggers
+  //      the `if (res.destroyed)` branch.
+  //   4. After the dust settles, /health should report activeStreams: 0.
+  const originalAdapter = axios.defaults.adapter;
+  let upstream;
+  let pushInterval;
+
+  axios.defaults.adapter = async (config) => {
+    upstream = new PassThrough();
+    // Keep pushing frames slowly so a chunk arrives AFTER the client aborts.
+    // First frame fires soon enough that the client receives it.
+    setImmediate(() => {
+      upstream.write('data: {"choices":[{"delta":{"content":"a"}}]}\n\n');
+    });
+    pushInterval = setInterval(() => {
+      if (upstream.destroyed) return;
+      upstream.write('data: {"choices":[{"delta":{"content":"x"}}]}\n\n');
+    }, 30);
+    return {
+      status: 200,
+      statusText: 'OK',
+      headers: { 'content-type': 'text/event-stream' },
+      config,
+      data: upstream,
+      request: {},
+    };
+  };
+
+  t.after(() => {
+    axios.defaults.adapter = originalAdapter;
+    if (pushInterval) clearInterval(pushInterval);
+    upstream?.destroy();
+  });
+
+  const server = await listen(app);
+  t.after(() => close(server));
+
+  const { port } = server.address();
+
+  // Manually drive the request: abort after first chunk so we exercise the
+  // `res.destroyed` branch on the server side.
+  await new Promise((resolve, reject) => {
+    const data = JSON.stringify({
+      model: 'gpt-5.5',
+      stream: true,
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    const req = http.request(
+      {
+        method: 'POST',
+        host: '127.0.0.1',
+        port,
+        path: '/api/openai/chat/completions',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(data),
+          'X-App-Secret': process.env.APP_SHARED_SECRET,
+          'X-Install-Id': 'a7d9673d-eba6-4cf8-a209-cc87f4f7ccc1',
+          'X-Forwarded-For': '10.60.10.6',
+        },
+      },
+      (res) => {
+        res.once('data', () => {
+          // Client mid-stream abort.
+          req.destroy();
+          resolve();
+        });
+        res.on('error', () => resolve());
+        res.on('close', () => resolve());
+      }
+    );
+    req.on('error', () => resolve());
+    req.end(data);
+    setTimeout(() => reject(new Error('client-abort test timeout')), 3000).unref();
+  });
+
+  // Give the server's error/cleanup handlers a few ticks to run after the
+  // client destroy + next upstream chunk.
+  await new Promise((r) => setTimeout(r, 150));
+
+  // Critical invariant: activeStreams must NOT retain the reference.
+  // /health exposes the counter so we can observe it without poking internals.
+  const { status, body } = await getJSON(server, '/health');
+  assert.equal(status, 200);
+  assert.equal(
+    body?.activeStreams,
+    0,
+    `activeStreams must be 0 after client disconnect, got ${body?.activeStreams}`
+  );
+});
+
 test('chat_streamingUpstreamEndsWithoutDone_destroysClientSocket', async (t) => {
   // Distinct defense (server/index.js:422-424): upstream ends gracefully but
   // never sent `data: [DONE]`. OpenAI doing this means a truncated response;

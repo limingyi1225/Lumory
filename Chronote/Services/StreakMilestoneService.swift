@@ -91,6 +91,14 @@ final class StreakMilestoneService: ObservableObject {
     func evaluateForTesting(streak: Int, moodValue: Double) {
         handleStreak(streak, moodValue: moodValue)
     }
+
+    /// 测试 seam:让单测能 await 当前在飞 evaluate task 完成,并通过快照 task handle 验证
+    /// cancel-and-replace 语义(连续两次 evaluateAfterSave 时第一次该被 cancel)。
+    var inFlightEvaluateTaskForTesting: Task<Void, Never>? { evaluateTask }
+
+    func drainEvaluateTaskForTesting() async {
+        await evaluateTask?.value
+    }
     #endif
 
     /// 给 streak 数判断是否是 milestone。**纯函数**,easy to unit-test。

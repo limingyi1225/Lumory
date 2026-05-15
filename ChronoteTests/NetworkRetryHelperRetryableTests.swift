@@ -112,6 +112,31 @@ struct NetworkRetryHelperIsRetryableTests {
         try await expectNotRetried(error: CancellationError())
     }
 
+    // —— Encode-failure sentinel: status -1 ————————————————————————————
+
+    /// (2026-05-15 superreview P1#4-4)`OpenAIService+Streaming` 在
+    /// `jsonEncoder.encode(body)` 抛错时 emit
+    /// `.failed(BackendErrorMapper.error(forStatus: -1))` 然后 finish stream
+    /// (commit 42e5607 P2-2 fix)。这条契约依赖两个 invariant:
+    ///   1. status -1 sentinel 的 NSError 有 caller 可读的 domain/code(下方一组直接断言)
+    ///   2. status -1 经 NetworkRetryHelper.isRetryableError 不被 retry
+    ///      —— encode 失败是确定性失败,重试是浪费;且 streaming caller 已经 finish 了
+    ///      continuation,重试会落入 detached land。
+    /// 把"streaming encode 失败 = 立刻不可恢复 + 不重试"锁死。
+    @Test func backendErrorEncodeSentinelMinus1_isNotRetryable() async throws {
+        try await expectNotRetried(error: backendError(-1))
+    }
+
+    /// status -1 sentinel 必须仍然形成可读 NSError(domain="BackendError",有
+    /// localizedDescription 给 UI 显示)。锁住 sentinel 的 caller-observable shape,
+    /// 任何对 BackendErrorMapper 的重构都不能 silently 把 encode-failure 路径变哑。
+    @Test func backendErrorEncodeSentinelMinus1_hasReadableShape() {
+        let error = BackendErrorMapper.error(forStatus: -1)
+        #expect(error.domain == "BackendError")
+        #expect(error.code == -1)
+        #expect(!error.localizedDescription.isEmpty, "encode-failure sentinel 必须有 user-facing message")
+    }
+
     // MARK: - Helpers
 
     /// `retryDelay: 0` 让 sleep ~0s,所以两次 attempt 的 wall-clock 间隔几乎为零,

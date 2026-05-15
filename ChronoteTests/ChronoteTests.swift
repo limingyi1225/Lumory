@@ -2749,6 +2749,51 @@ struct StreakMilestoneTests {
 
         service.resetCelebratedForTesting()
     }
+
+    /// (2026-05-15 superreview P1#4-2)cancel-and-replace 契约:连写多篇时只让最新一次的
+    /// evaluateAfterSave 走到 handleStreak。第一次 task 应被 cancel,第二次 task 应正常
+    /// 跑完且 pendingMilestone 来自第二次的 moodValue。
+    @Test func evaluateAfterSave_cancelAndReplace_lastWriteWins() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        // 7 天连续日记触发 streak=7 milestone(用最小 milestone 让测试快)。
+        for offset in 0..<7 {
+            guard let day = cal.date(byAdding: .day, value: -offset, to: today) else { continue }
+            let entry = DiaryEntry(context: context)
+            entry.id = UUID()
+            entry.date = day
+            entry.text = "day \(offset)"
+            entry.summary = ""
+            entry.themes = ""
+            entry.moodValue = 0.5
+            entry.wordCount = 5
+        }
+        try context.save()
+
+        let service = StreakMilestoneService.shared
+        service.resetCelebratedForTesting()
+        service.dismiss()
+
+        service.evaluateAfterSave(persistence: persistence, latestEntryMood: 0.3)
+        let firstTask = service.inFlightEvaluateTaskForTesting
+        service.evaluateAfterSave(persistence: persistence, latestEntryMood: 0.9)
+
+        // 第一次 task 应已被 cancel(被第二次替换)。await 让它结束读 isCancelled。
+        await firstTask?.value
+        #expect(firstTask?.isCancelled == true, "第二次 evaluateAfterSave 应该 cancel 第一次的 task")
+
+        await service.drainEvaluateTaskForTesting()
+
+        // 第二次胜出:moodValue=0.9 在 pendingMilestone。第一次的 0.3 不该到。
+        #expect(service.pendingMilestone?.days == 7)
+        #expect(service.pendingMilestone?.moodValue == 0.9,
+                "cancel-and-replace 后只第二次写 pendingMilestone,moodValue 应为 0.9,实际 \(String(describing: service.pendingMilestone?.moodValue))")
+
+        service.dismiss()
+        service.resetCelebratedForTesting()
+    }
 }
 
 // MARK: - ThemeAliasJudgeService 隐私不变量

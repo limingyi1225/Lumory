@@ -5,19 +5,6 @@ import CoreData
 import UIKit
 #endif
 
-private func deleteDiaryDetailAttachmentFiles(imageFileNames: [String], audioFileName: String?) {
-    for fileName in imageFileNames {
-        do {
-            try DiaryEntry.deleteImageFromDocuments(fileName)
-        } catch {
-            Log.error("[DiaryDetailView] 删除图片附件失败 \(fileName): \(error)", category: .ui)
-        }
-    }
-    if let audioFileName, !audioFileName.isEmpty {
-        DiaryEntry.deleteAudioFromDocuments(audioFileName)
-    }
-}
-
 struct DiaryDetailView: View {
     @ObservedObject var entry: DiaryEntry
     var startInEditMode: Bool = false

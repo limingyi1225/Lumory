@@ -541,6 +541,7 @@
 "narrative.summary.localOutputLimit" = "内容过长,已截断。";
 "narrative.summary.streamFailed" = "生成失败，可以重试";
 "narrative.summary.streamFailedReason" = "原因：%@";
+"narrative.generation.failed" = "回顾生成失败,稍后再试";
 "narrative.summary.tapToOpen" = "双击打开沉浸式阅读";
 "narrative.summary.tapToGenerate.a11y" = "双击生成本期回顾";
 "insights.action.tryHint" = "问问过去的自己";

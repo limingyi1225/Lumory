@@ -539,6 +539,7 @@
 "narrative.summary.localOutputLimit" = "Output was too long and was truncated.";
 "narrative.summary.streamFailed" = "Generation failed — try again";
 "narrative.summary.streamFailedReason" = "Reason: %@";
+"narrative.generation.failed" = "Reflection generation failed. Please try again later.";
 "narrative.summary.tapToOpen" = "Double tap to open the full reflection";
 "narrative.summary.tapToGenerate.a11y" = "Double tap to generate";
 "insights.action.tryHint" = "Ask your past";

@@ -357,9 +357,7 @@ Diary Entries:
     // MARK: - Helpers (file-private)
 
     private static func shortDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
+        LumoryDateFormatters.isoDate.string(from: date)
     }
 
     private static func qualitativeMoodLabel(_ value: Double, isZh: Bool) -> String {

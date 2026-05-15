@@ -21,9 +21,7 @@ class DiaryExportService {
     /// - Parameter entries: The diary entries to export, sorted by date.
     /// - Returns: A formatted string containing all diary entries.
     static func generateExportContent(from entries: [DiaryEntry]) -> String {
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateStyle = .long
-        dateFormatter.timeStyle = .short
+        let dateFormatter = LumoryDateFormatters.longDateShortTime
 
         var lines: [String] = []
 

@@ -29,10 +29,7 @@ struct DiaryExportView: View {
             return NSLocalizedString("无日记", comment: "No entries")
         }
         
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        
+        let formatter = LumoryDateFormatters.mediumDate
         return "\(formatter.string(from: oldest)) - \(formatter.string(from: newest))"
     }
     

@@ -118,36 +118,14 @@ struct DiaryDetailView: View {
         }
     }()
     
-    // 缓存按 (kind, language) —— 每次 body eval new 一次 `DateFormatter` ICU 加载不便宜，
-    // 播放进度 30fps 驱动 body 时主线程会被 formatter alloc 拉满。
-    private enum DiaryDateFormatterKind { case longDate, shortTime }
-    private static let detailFormatterLock = NSLock()
-    private static var detailFormatterCache: [String: DateFormatter] = [:]
-    private static func detailFormatter(kind: DiaryDateFormatterKind, language: String) -> DateFormatter {
-        let key = "\(kind)-\(language)"
-        detailFormatterLock.lock()
-        defer { detailFormatterLock.unlock() }
-        if let cached = detailFormatterCache[key] { return cached }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: language)
-        switch kind {
-        case .longDate:
-            formatter.dateStyle = .long
-            formatter.timeStyle = .none
-        case .shortTime:
-            formatter.dateStyle = .none
-            formatter.timeStyle = .short
-        }
-        detailFormatterCache[key] = formatter
-        return formatter
-    }
-
+    // 日期 / 时间走 `LumoryDateFormatters` 共享 language-aware cache,避免每次 body eval new
+    // formatter(播放进度 30fps 驱动 body 时主线程会被 ICU 加载拉满)。
     private func formatDate(_ date: Date) -> String {
-        Self.detailFormatter(kind: .longDate, language: appLanguage).string(from: date)
+        LumoryDateFormatters.longDate(language: appLanguage).string(from: date)
     }
 
     private func formatTime(_ date: Date) -> String {
-        Self.detailFormatter(kind: .shortTime, language: appLanguage).string(from: date)
+        LumoryDateFormatters.timeShortLocalized(language: appLanguage).string(from: date)
     }
 
     var body: some View {

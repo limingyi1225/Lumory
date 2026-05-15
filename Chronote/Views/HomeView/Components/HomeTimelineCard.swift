@@ -21,13 +21,8 @@ struct HomeTimelineCard: View {
         return entry.summary == nil && !(entry.text ?? "").isEmpty
     }
 
-    /// `HH:mm` 是 locale-independent 数字格式,行内自享 cache 避免每次 diff 重 alloc。
+    /// `HH:mm` 走 `LumoryDateFormatters.twentyFourHourTime`(locale-independent 共享实例)。
     /// weekday / monthDay 按 `appLanguage` 锁语言走 `LumoryDateFormatters` 共享 cache。
-    private static let timeOnlyFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
 
     var body: some View {
         let cornerRadius: CGFloat = 16
@@ -147,7 +142,7 @@ struct HomeTimelineCard: View {
 
     private func timeLabel(_ date: Date?) -> String {
         guard let date else { return "" }
-        return Self.timeOnlyFormatter.string(from: date)
+        return LumoryDateFormatters.twentyFourHourTime.string(from: date)
     }
 
     private func cleanedSummary(_ raw: String) -> String {

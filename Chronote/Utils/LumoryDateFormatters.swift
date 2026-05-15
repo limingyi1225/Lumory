@@ -70,6 +70,40 @@ enum LumoryDateFormatters {
         return f
     }()
 
+    /// "17:30" 24h 数字格式 — locale-independent。HomeTimelineCard / DiaryPreviewView 时间戳。
+    static let twentyFourHourTime: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
+    /// "2026年5月3日" / "May 3, 2026" — Date-only `.medium`。DiaryExportView 日期范围、CitationEntryCard。
+    static let mediumDate: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .none
+        return f
+    }()
+
+    /// "2026年5月3日 上午9:30" / "May 3, 2026 at 9:30 AM" — `.long + .short`。DiaryExportService 导出头/正文。
+    static let longDateShortTime: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .long
+        f.timeStyle = .short
+        return f
+    }()
+
+    /// `.long` date-only,按 `appLanguage` 锁定语言。DiaryDetailView hero 顶部。
+    static func longDate(language: String) -> DateFormatter {
+        cachedFormatter(key: "longDate-\(language)") {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: language)
+            f.dateStyle = .long
+            f.timeStyle = .none
+            return f
+        }
+    }
+
     // MARK: - Language-aware accessors
     //
     // 上面的 token 用 `Locale.current`(系统当前)— 用户在 App 内通过 `@AppStorage("appLanguage")`

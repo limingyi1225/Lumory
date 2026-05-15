@@ -65,12 +65,7 @@ struct CitationEntryCard: View {
         .buttonStyle(PressableScaleButtonStyle())
     }
 
-    // 复用一个静态 formatter——以前每次 dateLabel 调用都 new 一个，滚动列表里非常浪费。
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        return formatter
-    }()
+    // 日期 label 复用 `LumoryDateFormatters.mediumDate` 共享实例。
 
     // MARK: Content
 
@@ -104,7 +99,7 @@ struct CitationEntryCard: View {
     }
 
     private func dateLabel(_ date: Date) -> String {
-        Self.dateFormatter.string(from: date)
+        LumoryDateFormatters.mediumDate.string(from: date)
     }
 }
 

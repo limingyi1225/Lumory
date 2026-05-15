@@ -8,12 +8,7 @@ struct DiaryPreviewView: View {
 
     private let cal = Calendar.current
     // weekday / monthDay 按 `appLanguage` 锁定语言,走 `LumoryDateFormatters` 共享 cache;
-    // HH:mm 是 locale-independent 24h 数字格式,本地保留。
-    private static let timeOnlyFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
+    // HH:mm 走 `twentyFourHourTime` 共享实例(locale-independent 24h)。
 
     var body: some View {
         // 确保 entry 仍然有效
@@ -115,7 +110,7 @@ struct DiaryPreviewView: View {
     }
 
     private func timeLabel(_ date: Date) -> String {
-        Self.timeOnlyFormatter.string(from: date)
+        LumoryDateFormatters.twentyFourHourTime.string(from: date)
     }
 
     private static func relativeDateString(for date: Date, days: Int, language: String) -> String {

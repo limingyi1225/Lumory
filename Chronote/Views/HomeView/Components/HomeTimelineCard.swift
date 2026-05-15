@@ -21,9 +21,6 @@ struct HomeTimelineCard: View {
         return entry.summary == nil && !(entry.text ?? "").isEmpty
     }
 
-    /// `HH:mm` 走 `LumoryDateFormatters.twentyFourHourTime`(locale-independent 共享实例)。
-    /// weekday / monthDay 按 `appLanguage` 锁语言走 `LumoryDateFormatters` 共享 cache。
-
     var body: some View {
         let cornerRadius: CGFloat = 16
         Group {

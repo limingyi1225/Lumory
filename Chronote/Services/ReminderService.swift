@@ -3,9 +3,6 @@ import CoreData
 #if canImport(UserNotifications)
 import UserNotifications
 #endif
-#if canImport(UIKit)
-import UIKit
-#endif
 
 // MARK: - ReminderService
 //

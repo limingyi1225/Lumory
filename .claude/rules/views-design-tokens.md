@@ -42,7 +42,9 @@ token 化的:`AnimationConfig.toast`(0.34/0.86)/ `.bannerAppear`(0.42/0.86)/ `.b
 
 ## DateFormatter
 
-用 `LumoryDateFormatters.timeShort / .monthDay / .weekdayShort / .weekdayFull / .fullDateTime / .isoDate / .monthDayWeekday`。**不要**在 view 里 `let f = DateFormatter()` 局部 cache(reviewer 数到 5 处独立缓存)。`DateFormatter` 自身线程安全 since iOS 7,共享实例没问题。
+用 `LumoryDateFormatters.timeShort / .monthDay / .weekdayShort / .weekdayFull / .fullDateTime / .isoDate / .monthDayWeekday / .twentyFourHourTime / .mediumDate / .longDateShortTime / .monthShort` + 语言感知 accessor `.monthDay(language:) / .weekdayFull(language:) / .dayNumber(language:) / .monthShortLocalized(language:) / .timeShortLocalized(language:) / .longDate(language:)`。**不要**在 view 里 `let f = DateFormatter()` 局部 cache(reviewer 历史数到 5 处)。`DateFormatter` 自身线程安全 since iOS 7,共享实例没问题。
+
+**POSIX-locked token 不归 view 层**但同库:`fileTimestamp`(文件名)/ `isoDatePOSIX`(LLM prompt)/ `httpDate`(RFC 7231)走 service 用,绕过 `Locale.current` 防本地数字系。详见 `ios-codebase.md` "本地化字符串" 段。
 
 ## 删除日记走 toast,不走 confirmation alert
 

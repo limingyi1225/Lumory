@@ -39,6 +39,10 @@ per-install(客户端 `X-Install-Id` = Keychain UUID,`InstallIdentity.current`)+
 
 上游 stream 出错时 `res.destroy(error)`,**不能写 `data: [DONE]`**(客户端会把半截当成功)。
 
+**`upstream.data.on('error', ...)` 必须在 `activeStreams.add(upstream.data)` 之前注册**(2026-05-15 superreview-4 P1):Node Readable 在无 `'error'` listener 时 emit `'error'` → `process.emit('uncaughtException')` → 走 `shutdown('uncaughtException')` 杀进程,所有在飞 SSE 流陪葬。`await axios()` resolve 到挂 listener 之间的任何同步代码都是 race 窗口(尤其客户端在同 microtick 内 abort,upstream 立即 emit error)。顺序固定:**`on('error', ...)` → `activeStreams.add` → `on('data', ...)` → `on('end', ...)`**。
+
+**`activeStreams` 计数 invariant**:`add` 与 `delete` 严格成对,只在 `'end'` / `'error'` listener 体内 delete(不要在 `'data'` 分支 destroy upstream 然后忘记 delete —— 见 P1 round superreview)。`destroy()` 必须**带 Error 参数**,无 arg `destroy()` 只 emit `'close'` 不触发 `'error'` → `delete` 永不跑 → 泄漏。客户端中断走 sentinel `error.code === 'CLIENT_DISCONNECT'` 让 `'error'` handler 降级 log.info 而非 log.error。
+
 ## 日志
 
 pino JSON → PM2 `logs/backend-out.log` / `backend-err.log`。headers 里的 `authorization` / `cookie` / `x-api-key` / `x-app-secret` 在 pino redact 里全部 `[REDACTED]`。

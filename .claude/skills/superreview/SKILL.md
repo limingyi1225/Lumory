@@ -1,11 +1,23 @@
 ---
 name: superreview
-description: 不计成本对 uncommitted changes 做最严的代码审查 —— 并行召唤多个 Opus subagent(不同视角)+ 跑 codex review,最后主 agent 交叉核对量化事实并产出统一 review 报告。用户说"superreview / 超级审查 / 最严 review / 不计成本审查 / 上线前 review"时触发。
+description: 不计成本对 uncommitted changes(或指定 diff range)做最严的代码审查 —— 并行召唤多个 Opus subagent(不同视角)+ 跑 codex review,最后主 agent 交叉核对量化事实并产出统一 review 报告(同时落 MD + 给非程序员看的 HTML 双产物)。用户说"superreview / 超级审查 / 最严 review / 不计成本审查 / 上线前 review"时触发。
 ---
 
 # Superreview - 不计成本的最严代码审查
 
-把"多视角 Opus 并行 review" + "codex review" + "主 agent 交叉核对量化事实"串成一条流水线。目的是在 commit / push / 上架前把 P0-P2 都翻出来。
+把"多视角 Opus 并行 review" + "codex review"(可跳过) + "主 agent 交叉核对量化事实"串成一条流水线。目的是在 commit / push / 上架前把 P0-P2 都翻出来。
+
+## 输入开关(用户自然语言里识别)
+
+| 用户说法 | 含义 |
+|---|---|
+| 默认(不指定) | 审 working tree:`git diff HEAD` + `git status` 的 uncommitted changes |
+| "只看没 push 到 main 的"/"未推送到 main 的"/"unpushed" | 审 `origin/main..HEAD` 这段已 commit 但未 push 的范围 |
+| "审 PR" / "审这条 branch" / "vs main" | 审 `main..HEAD`(本地 branch vs 本地 main) |
+| "跳过 codex" / "不跑 codex" / "skip codex" | 跳过 Step 3 codex review + Step 5 codex 终审,Reviewer 矩阵里标记 codex 行为 skipped |
+| "只跑 N 个 agent" | 强制 subagent 数量 |
+
+主 agent **在 Step 1 收集改动时就要锁定 diff range**,后续所有 subagent prompt 里都要明确告诉它们 review 哪个 range(不是无脑 `git diff HEAD`)。
 
 ## 核心理念
 
@@ -28,14 +40,23 @@ description: 不计成本对 uncommitted changes 做最严的代码审查 ——
 
 ## 流程
 
-### Step 1 — 收集改动 + 估规模
+### Step 1 — 锁定 diff range + 估规模
 
-并行跑:
+按用户语义先确定 **review range**(下面 prompt 都要带这个 range,不要再无脑 `git diff HEAD`):
+
+| 用户语义 | range 参数 | git 命令 |
+|---|---|---|
+| 默认 / "uncommitted" | working tree | `git status --short -uall` + `git diff HEAD --stat` |
+| "未 push 到 main" | `origin/main..HEAD` | `git log origin/main..HEAD --oneline` + `git diff origin/main..HEAD --stat` |
+| "vs main" / "审 branch" | `main..HEAD` | `git log main..HEAD --oneline` + `git diff main..HEAD --stat` |
+
+主 agent 把锁定的 range 字符串(例如 `origin/main..HEAD`)记下来,**写进所有 subagent prompt** + 报告头部"改动概览"区。
+
+并行跑(按选定 range 替换):
 ```bash
-git status --short --untracked-files=all
-git diff --stat
-git diff --cached --stat
-git diff HEAD --stat
+git status --short --untracked-files=all            # working tree
+git diff <RANGE> --stat
+git log <RANGE> --oneline                            # 仅 commit range 模式
 ```
 
 按改动规模选 subagent 数量:
@@ -73,7 +94,9 @@ git diff HEAD --stat
 
 ### Step 3 — 同时跑 codex review(并行,不等)
 
-和 Step 2 同一条消息里 trigger:
+**如果用户说"跳过 codex / skip codex":跳过本 Step + Step 5,并在 Reviewer 矩阵记 `codex | skipped (user request)`。**
+
+否则和 Step 2 同一条消息里 trigger:
 
 ```
 Skill({ skill: "codex:review", args: "--background" })
@@ -160,9 +183,11 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --background
 | ...
 ```
 
-报告草稿写完后**不要**立刻告诉用户,先进入 Step 5 做 Codex 终审。
+报告草稿写完后**不要**立刻告诉用户,先进入 Step 5 做 Codex 终审(如未跳过)再进入 Step 6 出 HTML。
 
-### Step 5 — Codex 对最终报告做完整终审
+### Step 5 — Codex 对最终报告做完整终审(用户跳过 codex 则整步省掉)
+
+**用户要"跳过 codex"时:直接跳到 Step 6,在 Reviewer 矩阵补一行 `codex-final | skipped (user request)`。**
 
 Step 4 报告草稿落盘后，召唤一个 `codex:codex-rescue` subagent（read-only task）完整读取报告文件 + 所有被改动的源文件，做最后一轮独立扫描。
 
@@ -177,7 +202,45 @@ Step 4 报告草稿落盘后，召唤一个 `codex:codex-rescue` subagent（read
 - 纠正已有 finding → 直接修改原条目，在"核对"字段追加 `[Codex 终审修正: ...]`
 - 无新发现 → 在报告末尾 Reviewer 矩阵里加一行 `codex-final | 0 新增 | 0 纠正`，记录已过终审
 
-最终报告更新完后，告诉用户路径 + P0 总数 + 一句话总结。**不要**在主对话 paste 全文。
+最终报告 MD 更新完后,**不要**告诉用户结束 —— 还有 Step 6 要出 HTML。
+
+### Step 6 — 生成 HTML 报告(给非程序员看的版本,强制每次都出)
+
+最终 MD 落盘 + 必要 Codex 终审更新完之后,**强制**为这次 review 生成一份配套的 HTML 报告。文件名沿用 MD 的 timestamp 后缀:`CodeReview/superreview-YYYYMMDD-HHmm.html`。
+
+#### HTML 报告写作准则(关键 —— 偏离这条就废了)
+
+**目标读者**:产品负责人本人 —— 不太懂代码,但有很强的理科思维和逻辑。所以:
+- ❌ **不要**直接 paste MD 原文(那是给程序员的)
+- ❌ **不要**只翻译术语就交差("race condition" → "竞争条件")—— 这等于没解释
+- ✅ 每条 finding 都要补一段"**这是什么 / 为什么会出问题 / 用户能感受到什么 / 不修会怎样**"的人话解释
+- ✅ 用**类比 + 因果链 + 量化后果**讲清楚,例如:
+  - "这就像两个人同时往同一个本子上写字,谁的字先落笔不确定 → 偶尔笔记会被对方覆盖"
+  - "用户看到的现象:打开 App → 转圈 → 卡 0.5 秒 → 内容弹出来。修了之后没有 0.5 秒卡顿。"
+- ✅ 行号 / 文件路径**保留**(读者可能要让 Claude 帮他改),但放在折叠区/小字里,不挡阅读
+- ✅ 给每条 finding 一个**"严重程度直观比喻"**:
+  - P0 = 🚨 "炸弹"—— 必须先拆,否则会真的炸用户
+  - P1 = ⚠️ "漏水的水管"—— 当下能用,但拖久了一定坏
+  - P2 = 💡 "优化空间"—— 不修也没事,修了更好
+- ✅ 顶部放**整体结论 dashboard**:总 finding 数 / P0 数 / P1 数 / P2 数 / "现在能不能 push?"的一句话裁决
+
+#### HTML 模板要求
+
+- 单文件 self-contained:**内联 CSS**(不依赖外部 CDN,离线也能开),不依赖 JS 框架。一点点 vanilla JS 做折叠/筛选可以,没有也行。
+- 设计风格:干净中文阅读体验,Pretendard / 系统中文字体 fallback。配色用语义色(红=P0,橙=P1,蓝=P2,绿=已过)。
+- 结构(对应到 DOM 区块):
+  1. **顶部 Dashboard**:大标题 + 时间 + range + 4 个数字卡(总数 / P0 / P1 / P2)+ 一句"能不能 push"裁决
+  2. **如何阅读这份报告**:2-3 句话告诉读者卡片含义 / 严重程度图标 / 点击展开看技术细节
+  3. **P0 / P1 / P2 三段**:每条 finding 一张卡,卡片正面是"人话解释 + 严重程度比喻 + 用户能感受到的现象",折叠区是"原始 finding(给 Claude 看) + 文件路径 + 行号 + 建议修复"
+  4. **待确认 / 已否决**:折叠,默认收起
+  5. **底部 Reviewer 矩阵**:简化成"哪些视角看过 / 哪些被跳过"
+- 颜色无障碍:对比度 AA 级,P0 红别选纯 #FF0000(会闪眼睛),用 `#c0392b` 之类
+
+#### 生成方式
+
+主 agent 自己用 Write 工具写 HTML 文件,**不要**召唤 subagent 翻译 —— subagent 给非程序员讲技术问题往往讲不到位,主 agent 才有完整 finding 上下文。
+
+写完后告诉用户:**MD 路径 + HTML 路径 + P0 数 + 一句话总结**(中文)。**不要**在对话里 paste HTML 或 MD 全文。
 
 ## Lumory 项目专属核对清单
 
@@ -198,15 +261,17 @@ Step 4 报告草稿落盘后，召唤一个 `codex:codex-rescue` subagent（read
 用户:`/superreview`
 
 主 agent 该做:
-1. 跑 git status/diff(并行)
-2. 看规模选视角
-3. 单条消息内 N 个 Agent tool call(每个 `model: "opus"`)+ 1 个 codex review skill 调用
-4. 收齐结果
-5. 跑核对(grep + Read + context7)
-6. 写报告草稿到 `CodeReview/superreview-*.md`
-7. 召唤 `codex:codex-rescue` 对报告草稿 + 源文件做完整终审
-8. 按 Codex 终审结果更新报告(新增 / 纠正 finding)
-9. 主对话只回:报告路径 + P0 数量 + 一句话总结
+1. **锁定 range**(默认 working tree / "未 push 到 main" → `origin/main..HEAD` / "vs main" → `main..HEAD`)+ 检测"跳过 codex"开关
+2. 跑 git status/diff/log(并行,按选定 range)
+3. 看规模选视角
+4. 单条消息内 N 个 Agent tool call(每个 `model: "opus"`,prompt 里带 range)+ 1 个 codex review skill 调用(用户没跳过才有)
+5. 收齐结果
+6. 跑核对(grep + Read + context7)
+7. 写报告草稿到 `CodeReview/superreview-*.md`
+8. 召唤 `codex:codex-rescue` 终审(用户没跳过才有)
+9. 按 Codex 终审结果更新报告(新增 / 纠正 finding)
+10. **强制**生成配套 HTML 到 `CodeReview/superreview-*.html`(给非程序员的版本,人话+类比+严重程度直观比喻)
+11. 主对话只回:MD 路径 + HTML 路径 + P0 数量 + 一句话总结
 
 ## 失败模式 / 别这么干
 
@@ -215,4 +280,7 @@ Step 4 报告草稿落盘后，召唤一个 `codex:codex-rescue` subagent（read
 - ❌ 跳过核对步骤 → 用户读到错的行号 / 错的计数,这个 skill 就废了
 - ❌ 给 subagent 模糊 prompt("帮我 review 一下") → 视角散,大量重复 finding
 - ❌ 全部串行 → 没必要,subagent 之间无依赖
-- ❌ 跳过 Step 5 Codex 终审 → 失去跨模型盲点互补,等于把 Opus 系集体盲点遗漏带进报告
+- ❌ 跳过 Step 5 Codex 终审(用户没说要跳过却自作主张跳)→ 失去跨模型盲点互补,等于把 Opus 系集体盲点遗漏带进报告
+- ❌ Step 6 HTML 只是把 MD 套个 `<pre>` → 这不是给非程序员看的,等于没做
+- ❌ Step 6 HTML 把行号 / 文件名删掉 → 用户要二次让 Claude 修代码时无从下手,行号 / 路径必须保留(放折叠区)
+- ❌ Step 6 召唤 subagent 翻译 finding → subagent 没完整 finding 上下文,主 agent 自己写

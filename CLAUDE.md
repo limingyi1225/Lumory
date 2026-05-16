@@ -71,8 +71,7 @@ iOS:
 
 ### 重构 / 待续
 
-- **`ThemeAliasResolver` 拆分**(883 行,2026-05-16 状态)— class body 仍 ~500 行,SRP 三件套(read API / queue 生命周期 / persistence)混一坨。下次大动作前拆 `ThemeAliasStore`(read+disk)+ `ThemeAliasResolver`(queue+throttle)。
-- **超长文件**(SwiftLint 阈值 600 行,2026-05-16 实测):ThemeAliasResolver 883 / DiaryDetailView 861 / AskPastView 783 / InsightsEngine 771 / ReminderService 746 / ThemeAliasManagementView 709 / InsightsView 640 / SettingsView 590 / EntryCreationService 267。重构机会但都不算 bug。**OpenAIService 已在 wave11 拆 7 文件;HomeView 在 wave12 抽 4 个 SwiftUI 子 view + 抽 EntryCreationService;在 2026-05-16 把 method logic 按功能区拆 6 个 HomeView+*.swift extension 文件(Search / Recording / Audio / Send / Entry / Helpers),1433 → 513 行。**
+- **超长文件**(SwiftLint 阈值 600 行,2026-05-16 实测):ThemeAliasResolver 749(已拆 Store)/ DiaryDetailView 861 / AskPastView 783 / InsightsEngine 771 / ReminderService 746 / ThemeAliasManagementView 709 / InsightsView 640 / SettingsView 590 / EntryCreationService 267。重构机会但都不算 bug。**OpenAIService 已在 wave11 拆 7 文件;HomeView 在 wave12 抽 4 个 SwiftUI 子 view + 抽 EntryCreationService;在 2026-05-16 把 method logic 按功能区拆 6 个 HomeView+*.swift extension 文件(Search / Recording / Audio / Send / Entry / Helpers),1433 → 513 行;2026-05-16 `ThemeAliasResolver` 也按 backlog 拆出 `ThemeAliasStore`(read+disk+pure reads+persistence)+ `ThemeAliasResolver`(facade ObservableObject + mutation + queue/throttle/cool-down timer),883 → 749 + 293,callsite 零改动。Resolver 仍 749 行因为 mutation 业务逻辑实质保留;真要再降需把 mutation 切 `+Confirm.swift` / `+Merge.swift` extension。**
 
 ## Claude Code 自动化(本地,非生产)
 

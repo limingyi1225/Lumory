@@ -127,7 +127,8 @@ app.disable('x-powered-by');
 // per-IP 桶会退化成"全 app 共享一个桶"。只 trust loopback，避免被非 nginx 来源伪造。
 app.set('trust proxy', 'loopback');
 
-app.use(express.json({ limit: '1mb' }));
+// pino-http 必须挂在 requireAppSecret 之前,因为 auth 失败路径用 req.log.warn(line 179)。
+// express.json 不在这里全局挂——见下方 `/api` middleware 链。
 app.use(
   pinoHttp({
     logger: log,
@@ -272,9 +273,14 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// 鉴权挂到整个 /api；通过鉴权后再计入 globalIPLimiter，避免未授权流量耗尽正常用户配额。
-// globalIPLimiter 在 per-path limiter 前面：per-install 配额 + per-IP 上限两层保险。
-app.use('/api', requireAppSecret, globalIPLimiter);
+// 鉴权挂到整个 /api;通过鉴权后再计入 globalIPLimiter,避免未授权流量耗尽正常用户配额。
+// globalIPLimiter 在 per-path limiter 前面:per-install 配额 + per-IP 上限两层保险。
+// (megareview P1 #2)express.json 在 requireAppSecret 之后挂,**未鉴权请求不会消耗
+// body parse 内存/CPU**(对 1MB cap 仍可放大),防 unauthenticated body amplification。
+// 顺序固定:pino-http(已挂) → /api requireAppSecret → express.json → globalIPLimiter → endpoint limiters → handlers。
+// transcriptions 路由用 multer multipart,不受 express.json 影响(json parser 只在
+// Content-Type: application/json 时激活)。
+app.use('/api', requireAppSecret, express.json({ limit: '1mb' }), globalIPLimiter);
 app.use('/api/openai/chat/completions', chatLimiter);
 app.use('/api/openai/embeddings', embeddingsLimiter);
 // 转写挂双层:per-install 紧 + per-IP 独立兜底。注意挂的顺序在 multer 之前,

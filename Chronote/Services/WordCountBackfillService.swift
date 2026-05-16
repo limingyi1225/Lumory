@@ -23,11 +23,18 @@ enum WordCountBackfillService {
     /// 一键重建里会调——等价于 `backfillIfNeeded`（内部已经是幂等的）。
     @discardableResult
     static func forceBackfill() async -> Int {
-        await runBackfill()
+        await runBackfill(persistence: .shared)
     }
 
-    private static func runBackfill() async -> Int {
-        let container = PersistenceController.shared.container
+    /// **测试 seam**(megareview OPT-HIGH H5):注入隔离 PersistenceController,
+    /// 单测可以走 in-memory store + 自己 seed 的固定 fixture 不污染 `.shared`。
+    @discardableResult
+    static func forceBackfill(persistence: PersistenceController) async -> Int {
+        await runBackfill(persistence: persistence)
+    }
+
+    private static func runBackfill(persistence: PersistenceController = .shared) async -> Int {
+        let container = persistence.container
         return await withCheckedContinuation { (continuation: CheckedContinuation<Int, Never>) in
             container.performBackgroundTask { context in
                 let request = NSFetchRequest<DiaryEntry>(entityName: "DiaryEntry")

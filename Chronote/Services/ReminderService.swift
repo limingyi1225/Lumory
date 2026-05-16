@@ -94,7 +94,11 @@ final class ReminderService: ObservableObject {
     /// 未来 cycle-end 通知挂多少条。iOS UN 限 64 pending/app,8 是安全又够用的折中。
     private let maxFutureFallbacks = 8
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
+    /// (megareview OPT-HIGH H4)`UNUserNotificationCenter` wrap,生产用默认 adapter,
+    /// 单测注入 mock。所有 imperative API(enable / disable / cancelAllPendingReminderNotifications /
+    /// doReschedule / scheduleOneShot)通过 `self.notificationCenter` 调,不再 inline `UN.current()`。
+    private let notificationCenter: ReminderNotificationCenter
     private let enabledKey = "lumory.reminder.enabled"
     private let hourKey = "lumory.reminder.hour"
     private let minuteKey = "lumory.reminder.minute"
@@ -119,7 +123,16 @@ final class ReminderService: ObservableObject {
     private var rescheduleTask: Task<Void, Never>?
     private var currentRescheduleGen: Int = 0
 
-    private init() {
+    private convenience init() {
+        self.init(notificationCenter: UNUserNotificationCenterAdapter(), defaults: UserDefaults.standard)
+    }
+
+    /// (megareview OPT-HIGH H4)`internal` 给单测用 — `@testable import` 范围内可见。
+    /// 生产代码继续走 `private convenience init()` + `.shared` 单例,callsite 零改动。
+    /// `defaults` 默认 `.standard`(老行为);test 注入 isolated suite 防污染。
+    internal init(notificationCenter: ReminderNotificationCenter, defaults: UserDefaults) {
+        self.notificationCenter = notificationCenter
+        self.defaults = defaults
         self.hour = (defaults.object(forKey: hourKey) as? Int) ?? 21
         self.minute = (defaults.object(forKey: minuteKey) as? Int) ?? 0
         self.isEnabled = defaults.bool(forKey: enabledKey)
@@ -207,9 +220,11 @@ final class ReminderService: ObservableObject {
     /// Settings / app lifecycle 调,把 OS 当前权限同步到 @Published。
     func refreshAuthorizationStatus() async {
         #if canImport(UserNotifications)
-        let center = UNUserNotificationCenter.current()
-        let settings = await center.notificationSettings()
-        switch settings.authorizationStatus {
+        // (megareview OPT-HIGH H4)走注入的 notificationCenter,生产 default adapter 跟之前一致;
+        // protocol 返 `UNAuthorizationStatus` 而非 `UNNotificationSettings`(后者不可 mock 构造),
+        // ReminderService 只关心 authorizationStatus 一个字段。
+        let authStatus = await notificationCenter.currentAuthorizationStatus()
+        switch authStatus {
         case .denied:
             authorizationStatus = .denied
         case .authorized:
@@ -245,20 +260,18 @@ final class ReminderService: ObservableObject {
     ///   里还堆着旧 reminder 一直能看到。`removePendingNotificationRequests` 不清这个 list。
     private func cancelAllPendingReminderNotifications() async {
         #if canImport(UserNotifications)
-        let center = UNUserNotificationCenter.current()
-        let pending = await center.pendingNotificationRequests()
+        // (megareview OPT-HIGH H4)走 self.notificationCenter,生产 1:1 等价。
+        let pending = await notificationCenter.pendingNotificationRequests()
         let toCancel = pending.compactMap { req -> String? in
             req.identifier.hasPrefix(identifierPrefix) ? req.identifier : nil
         }
         if !toCancel.isEmpty {
-            center.removePendingNotificationRequests(withIdentifiers: toCancel)
+            notificationCenter.removePendingNotificationRequests(withIdentifiers: toCancel)
         }
-        let delivered = await center.deliveredNotifications()
-        let toRemoveDelivered = delivered.compactMap { notif -> String? in
-            notif.request.identifier.hasPrefix(identifierPrefix) ? notif.request.identifier : nil
-        }
+        let deliveredIDs = await notificationCenter.deliveredNotificationIdentifiers()
+        let toRemoveDelivered = deliveredIDs.filter { $0.hasPrefix(identifierPrefix) }
         if !toRemoveDelivered.isEmpty {
-            center.removeDeliveredNotifications(withIdentifiers: toRemoveDelivered)
+            notificationCenter.removeDeliveredNotifications(withIdentifiers: toRemoveDelivered)
         }
         if !toCancel.isEmpty || !toRemoveDelivered.isEmpty {
             Log.info(
@@ -300,11 +313,11 @@ final class ReminderService: ObservableObject {
         #if DEBUG
         if UITestSampleData.isActive { return false }
         #endif
-        let center = UNUserNotificationCenter.current()
         do {
             // 不请求 .badge —— 我们从不在 UNMutableNotificationContent.badge 里设值
             // (CLAUDE.md 已决定不维护 badge counter)。
-            let granted = try await center.requestAuthorization(options: [.alert, .sound])
+            // (megareview OPT-HIGH H4)走注入的 notificationCenter。
+            let granted = try await notificationCenter.requestAuthorization(options: [.alert, .sound])
             await refreshAuthorizationStatus()
             if !granted { return false }
         } catch {
@@ -392,6 +405,16 @@ final class ReminderService: ObservableObject {
         }
     }
 
+    /// **测试 seam**(megareview OPT-HIGH H4 codex follow-up):await `requestReschedule()` 起的
+    /// in-flight task 退出。生产代码用 fire-and-forget,test 需要明确等同一条 task 完成才能
+    /// assert mock 调用 — 不再靠 `disable()` 来 drain(disable 自己也清 pending,会让 cancel
+    /// 行为来源 ambiguous,codex review P2 指出)。
+    #if DEBUG
+    func awaitPendingRescheduleTaskForTesting() async {
+        await rescheduleTask?.value
+    }
+    #endif
+
     /// "下次提醒"时间。Settings UI 显示用。
     ///
     /// **不读 UNUserNotificationCenter pending list** —— 那条路径有竞态:用户切 frequency picker 时,
@@ -461,14 +484,14 @@ final class ReminderService: ObservableObject {
         guard gen == currentRescheduleGen else { return }
 
         #if canImport(UserNotifications)
-        let center = UNUserNotificationCenter.current()
-        let pending = await center.pendingNotificationRequests()
+        // (megareview OPT-HIGH H4)走注入 notificationCenter,生产 1:1 等价。
+        let pending = await notificationCenter.pendingNotificationRequests()
         guard gen == currentRescheduleGen else { return }
         let toCancel = pending.compactMap { req -> String? in
             req.identifier.hasPrefix(identifierPrefix) ? req.identifier : nil
         }
         if !toCancel.isEmpty {
-            center.removePendingNotificationRequests(withIdentifiers: toCancel)
+            notificationCenter.removePendingNotificationRequests(withIdentifiers: toCancel)
         }
         #endif
 
@@ -477,13 +500,11 @@ final class ReminderService: ObservableObject {
         // 注意:不能在 doReschedule 入口 early-return,因为 `disable()` 也走这条路 cancel 通知。
         guard isEnabled else {
             #if canImport(UserNotifications)
-            let delivered = await center.deliveredNotifications()
+            let deliveredIDs = await notificationCenter.deliveredNotificationIdentifiers()
             guard gen == currentRescheduleGen else { return }
-            let toRemoveDelivered = delivered.compactMap { notif -> String? in
-                notif.request.identifier.hasPrefix(identifierPrefix) ? notif.request.identifier : nil
-            }
+            let toRemoveDelivered = deliveredIDs.filter { $0.hasPrefix(identifierPrefix) }
             if !toRemoveDelivered.isEmpty {
-                center.removeDeliveredNotifications(withIdentifiers: toRemoveDelivered)
+                notificationCenter.removeDeliveredNotifications(withIdentifiers: toRemoveDelivered)
             }
             #endif
             return
@@ -589,7 +610,7 @@ final class ReminderService: ObservableObject {
     private func scheduleOneShot(at fireTime: Date, identifier: String, daysSilent: Int?, gen: Int) async {
         #if canImport(UserNotifications)
         guard gen == currentRescheduleGen else { return }
-        let center = UNUserNotificationCenter.current()
+        // (megareview OPT-HIGH H4)走注入 notificationCenter,生产 1:1 等价。
         let content = UNMutableNotificationContent()
         content.title = NSLocalizedString("Lumory", comment: "Reminder title")
         // 主题词文案 vs 通用模板:开关 + cache 命中时用 placeholder,否则 fallback。
@@ -612,9 +633,9 @@ final class ReminderService: ObservableObject {
         let trigger = UNCalendarNotificationTrigger(dateMatching: triggerComps, repeats: false)
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
         do {
-            try await center.add(request)
+            try await notificationCenter.add(request)
             if gen != currentRescheduleGen {
-                center.removePendingNotificationRequests(withIdentifiers: [identifier])
+                notificationCenter.removePendingNotificationRequests(withIdentifiers: [identifier])
             }
         } catch {
             Log.error("[ReminderService] schedule failed (\(identifier)): \(error)", category: .general)

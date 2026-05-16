@@ -130,17 +130,24 @@ final class ThemeAliasResolver: ObservableObject {
     /// 返回 true 表示新增成功,false 表示被跳过。
     @discardableResult
     func enqueue(_ suggestion: PendingSuggestion) -> Bool {
-        let newKey = suggestion.newTag.lowercased()
-        let originalCanonKey = suggestion.canonicalGuess.lowercased()
+        // (megareview P1 #1)indexSnapshot lookup 必须走 `ThemeKey.make`(NFC + lower + trim)
+        // 跟 Store.rebuildIndex 反向索引对齐 —— Store.swift:28 / ThemeKey.swift:13 都已点名
+        // Resolver 内 ad-hoc `.lowercased()` 在 NFD 输入(剪贴板 / 网页粘贴的组合字符)下 silent miss。
+        // pairKey 入口保留 `.lowercased()` 兼容老 negativePairs 持久化数据 —— 改 ThemeKey.make
+        // 会让用户已 reject 的对子复活,bad UX trade-off。
+        let newKey = suggestion.newTag.lowercased()                  // 给 pairKey 用(老兼容)
+        let originalCanonKey = suggestion.canonicalGuess.lowercased() // 给 pairKey 用(老兼容)
+        let newIndexKey = ThemeKey.make(suggestion.newTag)            // 给 indexSnapshot lookup
+        let originalCanonIndexKey = ThemeKey.make(suggestion.canonicalGuess)
 
         // newTag == canonical 没意义
-        if newKey == originalCanonKey { return false }
+        if newIndexKey == originalCanonIndexKey { return false }
 
         let indexSnapshot = store.snapshotIndex()
 
         // newTag 已经是某 canonical 的别名 → 跳过(已合并)
-        if let existingCanon = indexSnapshot[newKey],
-           existingCanon.lowercased() != newKey {
+        if let existingCanon = indexSnapshot[newIndexKey],
+           ThemeKey.make(existingCanon) != newIndexKey {
             return false
         }
 
@@ -149,16 +156,16 @@ final class ThemeAliasResolver: ObservableObject {
         // 被静默丢 —— 用户期望"通过现有 alias 加新别名(老婆 → Abby group)"被无声忽略
         // (codex P1 #16 fix)。
         let resolvedCanonical: String
-        if let existingCanon = indexSnapshot[originalCanonKey],
-           existingCanon.lowercased() != originalCanonKey {
+        if let existingCanon = indexSnapshot[originalCanonIndexKey],
+           ThemeKey.make(existingCanon) != originalCanonIndexKey {
             // canonicalGuess 是别人的 alias —— 重写到那个 canonical
             // 但若那个 canonical 就是 newTag 自己(reversed pair 的 corner case)→ 还是没意义
-            if existingCanon.lowercased() == newKey { return false }
+            if ThemeKey.make(existingCanon) == newIndexKey { return false }
             resolvedCanonical = existingCanon
         } else {
             resolvedCanonical = suggestion.canonicalGuess
         }
-        let canonKey = resolvedCanonical.lowercased()
+        let canonKey = resolvedCanonical.lowercased() // 给 pairKey 用(老兼容)
 
         // 双向命中 negativePairs → 跳过。
         // **同时**检查 raw `originalCanonKey` 和 resolved `canonKey`:reject 当时存的是
@@ -232,12 +239,14 @@ final class ThemeAliasResolver: ObservableObject {
 
         let newTag = suggestion.newTag.trimmingCharacters(in: .whitespaces)
         let newTagLower = newTag.lowercased()
-        let chosenLower = raw.lowercased()
+        // (megareview P1 #1)indexSnapshot lookup 必须走 ThemeKey.make 与 Store 反向索引对齐
+        let newTagIndexKey = ThemeKey.make(newTag)
+        let chosenIndexKey = ThemeKey.make(raw)
 
         let indexSnapshot = store.snapshotIndex()
 
         // Step 1: resolve chosen 到当前真正的 canonical
-        let resolvedChosen: String = indexSnapshot[chosenLower] ?? raw
+        let resolvedChosen: String = indexSnapshot[chosenIndexKey] ?? raw
         let resolvedChosenLower = resolvedChosen.lowercased()
 
         // chosen 落到 newTag 自己 → 退化(用户在 picker 选成 newTag,已排除但 API 防御)。
@@ -262,7 +271,7 @@ final class ThemeAliasResolver: ObservableObject {
         // 边界 case (b):需要从 parent group 里把 newTag 单独移除
         var pluckFromParent: (parent: String, alias: String)? = nil
 
-        if let parent = indexSnapshot[newTagLower] {
+        if let parent = indexSnapshot[newTagIndexKey] {
             if parent.lowercased() == resolvedChosenLower {
                 // newTag 已经在 chosen group 里 —— 不动 group,只清 pending
             } else if parent.lowercased() == newTagLower {
@@ -422,15 +431,18 @@ final class ThemeAliasResolver: ObservableObject {
         let sourceLower = sourceTrim.lowercased()
         let targetLower = targetTrim.lowercased()
         guard sourceLower != targetLower else { return .noop }
+        // (megareview P1 #1)indexSnapshot lookup 走 ThemeKey.make
+        let sourceIndexKey = ThemeKey.make(sourceTrim)
+        let targetIndexKey = ThemeKey.make(targetTrim)
 
         let indexSnapshot = store.snapshotIndex()
 
         // 解析到真正的 canonical(target 可能本身就是别人的 alias)
-        let resolvedTarget: String = indexSnapshot[targetLower] ?? targetTrim
+        let resolvedTarget: String = indexSnapshot[targetIndexKey] ?? targetTrim
         let resolvedTargetLower = resolvedTarget.lowercased()
 
         // source 解析:可能本身是 canonical,或某 group 的 alias
-        let sourceCanonical: String? = indexSnapshot[sourceLower]
+        let sourceCanonical: String? = indexSnapshot[sourceIndexKey]
         if let sc = sourceCanonical, sc.lowercased() == resolvedTargetLower {
             return .noop  // source 已经在 target 的 group 里 —— 无 op
         }
@@ -597,11 +609,14 @@ final class ThemeAliasResolver: ObservableObject {
         // (active set 不包它也无所谓),新加的 pending 一律保留。这条不变量就是 race-safe 的核心。
         //
         // **未来如在 dry-run 中间引入新的 await,本块需要重新审 freshness**(2026-05-16 round 1 P2)。
+        // (megareview P1 #1)`rawActiveLabels` 现在是 ThemeKey.make 化的(NFC + lower + trim)
+        // — `fetchActiveLowercasedLabels` 内归一化对齐;indexSnapshot lookup 直接用 raw 即可。
+        // pending 比较两端也走 ThemeKey.make,NFD 日记 + NFC pending 输入也能命中。
         let indexSnapshot = store.snapshotIndex()
         var active = rawActiveLabels
         for raw in rawActiveLabels {
             if let canonical = indexSnapshot[raw] {
-                active.insert(canonical.lowercased())
+                active.insert(ThemeKey.make(canonical))
             }
         }
 
@@ -609,8 +624,8 @@ final class ThemeAliasResolver: ObservableObject {
         // 原 Resolver 也走"读 before / 算 after / before != after 才 save + post"的双比对。
         let idsToRemove: Set<UUID> = Set(store.pending.compactMap { s -> UUID? in
             guard beforeIDs.contains(s.id) else { return nil }
-            guard !active.contains(s.newTag.lowercased()) else { return nil }
-            guard !active.contains(s.canonicalGuess.lowercased()) else { return nil }
+            guard !active.contains(ThemeKey.make(s.newTag)) else { return nil }
+            guard !active.contains(ThemeKey.make(s.canonicalGuess)) else { return nil }
             return s.id
         })
         guard !idsToRemove.isEmpty else { return }
@@ -646,9 +661,11 @@ final class ThemeAliasResolver: ObservableObject {
             for row in rows {
                 guard let csv = row["themes"] as? String, !csv.isEmpty else { continue }
                 // 复刻 DiaryEntry.themeArray 的 split 逻辑(CSV 用 `,` 分隔,trim,丢空)。
+                // (megareview P1 #1)用 ThemeKey.make 而非裸 `.lowercased()` —— 跟 store 反向索引
+                // 同归一化,日记 NFD 内容 + pending NFC 输入(或反向)都能在 cleanup 时正确判定。
                 for piece in csv.split(separator: ",") {
                     let tag = piece.trimmingCharacters(in: .whitespaces)
-                    if !tag.isEmpty { labels.insert(tag.lowercased()) }
+                    if !tag.isEmpty { labels.insert(ThemeKey.make(tag)) }
                 }
             }
             return labels

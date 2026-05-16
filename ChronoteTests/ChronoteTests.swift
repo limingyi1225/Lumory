@@ -3290,3 +3290,483 @@ struct ThemeAliasStoreCollateralLabelsTests {
                 "target 是 alias 时必须 resolve 到 canonical 再比对,识别出已同组")
     }
 }
+
+// MARK: - ThemeAliasResolver: NFC/NFD 归一化(megareview P1 #1)
+//
+// `ThemeAliasStore.rebuildIndex` 用 `ThemeKey.make`(NFC + lower + trim) 建反向索引;
+// Resolver 内部 7 处 `indexSnapshot[...]` lookup 历史上用裸 `.lowercased()` 当 key,
+// NFD 输入(剪贴板 / 网页粘贴的组合字符)下 silent miss。
+// 这组测试锁住:NFC 已存的别名,用 NFD 等价字符串走 enqueue / confirm / mergeThemes / cleanup,
+// 都必须命中已有 group(而非新建 dup group 或 silent 丢弃)。
+
+@MainActor
+struct ThemeAliasResolverNFCNormalizationTests {
+    // 同一个"café":NFC 单字符 U+00E9(é) vs NFD 拆解 e + U+0301(combining acute)
+    // 两个 String literal `.utf8` 字节不等,但语义上等价。
+    private let nfcCafe = "café"             // NFC: U+0063 U+0061 U+0066 U+00E9
+    private let nfdCafe = "cafe\u{301}"      // NFD: U+0063 U+0061 U+0066 U+0065 U+0301
+
+    @Test func enqueue_NFDNewTagHitsNFCCanonical() {
+        // group 已存 NFC canonical "Café",用户(或 AI)用 NFD 等价字符串发同 newTag。
+        // 修前:`indexSnapshot[.lowercased()]` 在 NFD 输入下 miss → 进入"新建"路径 enqueue 成功 →
+        // 同语义 alias 重复入队;修后:ThemeKey.make 归一化 → 命中 → return false(已合并)。
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let seed = PendingSuggestion(
+            newTag: nfcCafe,
+            canonicalGuess: "Coffee Shop",
+            confidence: .high,
+            source: .scan
+        )
+        _ = resolver.enqueue(seed)
+        resolver.confirm(seed, canonical: "Coffee Shop")
+
+        // 新建议:用 NFD 字符串当 newTag,canonical 任意。enqueue 应识别 NFD newTag 已是 alias
+        // (line 142 indexSnapshot lookup)→ 跳过。
+        let nfdAttempt = PendingSuggestion(
+            newTag: nfdCafe,
+            canonicalGuess: "OtherCanonical",
+            confidence: .medium,
+            source: .scan
+        )
+        let accepted = resolver.enqueue(nfdAttempt)
+        #expect(accepted == false, "NFD newTag 已是 NFC alias 的 group 成员 → enqueue 必须跳过")
+    }
+
+    @Test func confirm_NFDChoiceResolvesToExistingNFCCanonical() {
+        // 现有 group canonical="Coffee Shop" + alias=NFC "café";新建议合并 "Mocha → Café"(用户
+        // 在 picker 输入 NFD 等价字符串 "café"-NFD)。`confirm` 内 line 240 用 indexSnapshot 把
+        // chosen resolve 到 "Coffee Shop"。修前:NFD chosen miss → resolvedChosen=raw="café"-NFD,
+        // 新建一个 group "café"-NFD={"Mocha"},跟现有 "Coffee Shop" group 分裂。
+        // 修后:ThemeKey.make 化的 chosenIndexKey 命中 → resolvedChosen="Coffee Shop" → Mocha 加入。
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let seed = PendingSuggestion(
+            newTag: nfcCafe,
+            canonicalGuess: "Coffee Shop",
+            confidence: .high,
+            source: .scan
+        )
+        _ = resolver.enqueue(seed)
+        resolver.confirm(seed, canonical: "Coffee Shop")
+
+        // 用户在 picker 选了一个 NFD 等价字符串作为 chosen
+        let newSugg = PendingSuggestion(
+            newTag: "Mocha",
+            canonicalGuess: "Drink",
+            confidence: .medium,
+            source: .scan
+        )
+        _ = resolver.enqueue(newSugg)
+        resolver.confirm(newSugg, canonical: nfdCafe)
+
+        // 期望:Mocha 加入了 "Coffee Shop" group(因为 chosenIndexKey resolve 命中)
+        #expect(resolver.groups["Coffee Shop"]?.contains("Mocha") == true,
+                "NFD chosen 必须经 ThemeKey.make 归一化命中 NFC canonical,Mocha 应进 Coffee Shop")
+        #expect(resolver.groups[nfdCafe] == nil,
+                "不应该新建独立的 NFD 字符串 group(会跟现有 NFC group 永久分裂)")
+    }
+
+    @Test func mergeThemes_NFDTargetResolvesToExistingNFCCanonical() {
+        // 现有 group canonical="Coffee Shop" + alias=NFC "café"。用户主动合并 "Tea Shop → Café"
+        // (target 输入 NFD 等价)。修前:`indexSnapshot[targetLower]` miss → resolvedTarget=NFD 字符串
+        // → 新建 NFD group。修后:targetIndexKey=ThemeKey.make 命中 → resolvedTarget="Coffee Shop"。
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let seed = PendingSuggestion(
+            newTag: nfcCafe,
+            canonicalGuess: "Coffee Shop",
+            confidence: .high,
+            source: .scan
+        )
+        _ = resolver.enqueue(seed)
+        resolver.confirm(seed, canonical: "Coffee Shop")
+
+        // 用户主动合并 "Tea Shop" 到 NFD 等价 target
+        let outcome = resolver.mergeThemes(source: "Tea Shop", into: nfdCafe)
+        #expect(outcome == .merged)
+        #expect(resolver.groups["Coffee Shop"]?.contains("Tea Shop") == true,
+                "NFD target 必须 resolve 到 Coffee Shop,Tea Shop 应加入现有 group")
+        #expect(resolver.groups[nfdCafe] == nil,
+                "不应该新建 NFD 字符串 group")
+    }
+}
+
+// MARK: - DataMigrationService(megareview OPT-HIGH H3)
+//
+// 一次性 v2 JSON → CoreData 迁移有两道生产事故级防御:
+//   - `seenIDs` Set 去重:save 失败下次重跑不会因为缺 unique constraint 翻倍导入 + 同步到 CloudKit
+//   - `defaults.set` **同步**写(performAndWait 内,非 dispatch async):context.save → migrationKey
+//     之间无 force-quit / 内存压力 race 窗口
+// 这些契约在 DataMigrationService 注释里点明,但**没有 test 锁住**;某次 refactor 删任一道 → 老用户
+// 升级触发数据翻倍。本组测试用 isolated defaults + temp file + in-memory context 覆盖 5 个关键场景。
+
+@MainActor
+struct DataMigrationServiceTests {
+    /// 构造一个 in-memory PersistenceController + 拿到 bgContext。
+    /// 不复用 `.shared`,避免污染其他 test。
+    private func makeBgContext() -> NSManagedObjectContext {
+        let pc = PersistenceController(inMemory: true)
+        return pc.container.newBackgroundContext()
+    }
+
+    /// 用 JSONSerialization 构造 v2 JSON fixture(LegacyDiaryEntry 是 Decodable-only,自己拼 dict 更简单)。
+    /// JSONDecoder 默认 dateDecodingStrategy = deferredToDate(Double seconds since reference date),
+    /// 所以 date field 用 `Date.timeIntervalSinceReferenceDate` 直接 encode。
+    private func writeLegacyJSON(
+        entries: [(id: UUID, date: Date, text: String, mood: Double, audio: String?)],
+        to url: URL
+    ) throws {
+        let dicts: [[String: Any]] = entries.map { e -> [String: Any] in
+            var d: [String: Any] = [
+                "id": e.id.uuidString,
+                "date": e.date.timeIntervalSinceReferenceDate,
+                "text": e.text,
+                "moodValue": e.mood
+            ]
+            if let audio = e.audio { d["audioFileName"] = audio }
+            return d
+        }
+        let data = try JSONSerialization.data(withJSONObject: dicts)
+        try data.write(to: url)
+    }
+
+    private func tempJSONURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("diary-test-\(UUID().uuidString).json")
+    }
+
+    @Test func migration_freshInstall_noJSON_marksMigrated() {
+        // 新装机 / 无 v2 JSON 文件 — 应该 silent skip + 标记已迁移防下次重跑。
+        let defaults = isolatedDefaults()
+        let jsonURL = tempJSONURL()  // 故意不写文件
+        let context = makeBgContext()
+
+        let outcome = DataMigrationService.performMigration(
+            defaults: defaults,
+            standardDefaults: nil,
+            jsonURL: jsonURL,
+            context: context
+        )
+
+        #expect(outcome.inserted == 0)
+        #expect(outcome.skipped == 0)
+        #expect(outcome.didMark == true, "无 JSON 文件也要标 migrated,防下次启动重跑全流程")
+        #expect(outcome.didMoveBackup == false)
+        #expect(outcome.saveError == nil)
+        #expect(defaults.bool(forKey: DataMigrationService.migrationKey) == true)
+    }
+
+    @Test func migration_withJSON_insertsAllUniqueEntriesAndRenamesBackup() async throws {
+        let defaults = isolatedDefaults()
+        let jsonURL = tempJSONURL()
+        let context = makeBgContext()
+        let now = Date()
+        let id1 = UUID(); let id2 = UUID(); let id3 = UUID()
+        try writeLegacyJSON(entries: [
+            (id1, now, "first entry", 0.5, nil),
+            (id2, now.addingTimeInterval(-86400), "second", 0.7, "audio1.m4a"),
+            (id3, now.addingTimeInterval(-172800), "third with words", 0.3, nil)
+        ], to: jsonURL)
+        defer { try? FileManager.default.removeItem(at: jsonURL) }
+
+        let outcome = DataMigrationService.performMigration(
+            defaults: defaults,
+            standardDefaults: nil,
+            jsonURL: jsonURL,
+            context: context
+        )
+
+        #expect(outcome.inserted == 3)
+        #expect(outcome.skipped == 0)
+        #expect(outcome.didMark == true)
+        #expect(outcome.didMoveBackup == true, "save 成功后 diary.json → diary.json.backup")
+        #expect(outcome.saveError == nil)
+        #expect(defaults.bool(forKey: DataMigrationService.migrationKey) == true)
+
+        // 备份文件应该存在,原文件应该消失
+        let backupURL = jsonURL.appendingPathExtension("backup")
+        defer { try? FileManager.default.removeItem(at: backupURL) }
+        #expect(FileManager.default.fileExists(atPath: backupURL.path) == true)
+        #expect(FileManager.default.fileExists(atPath: jsonURL.path) == false)
+
+        // CoreData 应该有 3 条 entry
+        let fetchCount: Int = await context.perform {
+            let req = NSFetchRequest<DiaryEntry>(entityName: "DiaryEntry")
+            return (try? context.count(for: req)) ?? -1
+        }
+        #expect(fetchCount == 3)
+    }
+
+    @Test func migration_runTwice_secondPassSkipsAllByUUID() async throws {
+        // 模拟 race:第一遍 save 成功 + migrationKey 写盘成功,但 backup rename 假装失败(我们手动复制
+        // diary.json 回 jsonURL 模拟"文件还在"+ defaults 删 migrationKey 模拟"sentinel race window"
+        // 让人为复现 "save 成功但下次启动 migrationKey 缺失" 的 fault path。
+        let defaults = isolatedDefaults()
+        let jsonURL = tempJSONURL()
+        let context = makeBgContext()
+        let id1 = UUID(); let id2 = UUID()
+        try writeLegacyJSON(entries: [
+            (id1, Date(), "alpha", 0.5, nil),
+            (id2, Date().addingTimeInterval(-3600), "beta", 0.6, nil)
+        ], to: jsonURL)
+        defer { try? FileManager.default.removeItem(at: jsonURL) }
+
+        // 第一遍:正常跑
+        let first = DataMigrationService.performMigration(
+            defaults: defaults,
+            standardDefaults: nil,
+            jsonURL: jsonURL,
+            context: context
+        )
+        #expect(first.inserted == 2)
+        let backupURL = jsonURL.appendingPathExtension("backup")
+        defer { try? FileManager.default.removeItem(at: backupURL) }
+
+        // 人为复现 race window:把 backup 文件 rename 回 jsonURL(模拟"backup rename 失败,JSON 文件还在")
+        // + 清掉 defaults sentinel(模拟"migrationKey 还没落盘 force-quit")
+        if FileManager.default.fileExists(atPath: backupURL.path) {
+            try? FileManager.default.removeItem(at: jsonURL)
+            try FileManager.default.moveItem(at: backupURL, to: jsonURL)
+        }
+        defaults.removeObject(forKey: DataMigrationService.migrationKey)
+
+        // 第二遍:seenIDs guard 应该 skip 全部
+        let second = DataMigrationService.performMigration(
+            defaults: defaults,
+            standardDefaults: nil,
+            jsonURL: jsonURL,
+            context: context
+        )
+        #expect(second.inserted == 0, "seenIDs UUID 去重应该挡住所有 entry")
+        #expect(second.skipped == 2, "全部 2 条都应被识别为 already-imported")
+
+        // 数据库应该仍然只有 2 条,不翻倍
+        let fetchCount: Int = await context.perform {
+            let req = NSFetchRequest<DiaryEntry>(entityName: "DiaryEntry")
+            return (try? context.count(for: req)) ?? -1
+        }
+        #expect(fetchCount == 2, "race window 触发的重跑不能让 CoreData 翻倍 ghost entry")
+    }
+
+    @Test func migration_alreadyMarked_isNoop() throws {
+        // 已经标记过 migrated 的 defaults 应该 silent return,不读 JSON 不写盘。
+        let defaults = isolatedDefaults()
+        defaults.set(true, forKey: DataMigrationService.migrationKey)
+        let jsonURL = tempJSONURL()
+        let context = makeBgContext()
+        // 故意写一个会"看似有数据"的 JSON,如果 service 偷跑就会插数据
+        try writeLegacyJSON(entries: [(UUID(), Date(), "should not import", 0.5, nil)], to: jsonURL)
+        defer { try? FileManager.default.removeItem(at: jsonURL) }
+
+        let outcome = DataMigrationService.performMigration(
+            defaults: defaults,
+            standardDefaults: nil,
+            jsonURL: jsonURL,
+            context: context
+        )
+
+        #expect(outcome.inserted == 0)
+        #expect(outcome.skipped == 0)
+        #expect(outcome.didMark == false, "已 mark 的不应该再写一遍 mark")
+        #expect(outcome.didMoveBackup == false, "已 mark 的不应该动 backup")
+        #expect(outcome.saveError == nil)
+        // 原 JSON 文件应该没动
+        #expect(FileManager.default.fileExists(atPath: jsonURL.path) == true)
+    }
+
+    @Test func migration_legacyStandardDefaults_migratedToAppGroup_explicitFalsePreserved() throws {
+        // 老用户在 .standard suite 显式写过 `false`(可能是 sentinel reset),要对称拷到 AppGroup;
+        // 否则 AppGroup 永远缺 key,启动重跑 → 若 v2 JSON 仍在 → 数据翻倍。
+        let appGroup = isolatedDefaults()
+        let standardSurrogate = isolatedDefaults()  // 用 isolated 模拟 .standard 防污染
+        standardSurrogate.set(false, forKey: DataMigrationService.migrationKey)
+
+        let jsonURL = tempJSONURL()  // 无文件,触发"标记已迁移"路径
+        let context = makeBgContext()
+
+        let outcome = DataMigrationService.performMigration(
+            defaults: appGroup,
+            standardDefaults: standardSurrogate,
+            jsonURL: jsonURL,
+            context: context
+        )
+
+        // 应该:先把 standard 的 false 拷到 appGroup,然后因为 bool=false 不被 guard 挡掉,
+        // 继续走"无 JSON → 标 migrated"路径。这是合法的"老用户重启后正常完成"路径。
+        #expect(appGroup.bool(forKey: DataMigrationService.migrationKey) == true,
+                "无 JSON 文件路径会把 migrationKey 设回 true(已完成迁移)")
+        #expect(outcome.didMark == true)
+        #expect(outcome.inserted == 0)
+    }
+}
+
+// MARK: - Backfill services(megareview OPT-HIGH H5)
+//
+// 三个 backfill service 的核心契约:
+//   - `pendingCount()` 准确:UI 进 Settings → "一键重建索引" 顶部要显示"剩 N 条";数错 = 用户看
+//     不出 backfill 进度 / 跑完仍提示"还有 N 条"。
+//   - `backfillAll()` 真正落 embedding/themes/wordCount 到 DiaryEntry,而非 silent no-op。
+//   - 二次 run idempotent — 跑完一遍 pendingCount 归零,二次 backfillAll 立即返。
+// CLAUDE.md 提到 `runningTask` 改 `@MainActor` 隔离锁住 concurrent backfill race;这条契约 H4
+// 之外的 race 测试需要异步并发场景,暂不覆盖(actor isolation 已经从设计层保住)。
+
+@MainActor
+struct EmbeddingBackfillServiceTests {
+    private func makePersistence() -> PersistenceController {
+        PersistenceController(inMemory: true)
+    }
+
+    /// Seed N 条 entry,其中 `missingEmbeddingCount` 条无 embedding,其余有(任意 vector)。
+    /// 返回 (persistence, seededIDs)。
+    private func seed(missing: Int, withVector: Int) -> (PersistenceController, [UUID]) {
+        let pc = makePersistence()
+        let ctx = pc.container.viewContext
+        var ids: [UUID] = []
+        for i in 0..<missing {
+            let id = UUID()
+            ids.append(id)
+            _ = insertDiaryEntry(
+                context: ctx,
+                id: id,
+                date: makeDate(year: 2024, month: 6, day: 1 + i),
+                themes: [],
+                text: "missing-embedding-\(i)"
+            )
+        }
+        for i in 0..<withVector {
+            let id = UUID()
+            ids.append(id)
+            let entry = insertDiaryEntry(
+                context: ctx,
+                id: id,
+                date: makeDate(year: 2024, month: 7, day: 1 + i),
+                themes: [],
+                text: "has-embedding-\(i)"
+            )
+            // 写一段非空 embedding blob(用 setEmbedding 走 V1 header)
+            entry.setEmbedding([Float(0.1), Float(0.2), Float(0.3)])
+        }
+        try? ctx.save()
+        return (pc, ids)
+    }
+
+    @Test func pendingCount_returnsCorrectMissingEmbeddingCount() async {
+        let (pc, _) = seed(missing: 5, withVector: 3)
+        let service = EmbeddingBackfillService(persistence: pc, ai: MockAIService(), batchSize: 3, throttleMs: 0)
+        let count = await service.pendingCount()
+        #expect(count == 5, "pendingCount 应只反映 embedding=nil 的 entry")
+    }
+
+    @Test func backfillAll_writesEmbeddingsAndClearsPending() async {
+        let (pc, _) = seed(missing: 4, withVector: 0)
+        let service = EmbeddingBackfillService(persistence: pc, ai: MockAIService(), batchSize: 2, throttleMs: 0)
+
+        let progress = await service.backfillAll()
+        // MockAIService.embed 总返非 nil 16 维向量,所以 4 条都应该 write 成功
+        #expect(progress.processed == 4)
+        #expect(progress.failed == 0)
+        #expect(progress.isRunning == false)
+
+        // 跑完后 pendingCount 应该归零(全部 entry 都 embed 过了)
+        let after = await service.pendingCount()
+        #expect(after == 0, "backfillAll 完成后 pendingCount 应归零")
+    }
+
+    @Test func backfillAll_emptyMissing_returnsImmediately() async {
+        let (pc, _) = seed(missing: 0, withVector: 3)
+        let service = EmbeddingBackfillService(persistence: pc, ai: MockAIService(), batchSize: 3, throttleMs: 0)
+        let progress = await service.backfillAll()
+        #expect(progress.processed == 0)
+        #expect(progress.total == 0)
+        #expect(progress.isRunning == false)
+    }
+}
+
+@MainActor
+struct ThemeBackfillServiceTests {
+    private func seed(missingThemes: Int, withThemes: Int) -> PersistenceController {
+        let pc = PersistenceController(inMemory: true)
+        let ctx = pc.container.viewContext
+        for i in 0..<missingThemes {
+            insertDiaryEntry(
+                context: ctx,
+                date: makeDate(year: 2024, month: 6, day: 1 + i),
+                themes: [],  // 空 themes → pending
+                text: "needs themes \(i)"
+            )
+        }
+        for i in 0..<withThemes {
+            insertDiaryEntry(
+                context: ctx,
+                date: makeDate(year: 2024, month: 7, day: 1 + i),
+                themes: ["工作", "家人"],  // 已有 themes
+                text: "has themes \(i)"
+            )
+        }
+        try? ctx.save()
+        return pc
+    }
+
+    @Test func pendingCount_countsEntriesWithoutThemes() async {
+        let pc = seed(missingThemes: 4, withThemes: 2)
+        let service = ThemeBackfillService(persistence: pc, ai: MockAIService(), batchSize: 3, throttleMs: 0)
+        let count = await service.pendingCount()
+        #expect(count == 4, "pendingCount 应只算 themes=nil/空 的 entry")
+    }
+
+    @Test func backfillAll_writesThemesViaMockAI() async {
+        // MockAIService.extractThemes 用关键词匹配,text="工作 加班" 会返 ["工作"]
+        let pc = PersistenceController(inMemory: true)
+        let ctx = pc.container.viewContext
+        insertDiaryEntry(
+            context: ctx,
+            date: makeDate(year: 2024, month: 6, day: 1),
+            themes: [],
+            text: "今天工作很累，加班了好久"
+        )
+        try? ctx.save()
+
+        let service = ThemeBackfillService(persistence: pc, ai: MockAIService(), batchSize: 3, throttleMs: 0)
+        let progress = await service.backfillAll()
+        #expect(progress.processed == 1)
+        #expect(progress.failed == 0)
+
+        // 检查 entry.themes 真的被写了
+        let after = await service.pendingCount()
+        #expect(after == 0, "backfillAll 完成后 pending 应归零")
+    }
+}
+
+struct WordCountBackfillServiceTests {
+    @Test func backfillIfNeeded_processesZeroWordCountEntriesWithText() async {
+        // CLAUDE.md & wordCount comment 自陈:wordCount==0 AND text!="" 的 entry 才处理。
+        // image-only entry (text="" / nil) 应该被 predicate 挡住,避免每次启动反复 fetch。
+        let pc = PersistenceController(inMemory: true)
+        let ctx = pc.container.viewContext
+
+        // 3 条有 text 的 entry(wordCount=0,待回填)
+        for i in 0..<3 {
+            let entry = insertDiaryEntry(
+                context: ctx,
+                date: makeDate(year: 2024, month: 6, day: 1 + i),
+                themes: [],
+                text: "hello world entry \(i) with several words"
+            )
+            entry.wordCount = 0  // 显式设 0 模拟老用户数据
+        }
+        // 1 条 image-only entry(text="",wordCount=0,不应被处理)
+        let imageOnly = insertDiaryEntry(
+            context: ctx,
+            date: makeDate(year: 2024, month: 6, day: 4),
+            themes: [],
+            text: ""
+        )
+        imageOnly.wordCount = 0
+        try? ctx.save()
+
+        let processed = await WordCountBackfillService.forceBackfill(persistence: pc)
+        #expect(processed == 3, "应处理 3 条有 text 的,跳过 image-only")
+
+        // 再跑一遍 — 全部已写,应返回 0(idempotent)
+        let processedAgain = await WordCountBackfillService.forceBackfill(persistence: pc)
+        #expect(processedAgain == 0, "二次跑应 idempotent 返 0")
+    }
+}

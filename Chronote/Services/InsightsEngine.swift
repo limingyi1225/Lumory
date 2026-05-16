@@ -373,25 +373,35 @@ final class InsightsEngine {
     /// 避免塞给 LLM 的 context 膨胀。
     func recentEntries(limit: Int = 3, textCharCap: Int = 200) async -> [DiaryEntryData] {
         await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
-            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            // (megareview P1 #6)dict-fetch 真投影,同 `fetchEntryData` 改法 —— grounding 用例
+            // 只读 7 个标量列,绝不进 imagesData / audioFileName。
+            let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            request.resultType = .dictionaryResultType
+            request.propertiesToFetch = ["id", "date", "text", "moodValue", "summary", "themes", "wordCount"]
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
             request.fetchLimit = limit
-            request.returnsObjectsAsFaults = false
-            guard let entries = try? context.fetch(request) else { return [] }
-            return entries.map { entry in
-                let rawText = entry.text ?? ""
+
+            guard let rows = try? context.fetch(request) else { return [] }
+            return rows.map { row -> DiaryEntryData in
+                let rawText = (row["text"] as? String) ?? ""
                 let truncated = rawText.count > textCharCap
                     ? String(rawText.prefix(textCharCap))
                     : rawText
+                let themesCSV = (row["themes"] as? String) ?? ""
+                let themes: [String] = themesCSV.isEmpty
+                    ? []
+                    : themesCSV.split(separator: ",")
+                        .map { String($0).trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
                 return DiaryEntryData(
-                    id: entry.id ?? UUID(),
-                    date: entry.date ?? Date(),
+                    id: (row["id"] as? UUID) ?? UUID(),
+                    date: (row["date"] as? Date) ?? Date(),
                     text: truncated,
-                    moodValue: entry.moodValue,
-                    summary: entry.summary ?? "",
-                    themes: entry.themeArray,
+                    moodValue: (row["moodValue"] as? Double) ?? 0.5,
+                    summary: (row["summary"] as? String) ?? "",
+                    themes: themes,
                     embedding: nil,   // grounding 不需要向量
-                    wordCount: Int(entry.wordCount)
+                    wordCount: (row["wordCount"] as? Int) ?? 0
                 )
             }
         }
@@ -401,22 +411,51 @@ final class InsightsEngine {
 
     private func fetchEntryData(in range: DateInterval, includeEmbedding: Bool = false) async -> [DiaryEntryData] {
         await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
-            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            // (megareview P1 #6)dict-fetch 真投影 —— 之前用 `NSFetchRequest<DiaryEntry>` +
+            // `returnsObjectsAsFaults = false` 强制实例化全字段(`imagesData` Binary external
+            // KB-MB / `embedding` KB / 整 `text` / `imageFileNames` / `audioFileName`)。
+            // .all range 内存峰值 100-500MB,iPad jetsam 阈值容易撞;且跟同 file `writingStats`
+            // (line 172)/ `entryCount`(line 124)的 dict-fetch idiom 不一致。
+            // 改成 `NSDictionaryResultType` + 显式 `propertiesToFetch` 真投影:
+            //   - 不实例化 `NSManagedObject`,不读 `imagesData` / 不读 `audioFileName` / 不读 `imageFileNames`
+            //   - `embedding` Binary 走 dict-fetch 拿 `Data`,本地 `decodeEmbeddingVector` 解 [Float]
+            //   - `themes` CSV inline split(短期复刻 `DiaryEntry.themeArray` 逻辑,等 OPT-MID #M6
+            //     抽 `DiaryEntry.parseThemesCSV(_:)` 静态 helper 后所有 service caller 共用)
+            let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            request.resultType = .dictionaryResultType
+            var fields = ["id", "date", "text", "moodValue", "summary", "themes", "wordCount"]
+            if includeEmbedding { fields.append("embedding") }
+            request.propertiesToFetch = fields
             request.predicate = NSPredicate(format: "date >= %@ AND date <= %@",
                                             range.start as NSDate, range.end as NSDate)
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: true)]
-            request.returnsObjectsAsFaults = false
-            guard let entries = try? context.fetch(request) else { return [] }
-            return entries.map { entry in
-                DiaryEntryData(
-                    id: entry.id ?? UUID(),
-                    date: entry.date ?? Date(),
-                    text: entry.text ?? "",
-                    moodValue: entry.moodValue,
-                    summary: entry.summary ?? "",
-                    themes: entry.themeArray,
-                    embedding: includeEmbedding ? entry.embeddingVector : nil,
-                    wordCount: Int(entry.wordCount)
+
+            guard let rows = try? context.fetch(request) else { return [] }
+            return rows.map { row -> DiaryEntryData in
+                let id = (row["id"] as? UUID) ?? UUID()
+                let date = (row["date"] as? Date) ?? Date()
+                let text = (row["text"] as? String) ?? ""
+                let moodValue = (row["moodValue"] as? Double) ?? 0.5
+                let summary = (row["summary"] as? String) ?? ""
+                let themesCSV = (row["themes"] as? String) ?? ""
+                let themes: [String] = themesCSV.isEmpty
+                    ? []
+                    : themesCSV.split(separator: ",")
+                        .map { String($0).trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                let wordCount = (row["wordCount"] as? Int) ?? 0
+                let embedding: [Float]? = includeEmbedding
+                    ? (row["embedding"] as? Data).flatMap { DiaryEntry.decodeEmbeddingVector($0) }
+                    : nil
+                return DiaryEntryData(
+                    id: id,
+                    date: date,
+                    text: text,
+                    moodValue: moodValue,
+                    summary: summary,
+                    themes: themes,
+                    embedding: embedding,
+                    wordCount: wordCount
                 )
             }
         }

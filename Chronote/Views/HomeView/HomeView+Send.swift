@@ -149,6 +149,16 @@ extension HomeView {
                         photoVM.selectedImageItems = imagesToSend.map { HomePhotoViewModel.SelectedImage(data: $0) }
                         photoVM.selectedPhotos = photosToSend
                     }
+                    // (megareview P1 #5)发送失败彻底静默 → user 只看到内容神秘出现,不知何故。
+                    // 加 error haptic + warning toast(Toast.Severity 只有 success/info/warning),
+                    // 跟同 view 转写失败 inline banner / DiaryDetailView 保存失败 alert 对齐反馈强度。
+                    #if canImport(UIKit)
+                    HapticManager.shared.notification(.error)
+                    #endif
+                    LumoryToastCenter.shared.show(
+                        NSLocalizedString("发送失败，内容已恢复，请重试。", comment: "Toast when diary send fails and state is restored"),
+                        severity: .warning
+                    )
                 }
                 return
             }

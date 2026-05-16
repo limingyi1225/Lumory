@@ -38,6 +38,13 @@ actor NarrativePrecomputeService {
     /// cancellation 语义更准:cancel 信号 + bg.perform 闭包内不可被 cancel,会留下漏窗口。
     private var refreshGeneration: Int = 0
 
+    /// (megareview P1 #4)`bg.perform` 闭包内 NSManagedObjectContext 不响应 Task.cancel
+    /// + 不在 actor 上下文,无法同步读 `refreshGeneration`。用 sendable lock-protected token
+    /// 在每次 `refreshGeneration &+= 1` 同步镜像值,perform 闭包 capture 它后可在 persist 前
+    /// 的最后一帧再 check,挡掉"stream 完成 → guard 通过 → 进 bg.perform → 期间用户写日记或
+    /// reset 触发 bump → ghost narrative 写盘"的 race 窗口。
+    private let generationToken = GenerationToken()
+
     init(persistence: PersistenceController, engine: InsightsEngine, debounce: Duration) {
         self.persistence = persistence
         self.engine = engine
@@ -49,6 +56,7 @@ actor NarrativePrecomputeService {
     func requestRefreshIfNeeded(for range: TimeRange) async {
         refreshGeneration &+= 1
         let generation = refreshGeneration
+        generationToken.set(generation)  // (megareview P1 #4)同步镜像给 bg.perform 闭包用
         pendingTask?.cancel()
         // UI 立即占位 — 不等 debounce sleep 结束。让"写完日记立刻进 Insights"能在卡片上
         // 看到 shimmer,而不是 silent 等 60-120s 才"突然"出结果。supersede 路径靠下面的
@@ -93,6 +101,7 @@ actor NarrativePrecomputeService {
         task?.cancel()
         refreshGeneration &+= 1
         let cancelGeneration = refreshGeneration
+        generationToken.set(cancelGeneration)  // (megareview P1 #4)同步镜像给 bg.perform 闭包用
         await task?.value
         if refreshGeneration == cancelGeneration {
             pendingTask = nil
@@ -237,7 +246,16 @@ actor NarrativePrecomputeService {
         let finalTruncatedReason = acc.truncatedReason
         let title = range.narrativeTitleLabel
 
-        let didPersist: Bool = await bg.perform {
+        // (megareview P1 #4)`generationToken` capture 进闭包,bg.perform 跑到 persist 前最后
+        // 一帧再 check 一次。actor 视角的 `isCurrentGeneration` 在 line 229 已经查过,但
+        // `await bg.perform` 启动后 closure 到 `try bg.save()` 之间可能再过几 ms,期间
+        // `cancelPendingAndBumpGeneration` 或新 `requestRefreshIfNeeded` 可能 bump generation → 老
+        // task 仍把 stale narrative 写盘成 ghost。Token 是 NSLock 保护的 Int 镜像,同步可读。
+        let didPersist: Bool = await bg.perform { [generationToken] in
+            guard generationToken.get() == generation else {
+                Log.info("[NarrativePrecompute] skip \(range.rawValue): superseded inside bg.perform closure", category: .ai)
+                return false
+            }
             do {
                 let payload = AIConversation.NarrativePayload(
                     rangeStart: finalInterval.start,
@@ -257,6 +275,15 @@ actor NarrativePrecomputeService {
                     payload: payload,
                     citedEntryIds: []
                 )
+                // (megareview P1 #4 — codex review follow-up)`insertNarrative` 跑完到 `save` 之间
+                // 仍可能被另一线程 bump generation(prepare payload 是 in-RAM op,~µs;但闭包整段从
+                // 入口 guard 到 save 完成 NS-RAM + CoreData stack,数 ms 量级)。最后一帧再 check token,
+                // 让"persist 启动前 1 ms 触发的 bump"也能挡掉:context 没 save,所有 inserted obj 一次性丢弃。
+                guard generationToken.get() == generation else {
+                    Log.info("[NarrativePrecompute] skip \(range.rawValue): superseded between insert and save", category: .ai)
+                    bg.rollback()   // 丢弃刚 inserted 的 AIConversation,避免下一轮 save 时附带写回
+                    return false
+                }
                 try bg.save()
                 Log.info("[NarrativePrecompute] persisted \(range.rawValue) narrative (\(body.count) chars)", category: .ai)
                 return true
@@ -268,5 +295,30 @@ actor NarrativePrecomputeService {
         if didPersist {
             lastFailureAtByRange[range] = nil
         }
+    }
+}
+
+// MARK: - GenerationToken
+
+/// (megareview P1 #4)NSLock 保护的 Int 镜像。actor 内 mutation 走 `refreshGeneration &+= 1`,
+/// **同步**调 `generationToken.set(refreshGeneration)`;`bg.perform` 闭包 capture token 后可在
+/// persist 前最后一帧 `generationToken.get() == generation` 同步 check —— 闭包不在 actor 上下文,
+/// 无法 await 回 actor,token 镜像是同步可读的最后窗口 race fix。
+///
+/// 单测 seam 不需要(actor 的 generation 增减入口已经被覆盖,token 只是镜像)。
+private final class GenerationToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Int = 0
+
+    func set(_ newValue: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = newValue
+    }
+
+    func get() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }

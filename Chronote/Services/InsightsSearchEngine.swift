@@ -59,24 +59,34 @@ final class InsightsSearchEngine {
         let queryEmbedded = qVec != nil
 
         return await persistence.container.performBackgroundTask { context -> InsightsEngine.SemanticSearchResult in
-            // Phase A: 轻量扫(只 prefetch embedding + date,不 hydrate text 等大字段)
-            // 复用 retrieve() 同款策略,见下面 `retrieve` 注释。
-            let scanRequest: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
-            scanRequest.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
-            scanRequest.returnsObjectsAsFaults = true
-            scanRequest.includesPropertyValues = true
-            scanRequest.propertiesToFetch = ["embedding", "date"]
-            guard let scanned = try? context.fetch(scanRequest), !scanned.isEmpty else {
+            // (megareview P1 #6)Phase A 改 `NSDictionaryResultType` 真投影 —— 之前的
+            // `NSFetchRequest<DiaryEntry>` + `propertiesToFetch=["embedding","date"]` 只是 prefetch
+            // hint,managedObjectResultType 下 SQL 仍 SELECT *,1000 entry × imagesData/text 全 row
+            // cache 进 RAM(50-200MB peak)。改 dict-fetch 后只读 objectID + embedding-blob + date,
+            // imagesData / text / summary / themes 完全不进 RAM。Phase B `materialize` 仍走 K 条
+            // existingObject (fault) 是 OK 的。
+            // `NSExpression.expressionForEvaluatedObject()` 拿 objectID 是 dict-fetch 标准 idiom。
+            let objectIDExpr = NSExpressionDescription()
+            objectIDExpr.name = "objectID"
+            objectIDExpr.expression = NSExpression.expressionForEvaluatedObject()
+            objectIDExpr.expressionResultType = .objectIDAttributeType
+
+            let scanRequest = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            scanRequest.resultType = .dictionaryResultType
+            scanRequest.propertiesToFetch = [objectIDExpr, "embedding", "date"]
+            scanRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
+
+            guard let rows = try? context.fetch(scanRequest), !rows.isEmpty else {
                 return InsightsEngine.SemanticSearchResult(ids: [], indexCoverage: 1.0, totalCount: 0, queryEmbedded: queryEmbedded)
             }
-            let totalCount = scanned.count
+            let totalCount = rows.count
             guard topK > 0 else {
                 return InsightsEngine.SemanticSearchResult(ids: [], indexCoverage: 0.0, totalCount: totalCount, queryEmbedded: queryEmbedded)
             }
 
             // 无 query 向量 → 直接返空(让 UI 决定 fallback 策略,不偷偷返"最近 K 条"假装是相关结果)
             guard let qVec = qVec else {
-                let withVecCount = scanned.filter { $0.embedding != nil }.count
+                let withVecCount = rows.filter { ($0["embedding"] as? Data) != nil }.count
                 let coverage = Double(withVecCount) / Double(max(1, totalCount))
                 return InsightsEngine.SemanticSearchResult(ids: [], indexCoverage: coverage, totalCount: totalCount, queryEmbedded: false)
             }
@@ -86,8 +96,10 @@ final class InsightsSearchEngine {
             topHeap.reserveCapacity(topK)
             var withoutVecCount = 0
             var maxScore: Float = -.infinity
-            for entry in scanned {
-                guard let vec = entry.embeddingVector else {
+            for row in rows {
+                guard let oid = row["objectID"] as? NSManagedObjectID else { continue }
+                guard let blob = row["embedding"] as? Data,
+                      let vec = DiaryEntry.decodeEmbeddingVector(blob) else {
                     withoutVecCount += 1
                     continue
                 }
@@ -95,11 +107,11 @@ final class InsightsSearchEngine {
                 if score > maxScore { maxScore = score }
                 if topHeap.count < topK {
                     let insertAt = topHeap.firstIndex(where: { $0.score < score }) ?? topHeap.count
-                    topHeap.insert((entry.objectID, score), at: insertAt)
+                    topHeap.insert((oid, score), at: insertAt)
                 } else if let last = topHeap.last, score > last.score {
                     topHeap.removeLast()
                     let insertAt = topHeap.firstIndex(where: { $0.score < score }) ?? topHeap.count
-                    topHeap.insert((entry.objectID, score), at: insertAt)
+                    topHeap.insert((oid, score), at: insertAt)
                 }
             }
 
@@ -188,20 +200,24 @@ final class InsightsSearchEngine {
         //
         // 无 query 向量 / 全无 embedding 走时间倒序兜底(语义见 rankRetrieval 注释),这条路径在 Phase A 内完成。
         return await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
-            // Phase A: lightweight scan
-            let scanRequest: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
-            scanRequest.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
-            // returnsObjectsAsFaults=true + propertiesToFetch=[embedding, date] →
-            // 仅这两列进 row cache,其它属性保持 fault,scan 阶段不会去读 text 列。
-            scanRequest.returnsObjectsAsFaults = true
-            scanRequest.includesPropertyValues = true
-            scanRequest.propertiesToFetch = ["embedding", "date"]
-            guard let scanned = try? context.fetch(scanRequest), !scanned.isEmpty else { return [] }
+            // (megareview P1 #6)Phase A 改 dict-fetch 真投影 —— 同 `searchSemantic` 改法,
+            // 只读 objectID + embedding-blob + date,imagesData / text / summary 完全不进 RAM。
+            let objectIDExpr = NSExpressionDescription()
+            objectIDExpr.name = "objectID"
+            objectIDExpr.expression = NSExpression.expressionForEvaluatedObject()
+            objectIDExpr.expressionResultType = .objectIDAttributeType
+
+            let scanRequest = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+            scanRequest.resultType = .dictionaryResultType
+            scanRequest.propertiesToFetch = [objectIDExpr, "embedding", "date"]
+            scanRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
+
+            guard let rows = try? context.fetch(scanRequest), !rows.isEmpty else { return [] }
             guard topK > 0 else { return [] }
 
             // 兜底路径:无 query 向量 → 直接取最近 topK,Phase B 时材料化
             guard let qVec = queryVector else {
-                let ids = scanned.prefix(topK).map { $0.objectID }
+                let ids = rows.prefix(topK).compactMap { $0["objectID"] as? NSManagedObjectID }
                 return Self.materialize(objectIDs: Array(ids), in: context)
             }
 
@@ -212,35 +228,38 @@ final class InsightsSearchEngine {
             topHeap.reserveCapacity(topK)
             // 同步收集"无 embedding"的 objectID + date,以便最后做"未索引语料保留槽"逻辑(对齐 rankRetrieval 行为)。
             var withoutVecIDs: [(id: NSManagedObjectID, date: Date)] = []
-            withoutVecIDs.reserveCapacity(scanned.count)
+            withoutVecIDs.reserveCapacity(rows.count)
 
-            for entry in scanned {
-                guard let vec = entry.embeddingVector else {
-                    withoutVecIDs.append((entry.objectID, entry.date ?? .distantPast))
+            for row in rows {
+                guard let oid = row["objectID"] as? NSManagedObjectID else { continue }
+                let date = (row["date"] as? Date) ?? .distantPast
+                guard let blob = row["embedding"] as? Data,
+                      let vec = DiaryEntry.decodeEmbeddingVector(blob) else {
+                    withoutVecIDs.append((oid, date))
                     continue
                 }
                 let score = Self.cosineSimilarity(qVec, vec)
                 if topHeap.count < topK {
                     // 插入并保持降序
                     let insertAt = topHeap.firstIndex(where: { $0.score < score }) ?? topHeap.count
-                    topHeap.insert((entry.objectID, score), at: insertAt)
+                    topHeap.insert((oid, score), at: insertAt)
                 } else if let last = topHeap.last, score > last.score {
                     // 比当前最小分还高 —— 替换尾部,insertion-sort 到正确位置
                     topHeap.removeLast()
                     let insertAt = topHeap.firstIndex(where: { $0.score < score }) ?? topHeap.count
-                    topHeap.insert((entry.objectID, score), at: insertAt)
+                    topHeap.insert((oid, score), at: insertAt)
                 }
             }
 
-            // 全语料无 embedding → 走时间兜底(scanned 已按 date desc)
+            // 全语料无 embedding → 走时间兜底(rows 已按 date desc)
             guard !topHeap.isEmpty else {
-                let ids = scanned.prefix(topK).map { $0.objectID }
+                let ids = rows.prefix(topK).compactMap { $0["objectID"] as? NSManagedObjectID }
                 return Self.materialize(objectIDs: Array(ids), in: context)
             }
 
             // 计算"未索引保留槽":覆盖率不到 95% 或有 5 分钟内新条目时,留 max(2, topK/3) 给最近未索引。
             // 与 rankRetrieval 的策略一致,只是这里直接对 objectID 操作,不必回填 DiaryEntryData。
-            let totalCount = scanned.count
+            let totalCount = rows.count
             let withVecCount = totalCount - withoutVecIDs.count
             let indexCoverage = Double(withVecCount) / Double(max(1, totalCount))
             let now = Date()

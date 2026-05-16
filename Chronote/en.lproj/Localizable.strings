@@ -501,6 +501,7 @@
 "删除失败,可能是磁盘空间不足或同步冲突。请稍后重试。" = "Delete failed. Disk may be full or there's a sync conflict. Please retry later.";
 "保存失败,可能是磁盘空间不足或同步冲突。请稍后重试。" = "Save failed. Disk may be full or there's a sync conflict. Please retry later.";
 "已记录" = "Saved to journal";
+"发送失败，内容已恢复，请重试。" = "Send failed. Your content was restored, please try again.";
 "应用语言" = "App language";
 "录音电平" = "Audio level";
 "所有别名会拆回独立主题,原日记内容不变。可以在新待审里重新合并。" = "All aliases will be split back into separate themes. Your entries are unchanged. You can merge them again from new suggestions.";

@@ -1,5 +1,8 @@
 import CoreData
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// 把 `HomeView.addEntry` 的"附件 I/O + Core Data save + 派生副作用 + AI writeback"
 /// 抽出来。命名跟 `SettingsEntryDeletionService` / `EntryDeletionUndoService` 对称。
@@ -107,9 +110,35 @@ enum EntryCreationService {
 
         // 异步生成摘要、主题、embedding(stale-write guard 见 `performAIWriteback`)。
         // 生产 fire-and-forget;单测要 await 直接调 `performAIWriteback`。
+        //
+        // (megareview P1 #3)`UIApplication.beginBackgroundTask` 包一层 —— 防用户保存后立刻锁屏
+        // 或切后台时 OS 5s grace 把 AI writeback 截断(典型场景:写完日记→锁屏→entry 永久没 themes
+        // /embedding/summary)。OS 给约 30s 补时段,足够 embedding/themes/summary 三条 OpenAI 调用。
+        // **expirationHandler 必须挂**(codex review SUBTLE_ISSUE follow-up):缺 expirationHandler
+        // 时 OS 超时会直接 SIGKILL 整 App;挂上后 OS 在超时前几秒先调 expirationHandler 让我们
+        // 主动 endBackgroundTask 清理,避免 App 被强杀。expirationHandler 在 main thread 跑,
+        // 用 sendable class wrapper 让 closure 跟 defer 共享 task id 的 mutable 状态。
         if !input.text.isEmpty {
             let textSnapshot = input.text
-            Task {
+            Task { @MainActor in
+                #if canImport(UIKit)
+                let holder = BackgroundTaskHolder()
+                holder.id = UIApplication.shared.beginBackgroundTask(withName: "Lumory.AIWriteback") {
+                    // expirationHandler:OS 在 30s 超时前几秒预警,这里同步 endBackgroundTask
+                    // 防 App 被 SIGKILL。in-flight URLSession await 会因 App suspending 自然 throw
+                    // → performAIWriteback 内部 catch 后退出,defer 不会重复 end(holder.id 设回 .invalid)。
+                    if holder.id != .invalid {
+                        UIApplication.shared.endBackgroundTask(holder.id)
+                        holder.id = .invalid
+                    }
+                }
+                defer {
+                    if holder.id != .invalid {
+                        UIApplication.shared.endBackgroundTask(holder.id)
+                        holder.id = .invalid
+                    }
+                }
+                #endif
                 _ = await performAIWriteback(
                     entryID: entryID,
                     textSnapshot: textSnapshot,
@@ -265,3 +294,13 @@ extension EntryCreationService.Result {
         return false
     }
 }
+
+#if canImport(UIKit)
+// (megareview P1 #3 — codex review follow-up)beginBackgroundTask 的 expirationHandler 必须能改
+// 共享 task id 状态;closure capture 局部 `var` 在 Swift 6 sendable 检查下不行,用 class wrapper。
+// `@unchecked Sendable` 是因为它只在 MainActor 上读写(expirationHandler 跑 main),无真竞争。
+@MainActor
+private final class BackgroundTaskHolder {
+    var id: UIBackgroundTaskIdentifier = .invalid
+}
+#endif

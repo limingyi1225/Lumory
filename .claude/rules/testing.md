@@ -51,3 +51,44 @@ iPad 上 `lumoryAdaptiveModal` 走 `fullScreenCover`(`shouldUseExpandedModal: is
 ## bash PIPESTATUS
 
 **`cmd1 | cmd2 || true` 会覆盖 `PIPESTATUS`**。`|| true` 之后 `${PIPESTATUS[0]}` 只剩 `true` 的 exit code,原 pipeline 状态丢光。需要真实 exit code 时改用 `set +e` + 直接 pipeline(不加 `|| true`),然后读 `PIPESTATUS[0]`,最后 `set -e`(参见 `Scripts/generate-screenshots.sh`)。
+
+## MockURLProtocol 基建(2026-05-16)
+
+`ChronoteTests/MockURLProtocol.swift` —— URLProtocol-based session mock。给 `OpenAIService` / `OpenAITranscriber` 的 `init(session: URLSession = .sharedRetrySession, appSharedSecret: String = AppSecrets.appSharedSecret)` 注入 seam 配套用,让 mock-based 单测跟真后端 + 真 xcconfig secret 完全解耦(fresh clone / CI 也能跑)。
+
+用法:
+```swift
+override func setUp() async throws {
+    try await super.setUp()
+    service = OpenAIService(
+        session: MockURLProtocol.makeSession(),
+        appSharedSecret: "test-secret"
+    )
+}
+
+override func tearDown() async throws {
+    MockURLProtocol.reset()  // 必清!不清下条 test 见 stale handler
+    service = nil
+    try await super.tearDown()
+}
+
+// per test:
+MockURLProtocol.requestHandler = { request in
+    let response = HTTPURLResponse(url: request.url!, statusCode: 200, ...)!
+    return (response, Data(...))
+}
+```
+
+**关键 gotcha**:
+1. **`nonisolated(unsafe) static var requestHandler` / `recordedRequests`** —— URLProtocol 是 Foundation instantiate,我们没法注入 instance state,只能 static。**tearDown 必须 `reset()`**,否则 handler 泄漏到下一条测试 → 难诊断的 false positive/negative。
+2. **`Lumory.xcscheme` 两个 `TestableReference` 都设 `parallelizable="NO"`**(2026-05-16 round 1 fix)—— MockURLProtocol static state 假设串行,Xcode UI 跑测试时 parallelizable=YES 会让两条 import test 并行 race,handler 互相覆盖。CLI 跑要传 `-parallel-testing-enabled NO` flag 兜底,Xcode UI 跑只能靠 scheme 设置。
+3. **body capture 读 `httpBodyStream`**:URLSession 把 `request.httpBody` 转成 streaming body,URLProtocol 拦截时 `httpBody` 为 nil。`readBody(from:)` 用 4096-byte buffer + while-loop 读到 EOF,`read < 0` 返 nil(stream error 与 EOF 区分,2026-05-16 round 3 fix)。
+4. **non-retryable 错误让测试快**:`URLError(.cannotFindHost)` / HTTP 400/401 不在 NetworkRetryHelper 重试列表,测试快速失败而非走 1s+2s+4s exponential backoff。
+
+**测试速度**:配合 scheme=NO,全套 OpenAIServiceImportTests 16+ 个 test < 0.1s。
+
+## ChronoteTests 总览
+
+- **Swift Testing**(`import Testing` + `@Test func` + `struct XxxTests`)是主框架,XCTest 兼容混用(`OpenAIServiceImportTests` / `OpenAITranscriberTests` 等基础设施类用 XCTest)。
+- **`isolatedDefaults()` helper**(`ChronoteTests.swift` 内 private)—— 每条 test 拿 UUID suiteName 的独立 UserDefaults,**不污染生产** `lumory.themeAliasStore.v1` key。所有 ThemeAlias 相关 test 必须用,否则跨 test 互相污染 alias map。
+- **AppSecrets 不可注入** —— 测试只能通过 `OpenAIService.init(appSharedSecret: "test-secret")` 在 service-instance scope 注入,不要给 AppSecrets 加可变 testing override(2026-05-16 round 1 评估过,会破 secret immutability)。

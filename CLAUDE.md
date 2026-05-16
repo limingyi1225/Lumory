@@ -62,7 +62,7 @@ iOS:
 
 ### 测试覆盖缺口
 
-- **`parseImportedDiaries` 错误路径 + `StreamEvent.truncated` view-side 端到端测试** — Service-side(`NarrativePrecomputeService` 消费 .truncated 写 `payload.isIncomplete=true / truncatedReason`)已补完单测(2026-05-13 superreview round 1);view-side(`NarrativeSummaryCard` / `AskPastView` 消费侧让 isIncomplete flag 翻 true + 渲染 incompleteFooter)仍需 ViewInspector 或自写 binding-tap helper 才能断言。`parseImportedDiaries` 错误路径同样未补。
+- **`StreamEvent.truncated` view-side 端到端测试** — Service-side(`NarrativePrecomputeService` 消费 .truncated 写 `payload.isIncomplete=true / truncatedReason`)已补完单测(2026-05-13 superreview round 1);view-side(`NarrativeSummaryCard` / `AskPastView` 消费侧让 isIncomplete flag 翻 true + 渲染 incompleteFooter)仍需 ViewInspector 或自写 binding-tap helper 才能断言。`parseImportedDiaries` 错误路径已在 2026-05-16 通过 MockURLProtocol 基建 + `OpenAIServiceImportTests` 补完。
 - **`ReminderService.currentRescheduleGen` race stale 场景测试** — `ThemeAliasJudgeService.scanGen` 已覆盖(`scanGen_staleCompletionDoesNotClearNewerTaskHandle`,通过 `simulateConcurrentScanStartForTesting` 注入),但 `ReminderService` 没装 race test seam(强耦 UN center,要 mock UN 才能干净测)。下次拆 ReminderService 时一并解决。
 
 ### 隐私 hardening
@@ -71,10 +71,8 @@ iOS:
 
 ### 重构 / 待续
 
-- **`ThemeAliasResolver` 拆分**(890 行,2026-05 状态)— class body 仍 ~500 行,SRP 三件套(read API / queue 生命周期 / persistence)混一坨。下次大动作前拆 `ThemeAliasStore`(read+disk)+ `ThemeAliasResolver`(queue+throttle)。
-- **`OpenAI/OpenAIService+Import.swift:31` 的 `// TODO: migrate to structured JSON payload`** — 把 rawText 放进 JSON 字段而不是 raw body。
-- **`CloudKitSyncMonitor` 内 8 处 `DispatchQueue.main.async` wrap 是 redundant**(class 已 `@MainActor`)— 行为等价于 `MainActor.assumeIsolated`,清不清都安全。要清要审 8 处 callback 路径来源(确保是主线程 callback)。
-- **超长文件**(SwiftLint 阈值 600 行,2026-05-09 wave12 后实测):HomeView 1260 / ThemeAliasResolver 890 / DiaryDetailView 862 / ReminderService 844 / AskPastView 710 / ThemeAliasManagementView 709 / InsightsEngine 665 / SettingsView 593 / InsightsView 497 / EntryCreationService 260。重构机会但都不算 bug。**OpenAIService 已在 wave11 拆 7 文件;HomeView 在 wave12 抽 4 个 SwiftUI 子 view + 抽 EntryCreationService。**
+- **`ThemeAliasResolver` 拆分**(883 行,2026-05-16 状态)— class body 仍 ~500 行,SRP 三件套(read API / queue 生命周期 / persistence)混一坨。下次大动作前拆 `ThemeAliasStore`(read+disk)+ `ThemeAliasResolver`(queue+throttle)。
+- **超长文件**(SwiftLint 阈值 600 行,2026-05-16 实测):HomeView 1433 / ThemeAliasResolver 883 / DiaryDetailView 861 / AskPastView 783 / InsightsEngine 771 / ReminderService 746 / ThemeAliasManagementView 709 / InsightsView 640 / SettingsView 590 / EntryCreationService 267。重构机会但都不算 bug。**OpenAIService 已在 wave11 拆 7 文件;HomeView 在 wave12 抽 4 个 SwiftUI 子 view + 抽 EntryCreationService(但 HomeView 又涨回去了,需要再拆一波)。**
 
 ## Claude Code 自动化(本地,非生产)
 

@@ -23,11 +23,17 @@ final class OpenAIService: AIServiceProtocol {
     // Debounce delay for summarize requests
     private let debounceDelay: TimeInterval = 0.3 // 300ms debounce
 
-    init() {
+    /// URLSession 注入点:生产走 `.sharedRetrySession`(默认),测试可注入 URLProtocol-mocked session。
+    /// 跨 extension 共用,因此 internal(同模块可见)。`OpenAIService+Streaming` / `+OneShotAI` /
+    /// `chat` / `chatThrowing` 全部走 `self.session`,统一一个 URLSession 实例。
+    let session: URLSession
+
+    init(session: URLSession = .sharedRetrySession) {
         guard let backendURL = URL(string: Self.backendEndpoint) else {
             preconditionFailure("[OpenAIService] Invalid backend endpoint: \(Self.backendEndpoint)")
         }
         self.backendURL = backendURL
+        self.session = session
     }
 
     // MARK: - Public — 这一节的公开 API 已按职责拆分到子目录:
@@ -107,7 +113,7 @@ final class OpenAIService: AIServiceProtocol {
             // 不用 [weak self]：见 embed() 上方注释
             return try await NetworkRetryHelper.performWithRetry {
                 Log.info("[OpenAIService] 发送网络请求...", category: .ai)
-                let (data, response) = try await URLSession.sharedRetrySession.data(for: request)
+                let (data, response) = try await self.session.data(for: request)
                 guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                     if let httpResponse = response as? HTTPURLResponse {
                         let statusCode = httpResponse.statusCode
@@ -205,7 +211,7 @@ final class OpenAIService: AIServiceProtocol {
         request.httpBody = try jsonEncoder.encode(requestBody)
 
         return try await NetworkRetryHelper.performWithRetry {
-            let (data, response) = try await URLSession.sharedRetrySession.data(for: request)
+            let (data, response) = try await self.session.data(for: request)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                 let httpResponse = response as? HTTPURLResponse
                 let statusCode = httpResponse?.statusCode ?? -1

@@ -270,7 +270,7 @@ extension OpenAIService {
         // 换成默认 strong capture（闭包里的 `self.`），singleton 本来就会自己活着，无泄漏风险。
         do {
             return try await NetworkRetryHelper.performWithRetry {
-                let (data, response) = try await URLSession.sharedRetrySession.data(for: request)
+                let (data, response) = try await self.session.data(for: request)
                 guard let http = response as? HTTPURLResponse else {
                     Log.error("[OpenAIService] Embed: non-HTTP response", category: .ai)
                     throw BackendErrorMapper.error(forStatus: -1)

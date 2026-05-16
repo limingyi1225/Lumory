@@ -136,7 +136,7 @@ Diary Entries:
             // singleton method + escaping closure 不用 [weak self]，防 Release -O ARC 假早释放
             try await NetworkRetryHelper.performWithRetry {
                 Log.info("[OpenAIService] 开始安全数据流式请求...", category: .ai)
-                let (bytes, response) = try await URLSession.sharedRetrySession.bytes(for: request)
+                let (bytes, response) = try await self.session.bytes(for: request)
 
                 if let http = response as? HTTPURLResponse {
                     Log.info("[OpenAIService] 响应状态码: \(http.statusCode)", category: .ai)
@@ -450,7 +450,7 @@ Diary Entries:
                 var didEmitTerminalStreamEvent = false
                 do {
                     try await NetworkRetryHelper.performWithRetry {
-                        let (bytes, response) = try await URLSession.sharedRetrySession.bytes(for: request)
+                        let (bytes, response) = try await self.session.bytes(for: request)
                         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                             let http = response as? HTTPURLResponse
                             throw BackendErrorMapper.error(forStatus: http?.statusCode ?? -1, retryAfter: http?.value(forHTTPHeaderField: "Retry-After"))

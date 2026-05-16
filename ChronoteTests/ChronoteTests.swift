@@ -221,16 +221,6 @@ struct LumoryAdaptivePresentationTests {
 // MARK: - InsightsEngine.aggregateThemes
 
 struct ThemeAggregationTests {
-    @Test func zeroTrendBuckets_returnsEmpty() {
-        let entry = makeEntry(date: makeDate(year: 2024, month: 6, day: 1), mood: 0.5, themes: ["work"])
-        let range = DateInterval(
-            start: makeDate(year: 2024, month: 6, day: 1),
-            end: makeDate(year: 2024, month: 6, day: 30)
-        )
-        let result = InsightsEngine.aggregateThemes(entries: [entry], range: range, trendBuckets: 0)
-        #expect(result.isEmpty)
-    }
-
     @Test func limitCapsReturnCount() {
         let range = DateInterval(
             start: makeDate(year: 2024, month: 6, day: 1),

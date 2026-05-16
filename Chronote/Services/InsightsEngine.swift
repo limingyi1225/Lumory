@@ -51,7 +51,6 @@ final class InsightsEngine {
         let lowCount: Int
         let highCount: Int
         let entryIds: [UUID]
-        let trend: [Double]  // 最近 N 个 bucket 的 avg mood，供 sparkline
         var id: String { name }
     }
 
@@ -228,25 +227,24 @@ final class InsightsEngine {
 
     // MARK: - 3. Themes
 
-    func themes(in range: DateInterval, limit: Int = 5, trendBuckets: Int = 6) async -> [Theme] {
+    func themes(in range: DateInterval, limit: Int = 5) async -> [Theme] {
         async let aliasMapAsync = MainActor.run { ThemeAliasResolver.shared.snapshotIndex() }
         let entries = await fetchEntryData(in: range)
         let aliasMap = await aliasMapAsync
-        return Self.aggregateThemes(entries: entries, range: range, limit: limit, trendBuckets: trendBuckets, aliasMap: aliasMap)
+        return Self.aggregateThemes(entries: entries, range: range, limit: limit, aliasMap: aliasMap)
     }
 
     /// 纯函数版本，便于单元测试。
     /// `aliasMap`: lowercased(alias) → canonical(原文大小写)。空 dict 等价于无别名。
     /// 把别名折成 canonical 后再 bucket —— "Abby" / "宝贝" 会落到同一个 Theme(显示名是 canonical)。
+    /// `range` 当前未使用(2026-05-16 删 sparkline 后失去 caller),保留参数避免动 12 处测试 callsite。
     static func aggregateThemes(
         entries: [DiaryEntryData],
-        range: DateInterval,
+        range _: DateInterval,
         limit: Int = 5,
-        trendBuckets: Int = 6,
         aliasMap: [String: String] = [:]
     ) -> [Theme] {
         guard !entries.isEmpty else { return [] }
-        guard trendBuckets > 0 else { return [] }
 
         // 统计每个主题的出现条目；过滤掉元描述词（历史数据里可能还存着"情绪"等）。
         // 跨日记做 case-insensitive 合并：Abby / abby / ABBY → 同一个 bucket。
@@ -274,20 +272,6 @@ final class InsightsEngine {
             }
         }
 
-        // 计算 trend：按时间等分成 trendBuckets 份，每份取平均心情
-        let safeBucketSize = max(range.duration / Double(trendBuckets), 1)
-        func trendFor(_ items: [DiaryEntryData]) -> [Double] {
-            var sums = [Double](repeating: 0, count: trendBuckets)
-            var counts = [Int](repeating: 0, count: trendBuckets)
-            for entry in items {
-                let offset = entry.date.timeIntervalSince(range.start)
-                let idx = min(trendBuckets - 1, max(0, Int(offset / safeBucketSize)))
-                sums[idx] += entry.moodValue
-                counts[idx] += 1
-            }
-            return zip(sums, counts).map { $1 > 0 ? $0 / Double($1) : 0.5 }
-        }
-
         let calendar = Calendar.current
         return bucketMap.values
             .map { bucket -> Theme in
@@ -310,8 +294,7 @@ final class InsightsEngine {
                     moodHigh: moodHigh,
                     lowCount: lowMoods.count,
                     highCount: highMoods.count,
-                    entryIds: items.map { $0.id },
-                    trend: trendFor(items)
+                    entryIds: items.map { $0.id }
                 )
             }
             // 先按出现的"天数"排序——反复出现的人物/项目优先；tie-break 用条目总数

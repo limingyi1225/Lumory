@@ -3,7 +3,7 @@ import CoreData
 
 // MARK: - ThemeCardList
 //
-// Insights Dashboard 第二块。横向滚动卡片：主题名、出现次数、平均心情、sparkline。
+// Insights Dashboard 第二块。横向滚动卡片：主题名、出现次数、平均心情(gradient blob)。
 // 点击卡片 → 触发 onSelect，外部视图负责导航到筛选后的日记列表。
 
 struct ThemeCardList: View {
@@ -57,7 +57,7 @@ struct ThemeCardList: View {
 
     var body: some View {
         // 标题 "主题" 删除(用户决定 2026-05-12):跟"情绪故事"标题一起去掉,统一无 title 风格;
-        // 横滑卡列本身的色点 + 主题名 + sparkline 已 self-evident。VStack 外壳保留只是把
+        // 横滑卡列本身的色斑 + 主题名 + 次数已 self-evident。VStack 外壳保留只是把
         // skeleton/empty/正常态包成一个 view block,不再带 title。
         Group {
             if isLoading && themes.isEmpty {
@@ -350,12 +350,6 @@ private struct ThemeCardPreview: View {
 struct ThemeCard: View {
     let theme: InsightsEngine.Theme
 
-    /// 有足够数据点才画 sparkline —— 趋势至少要有 3 个实际写过的 bucket 才有意义。
-    private var hasMeaningfulTrend: Bool {
-        // `trend` 在无数据的 bucket 里填 0.5（中性）。至少要 3 个非中性 bucket 才展示曲线。
-        theme.count >= 3 && theme.trend.filter { abs($0 - 0.5) > 0.001 }.count >= 3
-    }
-
     /// 「混合」= 同时存在两极条目且色距足够大。两个条件都要满足:
     /// 1. lowCount/highCount 都 ≥ 1 —— 否则没东西可"分两色";
     /// 2. moodHigh - moodLow ≥ 0.22 —— 否则两极颜色太接近,不值得做对比渲染。
@@ -450,8 +444,10 @@ struct ThemeCard: View {
     var body: some View {
         // 用户决定 2026-05-12 改竖排:原"name + count 同行"+ 底部"色点 + 积极 + 64" 把 mood
         // 这件事在卡内表达了三次(gradient bg / 色点 / 数字),冗余且抢走 gradient blob 的存在
-        // 感。新布局:name 占一行,count 单独一行 caption,底部留给 sparkline(仅 trend 够时);
-        // 没 trend 就完全留白让 gradient blob 呼吸 — 卡片更"标签感"而非"成绩单"。
+        // 感。新布局:name 占一行,count 单独一行 caption,底部完全留白让 gradient blob 呼吸 —
+        // 卡片更"标签感"而非"成绩单"。
+        // (2026-05-16 删 sparkline:固定 6 bucket + 空桶填 0.5 的设计产出"假视觉密度",
+        // 3 篇日记折线却有 4 段折点,反直觉。trend 字段已从 Theme 移除。)
         VStack(alignment: .leading, spacing: 4) {
             Text(theme.name)
                 // **P2 fix (2026-05-13 superreview)**:之前硬编码 18 → 改 LumoryFonts.themeCardTitle。
@@ -464,14 +460,6 @@ struct ThemeCard: View {
                 .monospacedDigit()
 
             Spacer(minLength: 0)
-
-            // 仅 hasMeaningfulTrend 时画 sparkline(>= 3 个非中性 bucket),否则不渲染 —
-            // 让卡底部空出来给 radial gradient 收尾呼吸,而不是硬塞一条平线。
-            // wave17:30 → 24,适应 100pt 行高(28pt padding + 22 name + 4 + 14 count + 8 spacer + 24 ≈ 100)。
-            if hasMeaningfulTrend {
-                sparkline
-                    .frame(height: 24)
-            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -506,20 +494,4 @@ struct ThemeCard: View {
         )
     }
 
-    private var sparkline: some View {
-        GeometryReader { geo in
-            let values = theme.trend
-            let width = geo.size.width
-            let height = geo.size.height
-            let stepX = values.count > 1 ? width / CGFloat(values.count - 1) : width
-            Path { path in
-                for (i, value) in values.enumerated() {
-                    let x = CGFloat(i) * stepX
-                    let y = height * (1 - CGFloat(value))
-                    if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
-                }
-            }
-            .stroke(Color.moodSpectrum(value: theme.avgMood), lineWidth: 2)
-        }
-    }
 }

@@ -44,8 +44,15 @@ final class NarrativeGenerationCoordinator {
         persistence: .shared
     )
 
-    /// 正在生成的 range。卡片读这个渲染 skeleton + spark 呼吸。
+    /// 用户主动 start 在飞的 range。卡片读这个渲染 skeleton + spark 呼吸,tap / 重试按钮逻辑也只看它。
     private(set) var generating: Set<TimeRange> = []
+
+    /// 后台 `NarrativePrecomputeService` 在飞的 range(写日记后 debounce + stream 期间)。卡片
+    /// 渲染 `isStreaming` 时把它跟 `generating` 取并集,这样用户写完立刻进 Insights 就能看到
+    /// shimmer,不必等 silent precompute 走完才"突然"出结果。**只**影响视觉(skeleton + tap
+    /// 屏蔽),tap 走的 startGeneration / cancelAll 等业务路径不读它 —— 用户主动重试和后台
+    /// 预生成的 cancel 语义不同,混在一起会让 cancelAll 误伤 precompute task。
+    private(set) var precomputing: Set<TimeRange> = []
 
     /// 生成失败且无可持久化 body 的 range → 失败信息。卡片读这个渲染 streamFailedView /
     /// incompleteFooter。成功 persist(哪怕 incomplete payload)→ 清空,incomplete 状态改由
@@ -102,6 +109,18 @@ final class NarrativeGenerationCoordinator {
         tasks[range] = task
     }
 
+    /// `NarrativePrecomputeService` 把"我在替你后台预生成"信号 broadcast 给卡片用。卡片
+    /// `isStreaming` 取 `generating ∪ precomputing`,语义并到一个 UI 状态。**不**走 tasks /
+    /// streamGeneration —— precompute 的 cancel 语义归 Precompute 自己管,coordinator 只是
+    /// 信号桥。supersede / 完成时 PrecomputeService 主动调 `endPrecompute(range)` 清掉。
+    func beginPrecompute(_ range: TimeRange) {
+        precomputing.insert(range)
+    }
+
+    func endPrecompute(_ range: TimeRange) {
+        precomputing.remove(range)
+    }
+
     /// 清 AI 回顾缓存 / 删日记入口调:cancel + bump 所有在飞生成,**await 它们完整退出**后
     /// 返回 —— 跟 `NarrativePrecomputeService.cancelPendingAndBumpGeneration` 同语义,确保
     /// 调用方接着删 record 时没有在飞 task 会在删后写回。幂等(无在飞 task 直接返回)。
@@ -117,6 +136,10 @@ final class NarrativeGenerationCoordinator {
         tasks.removeAll()
         generating.removeAll()
         streamFailure.removeAll()
+        // 防 fragile contract:当前所有 cancelAll callsite 都成对调 `Precompute.cancelPendingAndBumpGeneration`
+        // (那条内部清 .month precomputing),但未来新增 callsite 忘配套调 → shimmer 残留。
+        // 兜底清,跟 generating.removeAll() 语义对齐。
+        precomputing.removeAll()
         for task in inFlight.values {
             await task.value
         }

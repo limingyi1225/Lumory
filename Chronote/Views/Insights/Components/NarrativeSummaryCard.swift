@@ -153,9 +153,16 @@ struct NarrativeSummaryCard: View {
 
     // MARK: - State predicates
 
-    /// 是否正在生成本 range 的 narrative。streaming 生命周期归 NarrativeGenerationCoordinator,
-    /// 卡片只观察 —— 切 range / 关 sheet 重开,只要 coordinator 还在生成,这里就是 true。
+    /// 视觉层 — shimmer / sparks 呼吸读这个。用户主动 ∪ 后台 precompute,让"写完日记立刻
+    /// 进 Insights"也能看到 shimmer。
     private var isStreaming: Bool {
+        coordinator.generating.contains(range) || coordinator.precomputing.contains(range)
+    }
+
+    /// 交互层 — 整卡 tap guard 读这个。**仅**用户主动 start 时屏蔽 tap(他在等自己触发的结果);
+    /// 后台 precompute 是 silent,用户不知道在跑,屏蔽 tap 会变成"卡片莫名点不动" → 不该锁 tap
+    /// 进 NarrativeDetailSheet 看旧 narrative,也不该锁"生成回顾"按钮。
+    private var blocksUserTap: Bool {
         coordinator.generating.contains(range)
     }
 
@@ -276,7 +283,7 @@ struct NarrativeSummaryCard: View {
             // 截断它;卡空白区域 tap 也走 startGeneration,跟按钮语义一致。
             // (2026-05-13 superreview:之前 `else if isIncomplete` / `else if !isIncomplete`
             // body 完全相同 + 注释跟实际行为相反,合并掉。)
-            guard !isStreaming else { return }
+            guard !blocksUserTap else { return }
             HapticManager.shared.impact(.light)
             if !displayHeadline.isEmpty, let payload = cachedNarrative {
                 detailSubject = NarrativeDetailSubject(payload: payload)
@@ -504,7 +511,7 @@ struct NarrativeSummaryCard: View {
 // 生成回顾期间的占位 — **不要再用 "正在 xxx" / "AI 在 xxx" 文字**(用户决定,2026-05-10)。
 // shimmer 占位条自带"正在加载"语义,既不打断 ambient 节奏,也不把 AI 实现细节糊到用户脸上。
 //
-// 视觉:三条圆角占位 bar,宽度递减(模拟段首长 / 段尾短的真实排版),accent tint 微弱底色 +
+// 视觉:两条圆角占位 bar,宽度递减(模拟段首长 / 段尾短的真实排版),accent tint 微弱底色 +
 // 一条对角线 highlight 从左到右慢慢扫光。sparkles 只做呼吸感,这里 shimmer 补
 // "内容在路上"的视觉信号,两者职责分明不重复。
 //
@@ -522,9 +529,8 @@ private struct NarrativeSkeletonLoader: View {
             if compact {
                 shimmerBar(widthFraction: 0.74, height: 8)
             } else {
-                // 三条不等宽 — 模拟"诗意 headline"的不规则换行节奏,而不是规整的 N 行段落。
+                // 两条不等宽 — 模拟"诗意 headline"的不规则换行节奏,而不是规整的 N 行段落。
                 shimmerBar(widthFraction: 0.92, height: 14)
-                shimmerBar(widthFraction: 0.80, height: 14)
                 shimmerBar(widthFraction: 0.64, height: 14)
             }
         }

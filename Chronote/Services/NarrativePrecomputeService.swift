@@ -50,6 +50,10 @@ actor NarrativePrecomputeService {
         refreshGeneration &+= 1
         let generation = refreshGeneration
         pendingTask?.cancel()
+        // UI 立即占位 — 不等 debounce sleep 结束。让"写完日记立刻进 Insights"能在卡片上
+        // 看到 shimmer,而不是 silent 等 60-120s 才"突然"出结果。supersede 路径靠下面的
+        // `endPrecomputingIfCurrent` generation 守卫确保旧 task 不会清掉新 task 的 shimmer。
+        await NarrativeGenerationCoordinator.shared.beginPrecompute(range)
         // (2026-05-15 superreview-4 P2)`Task { ... }` 在 actor 内调用不继承 isolation —— body
         // 里有 `Task.sleep` 跑在 task 自己的 executor 上,sleep 完成后 `await self.performRefresh`
         // 才 hop 回 actor。语义本身正确,改 `Task.detached(priority: .background)` 让"不继承
@@ -58,9 +62,18 @@ actor NarrativePrecomputeService {
         pendingTask = Task.detached(priority: .background) { [weak self, debounce] in
             guard let self else { return }
             try? await Task.sleep(for: debounce)
-            guard !Task.isCancelled else { return }
-            await self.performRefresh(for: range, generation: generation)
+            if !Task.isCancelled {
+                await self.performRefresh(for: range, generation: generation)
+            }
+            await self.endPrecomputingIfCurrent(range: range, generation: generation)
         }
+    }
+
+    /// 通知 UI 后台 precompute 已退出。supersede 时老 task 走这里 → 但新 task 已 `beginPrecompute`,
+    /// 不能让老 task 清掉新 task 的 shimmer → generation 守卫。
+    private func endPrecomputingIfCurrent(range: TimeRange, generation: Int) async {
+        guard isCurrentGeneration(generation) else { return }
+        await NarrativeGenerationCoordinator.shared.endPrecompute(range)
     }
 
     /// 当前 actor 世代号是否仍是调用方持有的世代号。stream / bg.perform 后调,确认这次 task 未被超越。
@@ -84,6 +97,9 @@ actor NarrativePrecomputeService {
         if refreshGeneration == cancelGeneration {
             pendingTask = nil
         }
+        // task 内 `endPrecomputingIfCurrent` 因 generation 被 bump 不匹配会 skip → shimmer 残留。
+        // 这里主动清(Precompute 当前只 schedule .month)。
+        await NarrativeGenerationCoordinator.shared.endPrecompute(.month)
     }
 
     /// **测试 seam** — 等当前 pending task 跑完(或被取消)。生产代码不会调。

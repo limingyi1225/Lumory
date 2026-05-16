@@ -138,9 +138,15 @@ extension OpenAIService {
             )
         } catch let urlError as URLError {
             throw DiaryImportError.network(urlError)
+        } catch let nsError as NSError where nsError.domain == "BackendError" {
+            // **by-domain 优先**(2026-05-16 superreview round 3 P2 #2):任何 `BackendErrorMapper`
+            // 出口的错误归 network,跟具体 code 解耦。未来若加 `BackendErrorMapper.someClientFault()`
+            // 返非 HTTP code(如 -1 / 999),不会绕过本 catch 进 generic `.parsingFailed`。
+            throw DiaryImportError.network(nsError)
         } catch let nsError as NSError where nsError.code >= 100 && nsError.code < 600 {
             // HTTP 状态码全部归为 network 类:401(配置错)/ 403 / 429 / 5xx 都是后端/网络维度的问题,
-            // 不是 AI 解析问题。
+            // 不是 AI 解析问题。即便 domain 不是 BackendError(legacy / 第三方 lib 抛的),HTTP
+            // code 区段命中也兜底归 network。
             throw DiaryImportError.network(nsError)
         } catch let nsError as NSError where nsError.domain == NSURLErrorDomain {
             throw DiaryImportError.network(nsError)

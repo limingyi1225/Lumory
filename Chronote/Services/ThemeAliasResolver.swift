@@ -346,17 +346,30 @@ final class ThemeAliasResolver: ObservableObject {
     }
 
     /// 用户点"不是" —— 写 negativePair 永久跳过这一对。
+    ///
+    /// **一次 store.update 完成**(round 3 P1 #1 修):原实现先 reject 自己 `store.update`
+    /// 写 negativePair+pending,再调 `bumpDismissCount` 内的第 2 次 `store.update` 写 coolUntil
+    /// 来命中 7d 冷却。第 3 次连续 reject 触发**双 rebuildIndex + 双 save**,跟 ThemeAliasStore
+    /// 文件头自陈"一次业务 mutation 一次 save"契约自相矛盾,且第 2 次 rebuildIndex 是冗余
+    /// (coolUntil 不影响 alias index)。改成 `coolUntilForBumpedDismiss()` 纯返新 cooling Date?
+    /// (`nil` = 阈值未到不改),reject 在自己的闭包内合并写。
     func reject(_ suggestion: PendingSuggestion) {
         let pairKey = ThemeAliasStore.pairKey(
             suggestion.newTag.lowercased(),
             suggestion.canonicalGuess.lowercased()
         )
+        let newCoolUntil = coolUntilForBumpedDismiss()  // pure: bumps counter + 返新 coolUntil 或 nil
         objectWillChange.send()
         store.update { state in
             state.negativePairs.insert(pairKey)
             state.pending.removeAll { $0.id == suggestion.id }
+            if let newCoolUntil {
+                state.coolUntil = newCoolUntil
+            }
         }
-        bumpDismissCount()
+        if newCoolUntil != nil {
+            scheduleCoolUntilExpiry()
+        }
     }
 
     // (2026-05-15 megareview OPT-MID-1)`snooze(_:)` 已删 — grep 全仓 0 caller。
@@ -576,7 +589,14 @@ final class ThemeAliasResolver: ObservableObject {
         // **invariant**:`indexSnapshot` 在 await 之**后**抓(此时拿到最新 alias map),
         // 从这行到下面 `store.update` 入口之间**无 await hop**,MainActor 上是连续的 —— 因此
         // `idsToRemove` 计算用的 active set 和实际 mutation 的 store.pending 一致。
-        // **未来如在 dry-run 中间引入新的 await,本块需要重新审 freshness**(2026-05-16 superreview P2 #11)。
+        //
+        // **跨 await 的隐式契约**(round 3 P2 #5 补注释):`beforeIDs` 在 await **前**抓,
+        // 期间用户若在 management page 调 `confirm()` 接受了一条 pending,该 id 仍在 beforeIDs
+        // 里但已不在 store.pending 中 → 下面 compactMap-by-id 自然过滤掉(返 nil),无害。
+        // 反过来若期间 enqueue 新 pending,新 id 不在 beforeIDs 里 → 也被 compactMap 过滤
+        // (active set 不包它也无所谓),新加的 pending 一律保留。这条不变量就是 race-safe 的核心。
+        //
+        // **未来如在 dry-run 中间引入新的 await,本块需要重新审 freshness**(2026-05-16 round 1 P2)。
         let indexSnapshot = store.snapshotIndex()
         var active = rawActiveLabels
         for raw in rawActiveLabels {
@@ -637,16 +657,16 @@ final class ThemeAliasResolver: ObservableObject {
 
     // MARK: - Bookkeeping (cool-down + dismiss counter)
 
-    private func bumpDismissCount() {
+    /// **pure helper**:bump `sessionDismissCount` 并在命中 `snoozeThreshold` 时返新 coolUntil 值,
+    /// 让 caller 在自己的 `store.update` 闭包内合并写 — 一次业务 mutation 一次 save(round 3 P1 #1)。
+    /// 返 nil = 阈值未到,coolUntil 不变。
+    /// 副作用:**改 `sessionDismissCount`**(Resolver 自身字段,不在 store 里)。这是有意 —— counter
+    /// 是 UI 层语义,不需要持久化。
+    private func coolUntilForBumpedDismiss() -> Date? {
         sessionDismissCount += 1
-        if sessionDismissCount >= snoozeThreshold {
-            objectWillChange.send()
-            store.update { state in
-                state.coolUntil = Date().addingTimeInterval(coolDuration)
-            }
-            sessionDismissCount = 0
-            scheduleCoolUntilExpiry()
-        }
+        guard sessionDismissCount >= snoozeThreshold else { return nil }
+        sessionDismissCount = 0
+        return Date().addingTimeInterval(coolDuration)
     }
 
     /// coolUntil 变化时调:取消旧 timer,若 coolUntil 在未来则起 one-shot timer 在到期点

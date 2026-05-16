@@ -94,7 +94,13 @@ final class MockURLProtocol: URLProtocol {
         defer { buffer.deallocate() }
         while stream.hasBytesAvailable {
             let read = stream.read(buffer, maxLength: bufferSize)
-            if read <= 0 { break }
+            if read < 0 {
+                // stream error 与 EOF 同处理会让测试 silently 拿到 truncated body。
+                // 返 nil 让 recordedRequests 显式标记"capture 失败",assertion 会立刻 fail。
+                // (2026-05-16 superreview round 3 P2 #3 修)
+                return nil
+            }
+            if read == 0 { break }  // EOF
             data.append(buffer, count: read)
         }
         return data

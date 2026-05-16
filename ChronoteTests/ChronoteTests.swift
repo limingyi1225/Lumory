@@ -3261,6 +3261,23 @@ struct ThemeAliasStoreCollateralLabelsTests {
         #expect(resolver.collateralLabels(forMerging: "宝贝", into: "Abby") == [])
     }
 
+    /// (e) target 是裸标签(不在 reverse index) → resolvedTargetLower fallback 到 targetTrim.lowercased。
+    /// 验 line 177 的 `aliasToCanonical[targetLower] ?? targetTrim` 兜底分支(round 3 P2 #4 补)。
+    /// 之前 4 个 case 都没让 target 落进这个 fallback 路径。
+    ///
+    /// 构造:source = Abby(canonical with aliases),target = "陌生词"(从未见过的裸标签)
+    /// 期望:resolvedTargetLower = "陌生词"(fallback) ≠ "abby"(source canonical)→ 进入 collateral 收集
+    /// → 返非空 [Abby group 全部 aliases](source 是 canonical 时不入自己,只入 aliases)
+    @Test func targetIsBareLabel_resolvedFallsBackToTrimmed() {
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let sugg = PendingSuggestion(newTag: "宝贝", canonicalGuess: "Abby", confidence: .high, source: .scan)
+        _ = resolver.enqueue(sugg); resolver.confirm(sugg, canonical: "Abby")
+
+        let collateral = resolver.collateralLabels(forMerging: "Abby", into: "陌生词")
+        #expect(Set(collateral) == Set(["宝贝"]),
+                "target 是未知裸标签时,fallback 到 targetTrim.lowercased(),collateral 应是 source group 的 aliases")
+    }
+
     /// (d) target 是 alias → 用 resolved canonical 比对,正确识别已在同组。
     /// 这条**真正**走 ThemeAliasStore.swift:177-180 的 `resolvedTargetLower == sourceCanonical.lowercased()` 早返路径
     /// (round 2 P1 #1 修正:之前用裸标签 source 会在 line 179 sourceCanonical guard 早返,

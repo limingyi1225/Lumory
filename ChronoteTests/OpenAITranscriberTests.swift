@@ -2,18 +2,23 @@
 //  OpenAITranscriberTests.swift
 //  ChronoteTests
 //
-//  Tests for `OpenAITranscriber.prepareUpload`:
+//  Tests for `OpenAITranscriber.prepareUpload`(本地路径):
 //   - 25MB 阈值 → throws `.audioTooLarge`
 //   - 文件不存在 → throws `.audioReadFailed`
 //   - 空文件(0 bytes) → throws `.audioReadFailed`
 //   - 正常 m4a → 返 multipart body + Lumory- 前缀 boundary + audio/mp4 mime
 //
-//  **不测**:网络路径(`transcribeAudio` 调真 OpenAI 后端,需要 URLProtocol mock,本批不做)。
+//  + Tests for `transcribeAudio` 网络路径(2026-05-16 加,leverage MockURLProtocol 基建):
+//   - 空 secret guard / 4xx 5xx 分类 / non-retryable URLError / 200 成功 wire shape /
+//     trim / 空 text 返 nil
+//   8 条新 test 锁住网络 contract,跟 OpenAIServiceImportTests 同一 mock 模式。
 //
 
 import XCTest
 @testable import Lumory
 
+@available(iOS 15.0, macOS 12.0, *)
+@MainActor
 final class OpenAITranscriberTests: XCTestCase {
 
     private var tempDir: URL!
@@ -136,5 +141,179 @@ final class OpenAITranscriberTests: XCTestCase {
         XCTAssertEqual(TranscriptionFailure.serverError(413), TranscriptionFailure.serverError(413))
         XCTAssertNotEqual(TranscriptionFailure.serverError(413), TranscriptionFailure.serverError(500))
         XCTAssertNotEqual(TranscriptionFailure.serverError(413), TranscriptionFailure.audioTooLarge)
+    }
+
+    // MARK: - Network path tests via MockURLProtocol (2026-05-16)
+    //
+    // **基建**:`OpenAITranscriber.init(session:, appSharedSecret:)` 注入 seam + MockURLProtocol
+    // 让 transcribeAudio 真发请求路径跟生产 sharedRetrySession + AppSecrets 解耦。
+    //
+    // **测试速度**:用 non-retryable 错码(HTTP 401/413/501 + URLError.cannotFindHost)避免
+    // NetworkRetryHelper 3 轮 backoff(1s+2s+4s)。HTTP 500-599 默认 retryable,只 501 是
+    // NetworkRetryHelper.swift:86 明确排除的 5xx,用 501 测 non-retryable 5xx 路径。
+    //
+    // **fixture 音频文件**:prepareUpload 只校验 file exists + size > 0 + size <= 25MB,
+    // 不验 m4a 内部结构。写几 byte 占位即可让控制流走到 URLSession。
+
+    /// 写一个最小 valid file 让 prepareUpload 过到 URLSession 阶段(本类 test fixture 共享)。
+    private func makeNetworkFixtureAudio() throws -> URL {
+        let url = tempDir.appendingPathComponent("net-fixture.m4a")
+        // 几 byte 随意内容 — prepareUpload 不读 m4a 内部结构,只看 size > 0 且 <= 25MB
+        try Data([0x00, 0x01, 0x02, 0x03]).write(to: url)
+        return url
+    }
+
+    /// (1) 注入空 `appSharedSecret` → 顶部 guard 早返 `.sharedSecretMissing`,**不打** URLSession。
+    func testTranscribe_emptySharedSecret_skipsURLSession() async throws {
+        let audioURL = try makeNetworkFixtureAudio()
+        let transcriber = OpenAITranscriber(
+            session: MockURLProtocol.makeSession(),
+            appSharedSecret: ""
+        )
+        defer { MockURLProtocol.reset() }
+        let countBefore = MockURLProtocol.recordedRequests.count
+        MockURLProtocol.requestHandler = { _ in
+            // 故意 fail-loud:guard 漏接的话会先撞这里,assertion 立刻 fail
+            throw URLError(.cannotFindHost)
+        }
+
+        let result = await transcriber.transcribeAudio(fileURL: audioURL, localeIdentifier: "en")
+        XCTAssertNil(result)
+        XCTAssertEqual(transcriber.lastFailure, .sharedSecretMissing)
+        XCTAssertEqual(MockURLProtocol.recordedRequests.count, countBefore,
+                       "guard 应在 URLSession 前抛,不该有 mock 请求被记录")
+    }
+
+    /// (2) HTTP 401(non-retryable) → `.serverError(401)`,1 个请求。
+    func testTranscribe_http401_serverError() async throws {
+        try await assertNetworkStatusServerError(401)
+    }
+
+    /// (3) HTTP 413(non-retryable) → `.serverError(413)`,1 个请求。
+    func testTranscribe_http413_serverError() async throws {
+        try await assertNetworkStatusServerError(413)
+    }
+
+    /// (4) HTTP 501(non-retryable;NetworkRetryHelper 唯一明确排除的 5xx) → `.serverError(501)`,1 个请求。
+    /// 其他 500-599 默认 retryable,会跑 3 次 + 1s+2s+4s backoff = 测试 7s,违反"高 ROI 快测试"原则。
+    func testTranscribe_http501_serverError_nonRetryable() async throws {
+        try await assertNetworkStatusServerError(501)
+    }
+
+    /// (5) `URLError(.cannotFindHost)`(non-retryable URLError) → `.networkFailed`,1 个请求。
+    func testTranscribe_urlError_networkFailed() async throws {
+        let audioURL = try makeNetworkFixtureAudio()
+        let transcriber = OpenAITranscriber(
+            session: MockURLProtocol.makeSession(),
+            appSharedSecret: "test-secret"
+        )
+        defer { MockURLProtocol.reset() }
+        MockURLProtocol.requestHandler = { _ in throw URLError(.cannotFindHost) }
+
+        let result = await transcriber.transcribeAudio(fileURL: audioURL, localeIdentifier: "en")
+        XCTAssertNil(result)
+        XCTAssertEqual(transcriber.lastFailure, .networkFailed)
+    }
+
+    /// (6) 200 + 完整 wire 契约 verify:返 trimmed text + 请求 POST / X-App-Secret /
+    /// Accept / Content-Type 含 multipart/form-data / body 非空。比单纯 assert 返 "hello" 高一个 量级。
+    func testTranscribe_success_returnsTrimmedTextAndLocksWireContract() async throws {
+        let audioURL = try makeNetworkFixtureAudio()
+        let transcriber = OpenAITranscriber(
+            session: MockURLProtocol.makeSession(),
+            appSharedSecret: "test-secret"
+        )
+        defer { MockURLProtocol.reset() }
+        MockURLProtocol.requestHandler = Self.successHandler(text: "  hello world  ")
+
+        let result = await transcriber.transcribeAudio(fileURL: audioURL, localeIdentifier: "en")
+        XCTAssertEqual(result, "hello world", "应 trim 前后空格")
+        XCTAssertNil(transcriber.lastFailure)
+
+        // wire shape 锁:本应发什么 header / method / body
+        XCTAssertEqual(MockURLProtocol.recordedRequests.count, 1)
+        let req = MockURLProtocol.recordedRequests[0].request
+        XCTAssertEqual(req.httpMethod, "POST")
+        XCTAssertEqual(req.value(forHTTPHeaderField: "X-App-Secret"), "test-secret")
+        XCTAssertEqual(req.value(forHTTPHeaderField: "Accept"), "application/json")
+        let contentType = req.value(forHTTPHeaderField: "Content-Type") ?? ""
+        XCTAssertTrue(contentType.contains("multipart/form-data"),
+                      "Content-Type 应是 multipart/form-data;实际 \(contentType)")
+        XCTAssertTrue(contentType.contains("boundary=Lumory-"),
+                      "boundary 应是 Lumory- 前缀;实际 \(contentType)")
+        let body = try XCTUnwrap(MockURLProtocol.recordedRequests[0].body)
+        XCTAssertGreaterThan(body.count, 0, "multipart body 应非空")
+    }
+
+    /// (7) 200 + `{"text":""}` → 返 nil(service 把空 text 转 nil),`lastFailure` 不动。
+    func testTranscribe_emptyText_returnsNil() async throws {
+        let audioURL = try makeNetworkFixtureAudio()
+        let transcriber = OpenAITranscriber(
+            session: MockURLProtocol.makeSession(),
+            appSharedSecret: "test-secret"
+        )
+        defer { MockURLProtocol.reset() }
+        MockURLProtocol.requestHandler = Self.successHandler(text: "")
+
+        let result = await transcriber.transcribeAudio(fileURL: audioURL, localeIdentifier: "en")
+        XCTAssertNil(result, "空 text 应转 nil(service line 109 isEmpty 检测)")
+        XCTAssertNil(transcriber.lastFailure, "空 text 不算失败,lastFailure 不动")
+    }
+
+    /// (8) 200 + 只有空白 → trim 后为空 → 返 nil。
+    func testTranscribe_whitespaceOnlyText_returnsNil() async throws {
+        let audioURL = try makeNetworkFixtureAudio()
+        let transcriber = OpenAITranscriber(
+            session: MockURLProtocol.makeSession(),
+            appSharedSecret: "test-secret"
+        )
+        defer { MockURLProtocol.reset() }
+        MockURLProtocol.requestHandler = Self.successHandler(text: "   \n\t  ")
+
+        let result = await transcriber.transcribeAudio(fileURL: audioURL, localeIdentifier: "en")
+        XCTAssertNil(result, "trim 后为空也应转 nil")
+        XCTAssertNil(transcriber.lastFailure)
+    }
+
+    // MARK: - Network test helpers
+
+    /// 共用断言:某 HTTP 状态码 → `.serverError(code)` + 仅 1 个请求(non-retryable 路径)。
+    private func assertNetworkStatusServerError(_ status: Int, file: StaticString = #filePath, line: UInt = #line) async throws {
+        let audioURL = try makeNetworkFixtureAudio()
+        let transcriber = OpenAITranscriber(
+            session: MockURLProtocol.makeSession(),
+            appSharedSecret: "test-secret"
+        )
+        defer { MockURLProtocol.reset() }
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil
+            )!
+            return (response, Data())
+        }
+
+        let result = await transcriber.transcribeAudio(fileURL: audioURL, localeIdentifier: "en")
+        XCTAssertNil(result, file: file, line: line)
+        XCTAssertEqual(transcriber.lastFailure, .serverError(status),
+                       "HTTP \(status) → .serverError(\(status))", file: file, line: line)
+        XCTAssertEqual(MockURLProtocol.recordedRequests.count, 1,
+                       "non-retryable \(status) 应只发 1 次请求, 不走 NetworkRetryHelper 重试",
+                       file: file, line: line)
+    }
+
+    /// 返 200 + `{"text": "<text>"}` chat completion 风格的 mock 响应。
+    /// 跟 OpenAI 实际响应字段一致:`{"text": "..."}`(line 105 `TranscriptionResponse.text`)。
+    private static func successHandler(text: String) -> @Sendable (URLRequest) throws -> (HTTPURLResponse, Data) {
+        return { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body: [String: Any] = ["text": text]
+            let data = try JSONSerialization.data(withJSONObject: body)
+            return (response, data)
+        }
     }
 }

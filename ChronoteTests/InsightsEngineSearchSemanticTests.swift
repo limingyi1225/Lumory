@@ -241,6 +241,16 @@ struct InsightsEngineSearchSemanticTests {
         func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? { nil }
     }
 
+    /// (2026-05-15 superreview-4 P2)守卫触发机制说明:`InsightsEngine.cosineSimilarity`
+    /// 在 lhs.count != rhs.count 时返 0(见 `ChronoteTests.mismatchedLengths_returnZero`)。
+    /// `DimMismatchAI` 返 8 维 vector,entry 存的是 16 维 → `cosineSimilarity` 全部返 0
+    /// → `abs(maxScore) < 1e-6` 守卫(`InsightsEngine.swift:446` 附近)触发 → 强制清空 ids
+    /// + 写 indexCoverage=0 让 UI 走"索引不完整"banner。
+    ///
+    /// 注意:这条 test 锁的是"dim mismatch → empty + coverage=0"业务契约,**走的路径是
+    /// cosineSimilarity 的 count-guard 短路**。如果以后有人把 cosineSimilarity 改成
+    /// "截到 min count 再算"(数学错误但能算出非零),这条 test 仍会 pass 但守卫语义已退化。
+    /// 配套对照见 `ranking_putsExactMatchFirst` 锁住 cosine 在同 dim 下正常工作。
     @Test func dimensionMismatch_returnsEmptyWithZeroCoverage() async throws {
         let persistence = PersistenceController(inMemory: true)
         let context = persistence.container.viewContext

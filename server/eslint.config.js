@@ -23,6 +23,9 @@ module.exports = [
         AbortController: 'readonly',
         FormData: 'readonly',
         Blob: 'readonly',
+        // `fetch` —— production 全 axios,但 test 文件(`rate-limit.test.js` /
+        // `transcription.test.js`)用 Node 内置 fetch 驱动 HTTP。删这一行会让 npm run lint
+        // 在 test 文件里报 3 个 no-undef(2026-05-15 codex review 抓住了我误删)。
         fetch: 'readonly',
       },
     },

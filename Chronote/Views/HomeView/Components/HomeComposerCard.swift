@@ -424,6 +424,17 @@ struct HomeComposerCard: View {
         .accessibilityLabel(recorder.isRecording
             ? NSLocalizedString("停止录音", comment: "Stop recording")
             : NSLocalizedString("开始录音", comment: "Start recording"))
+        // (2026-05-15 superreview-4 P2)VoiceOver 用户在 "disabled 但仍可 tap(显示 toast)"
+        // 状态听到 "开始录音" 然后激活 → 没反应(toast 不会被朗读) → 以为按钮坏了。
+        // hint 是 a11y 提示用户"为什么 disable",VoiceOver 紧跟 label 之后朗读。
+        .accessibilityHint({
+            if recordingVM.audioRecordings.count >= 1 && !recorder.isRecording {
+                return NSLocalizedString("已有录音,删除当前录音才能重录", comment: "Recording slot occupied")
+            } else if recordingVM.isTranscribing && !recorder.isRecording {
+                return NSLocalizedString("转写还在进行,稍后再录", comment: "Transcription in flight")
+            }
+            return ""
+        }())
         .accessibilityIdentifier("home.keyboard.mic")
 
         recordingTimerInline

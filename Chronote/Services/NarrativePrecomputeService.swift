@@ -50,7 +50,12 @@ actor NarrativePrecomputeService {
         refreshGeneration &+= 1
         let generation = refreshGeneration
         pendingTask?.cancel()
-        pendingTask = Task { [weak self, debounce] in
+        // (2026-05-15 superreview-4 P2)`Task { ... }` 在 actor 内调用不继承 isolation —— body
+        // 里有 `Task.sleep` 跑在 task 自己的 executor 上,sleep 完成后 `await self.performRefresh`
+        // 才 hop 回 actor。语义本身正确,改 `Task.detached(priority: .background)` 让"不继承
+        // isolation + 后台优先级"两层意图都明确:debounce sleep 不抢主线程优先级,reader 也不
+        // 会误以为这是 structured concurrency 的子任务。
+        pendingTask = Task.detached(priority: .background) { [weak self, debounce] in
             guard let self else { return }
             try? await Task.sleep(for: debounce)
             guard !Task.isCancelled else { return }

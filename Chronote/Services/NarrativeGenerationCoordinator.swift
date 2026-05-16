@@ -138,8 +138,11 @@ final class NarrativeGenerationCoordinator {
     ) async {
         // wave15 idiom — 累 rawOutput,done 后 NarrativeStreamSplitter 一次 split。
         // `.chunk` / `.truncated` 状态机抽进 `NarrativeStreamAccumulator`,与 precompute 共享。
-        // `.failed` 在这里把 error 字符串塞 truncatedReason 继续等 done(让 UI 显失败原因),
-        // 跟 precompute 的"立刻 return + 记 backoff"语义有意识地不同。
+        // `.failed` 在这里把 error 字符串塞 accumulator 然后 `break streamLoop` 退出(它是
+        // terminal event,服务器不会再 yield .done)。后续 `persistIfNeeded` 根据 body 是否
+        // 空决定 → 挂 streamFailure(用户看失败 banner)还是写盘 + isIncomplete(部分内容)。
+        // 跟 precompute 的"立刻 return + 记 backoff"语义有意识地不同(本侧不 backoff,
+        // 让用户能在 UI 上手动 retry)。
         var acc = NarrativeStreamAccumulator()
 
         streamLoop: for await event in engine.streamNarrativeEvents(in: dateInterval) {

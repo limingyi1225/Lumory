@@ -57,9 +57,11 @@ final class StreakMilestoneService: ObservableObject {
     func evaluateAfterSave(persistence: PersistenceController, latestEntryMood: Double) {
         // Cancel-and-replace:连写多篇时只有最新一次 evaluate 算到完。
         // (2026-05-15 megareview P2-12)
+        // (2026-05-15 superreview-4 P2)`self` 是 `static let shared` singleton 永不释放,
+        // 移除原 `[weak self]` + `guard let self else { return }` —— 既是 dead code
+        // 也会误导后人以为这里有生命周期管理。跟 `OpenAIService+OneShotAI` 同 idiom。
         evaluateTask?.cancel()
-        evaluateTask = Task { [weak self] in
-            guard let self else { return }
+        evaluateTask = Task {
             let streak = await Self.computeCurrentStreak(persistence: persistence)
             // 取消的 task 不写 UI(已被新 evaluate 替换,streak 算到一半的数据无意义)。
             guard !Task.isCancelled else { return }

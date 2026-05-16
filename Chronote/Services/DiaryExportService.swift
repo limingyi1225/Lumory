@@ -214,9 +214,9 @@ class DiaryExportService {
     }
 
     /// Generates a date string suitable for file names.
+    /// (2026-05-15 superreview-4 P2)收编到 `LumoryDateFormatters.fileTimestamp`,跟 view-layer
+    /// 同 idiom(共享 cache,POSIX 锁定数字系)。
     private static func formattedDateForFileName() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HHmmss_SSS"
-        return formatter.string(from: Date())
+        LumoryDateFormatters.fileTimestamp.string(from: Date())
     }
 }

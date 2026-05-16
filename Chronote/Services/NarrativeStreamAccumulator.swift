@@ -7,7 +7,11 @@ import Foundation
 // 立刻 abort + 记 backoff(后台静默);Coordinator 把 error 塞 truncatedReason 继续等
 // `.done`(UI 要看到失败原因)。这部分留给 caller 自己写。
 
-struct NarrativeStreamAccumulator {
+// (2026-05-15 superreview-4 P2)显式 `: Sendable`。当前所有字段都是 String / Bool / String?
+// 自动满足,但未来加字段(如 metric 计数器、Date)若不是 Sendable 会沉默退化 —— 显式 conform
+// 让编译器强制 future 字段也得 Sendable,否则报错(目前 Swift 5 模式下未启用 strict,但锁住
+// 契约为下次 Swift 6 升级零成本)。
+struct NarrativeStreamAccumulator: Sendable {
     private(set) var rawOutput: String = ""
     private(set) var isIncomplete: Bool = false
     private(set) var truncatedReason: String?

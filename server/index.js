@@ -404,6 +404,35 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         signal: abortController.signal,
       });
 
+      // (2026-05-15 superreview-4 P1)`'error'` listener 必须**在 activeStreams.add 之前**挂。
+      // Node Readable 在无 'error' listener 时 emit 'error' → `process.emit('uncaughtException')`
+      // → line 799+ `shutdown('uncaughtException')` 杀进程,所有在飞 SSE 流陪葬。axios resolve 后
+      // 到挂 'error' listener 之间的任何同步代码都是 race 窗口(尤其 client 紧跟 axios resolve
+      // 同 microtick 内 abort,upstream 立即 emit error)。这里先把 listener 挂上再做 add /
+      // 'data' / 'end',保证 race 窗口为 0。
+      upstream.data.on('error', (error) => {
+        activeStreams.delete(upstream.data);
+        res.off('close', abortUpstream);
+        // (2026-05-15 superreview-2 P1)区分 client mid-stream 中断和真上游错误。
+        // 前者每次用户切后台都会触发,不该灌 ERROR log 导致 PagerDuty 阈值告警麻木。
+        // 不能写 `data: [DONE]`—— 那是 SSE 的**成功**终止帧，iOS 端的
+        // `streamChat` 看到 `[DONE]` 会 `break` 并 `return result`，把半截
+        // 流当完整响应回调给用户。硬破连接让客户端 `bytes.lines` 抛错，
+        // 被 NetworkRetryHelper 接住重试；重试到头会把错误冒到 UI。
+        if (error?.code === 'CLIENT_DISCONNECT') {
+          // sentinel 是从 'data' 分支的 `if (res.destroyed)` 制造的,
+          // 此时 res 必已 destroyed,不需要再 destroy。只 cleanup + log。
+          req.log.info('client disconnect mid-stream — cleanup ran');
+        } else {
+          req.log.error({ err: safeUpstreamError(error) }, 'upstream stream errored');
+          // 真上游错误:client 可能还活着,需要 destroy res 让客户端 SSEParser
+          // 抛错被 NetworkRetryHelper 接住。`!res.destroyed` guard 防 race。
+          if (!res.destroyed) {
+            res.destroy(error);
+          }
+        }
+      });
+
       activeStreams.add(upstream.data);
 
       let sawDone = false;
@@ -454,28 +483,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         }
         res.end();
       });
-      upstream.data.on('error', (error) => {
-        activeStreams.delete(upstream.data);
-        res.off('close', abortUpstream);
-        // (2026-05-15 superreview-2 P1)区分 client mid-stream 中断和真上游错误。
-        // 前者每次用户切后台都会触发,不该灌 ERROR log 导致 PagerDuty 阈值告警麻木。
-        // 不能写 `data: [DONE]`—— 那是 SSE 的**成功**终止帧，iOS 端的
-        // `streamChat` 看到 `[DONE]` 会 `break` 并 `return result`，把半截
-        // 流当完整响应回调给用户。硬破连接让客户端 `bytes.lines` 抛错，
-        // 被 NetworkRetryHelper 接住重试；重试到头会把错误冒到 UI。
-        if (error?.code === 'CLIENT_DISCONNECT') {
-          // sentinel 是从 line 419 的 `if (res.destroyed)` 分支制造的,
-          // 此时 res 必已 destroyed,不需要再 destroy。只 cleanup + log。
-          req.log.info('client disconnect mid-stream — cleanup ran');
-        } else {
-          req.log.error({ err: safeUpstreamError(error) }, 'upstream stream errored');
-          // 真上游错误:client 可能还活着,需要 destroy res 让客户端 SSEParser
-          // 抛错被 NetworkRetryHelper 接住。`!res.destroyed` guard 防 race。
-          if (!res.destroyed) {
-            res.destroy(error);
-          }
-        }
-      });
+      // 'error' listener 已在 activeStreams.add **之前**注册(见上)。
     } else {
       req.log.info('non-streaming request started');
 
@@ -791,8 +799,13 @@ if (require.main === module) {
   // `uncaughtException`。`uncaughtException` 仍 fatal — 那个真的可能让进程处于 corrupt 状态。
   process.on('unhandledRejection', (reason) => {
     unhandledRejectionCount += 1;
+    // (2026-05-15 superreview-4 P2)log 原始 `reason` 而不是 `safeUpstreamError(reason)`。
+    // `safeUpstreamError` 抽 name/message/code/status,**丢 stack**;给 client 的 SSE 响应
+    // 走那个抽取无可厚非(防 upstream 信息泄漏),但 unhandledRejection 是给自己 debug 看的,
+    // 而且我们改 log-only 后不重启进程,stack 是唯一能定位野 promise 来源的线索。pino 用
+    // `err` serializer 接到 Error 实例时会自动序列化 stack;非 Error reason(rare)就原样塞。
     log.error(
-      { err: safeUpstreamError(reason), count: unhandledRejectionCount },
+      { err: reason, count: unhandledRejectionCount },
       'unhandledRejection (continuing — not fatal)'
     );
   });

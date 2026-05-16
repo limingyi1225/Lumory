@@ -22,13 +22,13 @@ struct DiaryExportView: View {
     @State private var exportTask: Task<Void, Never>?
     
     private var dateRange: String {
-        guard !entries.isEmpty else { return NSLocalizedString("无日记", comment: "No entries") }
-        
-        let dates = entries.compactMap { $0.date }
-        guard let oldest = dates.min(), let newest = dates.max() else {
+        // sortDescriptors 按 date desc(line 13)→ first 是最新,last 是最早,O(1) 访问。
+        // 老实现 `entries.compactMap { $0.date }.min/max` 会 fault 整张表进 row cache,
+        // 跟同一 patch 加的 `fetchBatchSize: 100` 直接对冲(优化空转)。
+        guard let newest = entries.first?.date,
+              let oldest = entries.last?.date else {
             return NSLocalizedString("无日记", comment: "No entries")
         }
-        
         let formatter = LumoryDateFormatters.mediumDate
         return "\(formatter.string(from: oldest)) - \(formatter.string(from: newest))"
     }

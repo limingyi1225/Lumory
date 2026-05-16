@@ -143,11 +143,9 @@ struct NetworkRetryHelper {
         if let seconds = TimeInterval(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
             return max(seconds, 0)
         }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
-        if let date = formatter.date(from: raw) {
+        // (2026-05-15 superreview-4 P2)收编到 `LumoryDateFormatters.httpDate` —— RFC 7231
+        // HTTP-date 是 well-known 标准,集中维护避免散落定义。POSIX + UTC + 格式都跟原一致。
+        if let date = LumoryDateFormatters.httpDate.date(from: raw) {
             return max(date.timeIntervalSinceNow, 0)
         }
         return nil

@@ -39,6 +39,27 @@ function close(server) {
   });
 }
 
+// Poll /health until predicate(body) is true or timeout. Replaces brittle
+// `setTimeout(150)` waits — those depend on CI scheduler luck; this one
+// loops fast and only spends the wall-clock time it actually needs.
+async function pollHealth(
+  server,
+  predicate,
+  { timeoutMs = 1000, intervalMs = 25, label = 'pollHealth' } = {}
+) {
+  const deadline = Date.now() + timeoutMs;
+  let lastBody = null;
+  while (Date.now() < deadline) {
+    const { body } = await getJSON(server, '/health');
+    lastBody = body;
+    if (predicate(body)) return body;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(
+    `${label} — predicate never satisfied within ${timeoutMs}ms; last /health body: ${JSON.stringify(lastBody)}`
+  );
+}
+
 // GET helper — collects status + body, no rejection on non-2xx.
 function getJSON(server, path, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -207,7 +228,7 @@ test('chat_streamingUpstreamError_destroysClientSocketWithoutSendingDone', async
   t.after(() => close(server));
 
   const { port } = server.address();
-  const { body } = await runStreamingChat({
+  const { body, complete } = await runStreamingChat({
     port,
     xff: '10.60.10.4',
     install: 'a7d9673d-eba6-4cf8-a209-cc87f4f7cbba',
@@ -232,6 +253,26 @@ test('chat_streamingUpstreamError_destroysClientSocketWithoutSendingDone', async
     true,
     'expected partial frame "hel" to reach client before destroy'
   );
+  // (2026-05-15 superreview-4 P2)Symmetry with the "ended without DONE"
+  // test below — the upstream-error path must also destroy the socket
+  // (`complete=false`), not cleanly end. Otherwise the client treats a
+  // truncated stream as a clean close.
+  assert.equal(
+    complete,
+    false,
+    'upstream error must leave response incomplete (socket destroyed, not res.end)'
+  );
+
+  // (2026-05-15 superreview-4 P1#4)Regression test for round-2 P1
+  // `activeStreams` leak fix. The `.on('error')` handler must call
+  // `activeStreams.delete(upstream.data)` on the **upstream error** path,
+  // not just the client-disconnect path. Without this assertion a future
+  // refactor that drops the delete (or reorders 'error' listener after
+  // add) would silently regress.
+  await pollHealth(server, (b) => b?.activeStreams === 0, {
+    timeoutMs: 1000,
+    label: 'upstream error path must release activeStreams',
+  });
 });
 
 test('chat_clientDisconnectMidStream_releasesActiveStreamsReference', async (t) => {
@@ -320,19 +361,14 @@ test('chat_clientDisconnectMidStream_releasesActiveStreamsReference', async (t) 
     setTimeout(() => reject(new Error('client-abort test timeout')), 3000).unref();
   });
 
-  // Give the server's error/cleanup handlers a few ticks to run after the
-  // client destroy + next upstream chunk.
-  await new Promise((r) => setTimeout(r, 150));
-
   // Critical invariant: activeStreams must NOT retain the reference.
   // /health exposes the counter so we can observe it without poking internals.
-  const { status, body } = await getJSON(server, '/health');
-  assert.equal(status, 200);
-  assert.equal(
-    body?.activeStreams,
-    0,
-    `activeStreams must be 0 after client disconnect, got ${body?.activeStreams}`
-  );
+  // (2026-05-15 superreview-4 P2)`setTimeout(150)` 旧实现在慢 CI 上不一定够;
+  // 改 polling 既稳又只花真正需要的 wall-clock。
+  await pollHealth(server, (b) => b?.activeStreams === 0, {
+    timeoutMs: 1000,
+    label: 'client disconnect path must release activeStreams',
+  });
 });
 
 test('chat_streamingUpstreamEndsWithoutDone_destroysClientSocket', async (t) => {

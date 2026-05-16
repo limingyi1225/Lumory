@@ -61,6 +61,22 @@ struct NarrativeStreamAccumulatorTests {
         #expect(acc.isIncomplete == true)
     }
 
+    /// (2026-05-15 superreview-4 P2)Emoji case —— 锁住 `appendChunk` 的 cap 单位语义
+    /// 是 `String.count`(grapheme cluster),不是 `utf8.count` / `unicodeScalars.count`。
+    /// 单字节 ASCII("a")测试这一项凑巧三种实现都过,emoji(每个 grapheme 占 4 UTF-8 字节)
+    /// 才能真正分辨。如果以后有人把 cap 改成 byte-based,这条 test 会立刻 fail。
+    @Test func appendChunk_overflowsCap_emojiUsesGraphemeUnit() {
+        var acc = NarrativeStreamAccumulator()
+        let limit = NarrativeStreamLimits.rawOutputCharacterLimit
+        // 每个 🌸 = 1 grapheme(2 UTF-16 / 4 UTF-8)。送 limit+10 个 grapheme。
+        let overflow = String(repeating: "🌸", count: limit + 10)
+        let didCap = acc.appendChunk(overflow)
+        #expect(didCap == true)
+        #expect(acc.rawOutput.count == limit, "cap 单位必须是 grapheme,实际 count=\(acc.rawOutput.count) limit=\(limit)")
+        #expect(acc.isIncomplete == true)
+        #expect(acc.truncatedReason == NarrativeStreamLimits.localTruncationReason)
+    }
+
     @Test func appendChunk_emptyString_isNoop() {
         var acc = NarrativeStreamAccumulator()
         let didCap = acc.appendChunk("")

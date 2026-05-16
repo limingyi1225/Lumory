@@ -87,6 +87,36 @@ enum LumoryDateFormatters {
         return f
     }()
 
+    /// "2026-05-03_153012_842" 文件名 timestamp — backup / export 文件名专用。
+    /// **POSIX locale 锁定**:任何 locale 下都是 ASCII 数字,跨设备文件名一致;不写入 user-visible。
+    static let fileTimestamp: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone.current
+        f.dateFormat = "yyyy-MM-dd_HHmmss_SSS"
+        return f
+    }()
+
+    /// "2026-05-03" 纯数字 ISO 日期 — **POSIX 锁定数字系**,给 LLM prompt / 服务端 / 文件名用。
+    /// 跟 `isoDate`(`Locale.current`)区分:`isoDate` 用于内部诊断(本地数字系反而 OK);
+    /// 这个 token 用于"绝对不能出现 ٢٠٢٦ 等本地数字"的场景,避免 LLM 误读 / 服务端 parse 失败。
+    static let isoDatePOSIX: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    /// RFC 7231 HTTP-date — `"Wed, 21 Oct 2015 07:28:00 GMT"`。`Retry-After` header / Date header
+    /// parse 用。**POSIX + UTC 锁死**,GMT/UTC 字符串后缀允许 z / GMT / +0000 等。
+    static let httpDate: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
+        return f
+    }()
+
     // MARK: - Language-aware accessors
     //
     // 上面的 token 走 `Locale.current`(系统);用户用 `@AppStorage("appLanguage")` 在 App 内切语言

@@ -43,7 +43,10 @@ final class CoreUserFlowsTests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5), "composer text field 未出现")
         composer.tap()
 
-        let probe = "UI Test \(Int(Date().timeIntervalSince1970))"
+        // (2026-05-15 superreview-4 P2)`Int(timeIntervalSince1970)` 是 1 秒粒度 —— 本地手动
+        // 1 秒内连续重跑会命中**上次**的 row,assertion 误绑 stale entry。UUID 前缀 8 位 ≈
+        // 2^32 空间,人手重跑不可能撞。
+        let probe = "UI Test \(UUID().uuidString.prefix(8))"
         composer.typeText(probe)
 
         // 收起键盘(否则 send 按钮可能被键盘 toolbar 挡)

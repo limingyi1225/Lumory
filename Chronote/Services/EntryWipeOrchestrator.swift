@@ -66,6 +66,11 @@ enum EntryWipeOrchestrator {
         ReminderService.shared.requestReschedule()
         PromptSuggestionEngine.shared.clearCache()
         InsightsResultCache.shared.clear()
+        // (2026-05-15 superreview-4 P2)**3 个 fire-and-forget Task 各自独立,顺序无要求,
+        // 也不共享 side-effect 依赖**。如果 future 谁要加一条新清理路径依赖前 3 条里**任何一条
+        // 的完成结果**(例:依赖 widget invalidate 后才生效),不能再加成第 4 个 fire-and-forget
+        // ── 必须把整段重新拼成有序 await 链。当前 3 条全是纯失效操作(资源释放 / cache clear),
+        // 互相之间没有 happens-before 约束,所以并行起跑无害。
         // alias 孤儿清理是后台扫,fire-and-forget — 命中率低、不阻 UI。
         // ThemeAliasResolver 是 @MainActor singleton,unstructured Task hop 到 main 跑 cleanupOrphanedPending,
         // 该函数内有自身的 fetch-failure / generation guard,不依赖 Task.isCancelled。

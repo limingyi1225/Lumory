@@ -81,15 +81,29 @@ final class AppLockServiceTests: XCTestCase {
     }
 
     /// 双重 disable 也安全 — invalidate 只被调一次(因为第二次 ivar 已 nil)。
+    /// (2026-05-15 superreview-4 P2)第二次 disable 之间塞一个新 spy 验证它确实被 invalidate。
+    /// 原版本只断言 spyA.invalidateCallCount == 1,等价于"nil-safe 不崩",
+    /// 不能区分"第二次 disable 真的处理了新 in-flight context"还是"早返 noop"。
+    /// 现在多塞 spyB,第二次 disable 必须 invalidate spyB(否则关闭中又触发了新 auth 流的清理失效)。
     func testDisable_twice_invalidatesOnlyOnce() {
         let service = AppLockService.makeForTesting(defaults: testDefaults)
-        let spy = SpyLAContext()
-        service.simulateInFlightAuthContextForTesting(spy)
+        let spyA = SpyLAContext()
+        service.simulateInFlightAuthContextForTesting(spyA)
 
         service.disable()
+        XCTAssertEqual(spyA.invalidateCallCount, 1, "first disable() must invalidate in-flight spy A")
+        XCTAssertNil(service.activeAuthContextForTesting, "first disable() must clear active ref")
+
+        // 模拟"disable 之后又因 race / 重入塞进了新的 in-flight context"。第二次 disable
+        // 必须 invalidate **spyB**,且不重复 invalidate spyA。
+        let spyB = SpyLAContext()
+        service.simulateInFlightAuthContextForTesting(spyB)
+
         service.disable()
 
-        XCTAssertEqual(spy.invalidateCallCount, 1, "second disable() should not double-invalidate (ivar already nil)")
+        XCTAssertEqual(spyA.invalidateCallCount, 1, "spy A must NOT be re-invalidated by second disable()")
+        XCTAssertEqual(spyB.invalidateCallCount, 1, "spy B (set between disables) must be invalidated by second disable()")
+        XCTAssertNil(service.activeAuthContextForTesting)
     }
 
     // MARK: - State persistence

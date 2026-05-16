@@ -357,7 +357,10 @@ Diary Entries:
     // MARK: - Helpers (file-private)
 
     private static func shortDate(_ date: Date) -> String {
-        LumoryDateFormatters.isoDate.string(from: date)
+        // (2026-05-15 superreview-4 P2)走 POSIX locale token。`isoDate` 用 `Locale.current` →
+        // 阿拉伯 / 波斯 / 缅甸数字系下渲染本地数字(٢٠٢٦-٠٥-٠٣),LLM prompt 收到非 ASCII 数字
+        // 可能误读。`isoDatePOSIX` 强制 ASCII 数字让 LLM parse 稳定。
+        LumoryDateFormatters.isoDatePOSIX.string(from: date)
     }
 
     private static func qualitativeMoodLabel(_ value: Double, isZh: Bool) -> String {

@@ -68,6 +68,10 @@ final class ThemeAliasJudgeService: ObservableObject {
     /// **P1 fix (2026-05-15 megareview)**:落 UserDefaults,App 被 jetsam kill / 用户手动 kill /
     /// 冷启动后 throttle 仍有效。原 in-memory 实现 connected sequence(午休前写一篇 → 系统 kill
     /// → 午休后写一篇)就失效,白付 OpenAI cost + 频繁 PII 上送。
+    // 故意用 `UserDefaults.standard` 不是 `AppGroup.userDefaults` —— throttle 是主 App 独占的
+    // 写日记节流,widget extension 不需要知道(widget 不会触发 judge)。跟 `ReminderService`
+    // 的 schedule 状态用 `.standard` 一致,共同遵守"widget 不需要的数据不上 App Group"。
+    // 若以后 widget extension 也要 fire judge,记得**整套**(读 + 写 + 测试 stub)切 `AppGroup.userDefaults`。
     private var lastJudgeAfterWriteAt: Date? {
         didSet {
             if let date = lastJudgeAfterWriteAt {

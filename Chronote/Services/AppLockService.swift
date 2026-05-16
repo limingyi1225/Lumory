@@ -62,7 +62,11 @@ final class AppLockService: ObservableObject {
 
     /// **Test-only**:不走 LocalAuthentication,直接 set isEnabled / isLocked。
     /// 给"已启用状态下 lockOnBackground / unlock 自动逻辑"测试用。
+    /// (2026-05-15 superreview-4 P2)bump `enableGen` 跟 real `enable()` / `disable()` 对齐 ——
+    /// 否则测试用 seam seed 出来的状态,跟在飞 auth task 的 generation guard 是错位的,
+    /// 后续如果加 race test 会踩坑(老 task 跑到 trailing 用 enableGen 比较时反而被 stale-allowed)。
     func setStateForTesting(enabled: Bool, locked: Bool) {
+        enableGen &+= 1
         isEnabled = enabled
         isLocked = locked
         defaults.set(enabled, forKey: enabledKey)
@@ -175,6 +179,11 @@ final class AppLockService: ObservableObject {
 
     private func authenticate(reason: String) async -> Bool {
         let context = LAContext()
+        // (2026-05-15 superreview-4 P2)防御性:如果上一个 in-flight context 还挂着(理论上
+        // 不该发生,正常 callsite 串行 — enable / unlock 不会重入,因为 LockScreen 期间 Settings
+        // 不可达,反之亦然),先把它 invalidate 掉关掉旧弹窗。`activeAuthContext = context` 直接
+        // 覆盖会让旧 LAContext 失去引用永远不被释放,旧的 Face ID 弹窗如果还在屏上会卡死。
+        activeAuthContext?.invalidate()
         // 把 context 提到 ivar,disable() 能 invalidate 关掉弹窗。(P1-3,2026-05-15 megareview)
         activeAuthContext = context
         let result: Bool = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in

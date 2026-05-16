@@ -875,6 +875,10 @@ struct HomeView: View {
         if inputVM.isSending {
             Log.info("[HomeView] processStoppedRecording: send in progress → discarding interrupted recording \(fileName)", category: .ui)
             deleteAudioFileFromDocuments(fileName)
+            // (2026-05-15 superreview-4 P2)early-return 也要清前一次的转写错误。
+            // 用户极端链路:转写失败 banner 还挂着 → 立刻发送一条 → 发送中途录音中断 →
+            // banner 残留指向已经不存在的录音,用户疑惑"我没在转写为啥还显示错误"。
+            recordingVM.transcriptionError = nil
             return
         }
 

@@ -17,8 +17,8 @@ import Foundation
 extension URLRequest {
     /// 给请求添加后端鉴权 + install id header。
     /// **不**改 `Content-Type` / `Accept` —— 调用方自己 set。
-    mutating func applyBackendAuth() {
-        setValue(AppSecrets.appSharedSecret, forHTTPHeaderField: "X-App-Secret")
+    mutating func applyBackendAuth(sharedSecret: String = AppSecrets.appSharedSecret) {
+        setValue(sharedSecret, forHTTPHeaderField: "X-App-Secret")
         setValue(InstallIdentity.current, forHTTPHeaderField: "X-Install-Id")
     }
 }

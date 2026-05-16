@@ -245,14 +245,14 @@ extension OpenAIService {
             Log.error("[OpenAIService] Invalid embeddings URL", category: .ai)
             return nil
         }
-        guard !AppSecrets.appSharedSecret.isEmpty else {
+        guard !appSharedSecret.isEmpty else {
             Log.error("[OpenAIService] Backend shared secret not configured", category: .ai)
             return nil
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.applyBackendAuth()
+        request.applyBackendAuth(sharedSecret: appSharedSecret)
         let body = RequestBody(model: "text-embedding-3-small", input: payload)
         // (2026-05-15 megareview P2-2)同 `chat()`,显式 catch 让 encode 失败可诊断。
         do {

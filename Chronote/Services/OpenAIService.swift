@@ -27,13 +27,17 @@ final class OpenAIService: AIServiceProtocol {
     /// 跨 extension 共用,因此 internal(同模块可见)。`OpenAIService+Streaming` / `+OneShotAI` /
     /// `chat` / `chatThrowing` 全部走 `self.session`,统一一个 URLSession 实例。
     let session: URLSession
+    /// 后端共享密钥注入点。生产走 `AppSecrets.appSharedSecret`;URLProtocol-mocked 单测可传
+    /// dummy secret,避免 clean checkout / CI 因缺少 gitignored xcconfig 而跳过测试。
+    let appSharedSecret: String
 
-    init(session: URLSession = .sharedRetrySession) {
+    init(session: URLSession = .sharedRetrySession, appSharedSecret: String = AppSecrets.appSharedSecret) {
         guard let backendURL = URL(string: Self.backendEndpoint) else {
             preconditionFailure("[OpenAIService] Invalid backend endpoint: \(Self.backendEndpoint)")
         }
         self.backendURL = backendURL
         self.session = session
+        self.appSharedSecret = appSharedSecret
     }
 
     // MARK: - Public — 这一节的公开 API 已按职责拆分到子目录:
@@ -87,7 +91,7 @@ final class OpenAIService: AIServiceProtocol {
             maxCompletionTokens: maxTokens > 0 ? maxTokens : nil
         )
 
-        guard !AppSecrets.appSharedSecret.isEmpty else {
+        guard !appSharedSecret.isEmpty else {
             Log.error("[OpenAIService] Backend shared secret not configured", category: .ai)
             return nil
         }
@@ -97,7 +101,7 @@ final class OpenAIService: AIServiceProtocol {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.applyBackendAuth()
+        request.applyBackendAuth(sharedSecret: appSharedSecret)
         // (2026-05-15 megareview P2-2)`try?` 改 `do/try/catch` —— 原 `try?` 编码失败时 httpBody 是 nil,
         // 服务器返 400 messages-array-missing,被 BackendErrorMapper 当成普通 400 不重试,客户端只看到
         // "no content" 模糊错。理论上 Codable 固定 struct 几乎不会失败,但显式 catch 让真失败可诊断。
@@ -186,10 +190,10 @@ final class OpenAIService: AIServiceProtocol {
             let choices: [Choice]
         }
 
-        // Reviewer 二轮指出:`AppSecrets.appSharedSecret` 注入失败(xcconfig 没挂、Info.plist
-        // 没填)时,客户端会把空 header 送上去,后端 timing-safe compare 直接判 401。我们在这里
+        // Reviewer 二轮指出:shared secret 注入失败(xcconfig 没挂、Info.plist 没填)
+        // 时,客户端会把空 header 送上去,后端 timing-safe compare 直接判 401。我们在这里
         // 提前拦下来,转成 `network` 错误带明确说明,而不是让用户看到"AI 未返回内容"误导提示。
-        guard !AppSecrets.appSharedSecret.isEmpty else {
+        guard !appSharedSecret.isEmpty else {
             throw NSError(
                 domain: "OpenAIService",
                 code: 401,
@@ -207,7 +211,7 @@ final class OpenAIService: AIServiceProtocol {
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.applyBackendAuth()
+        request.applyBackendAuth(sharedSecret: appSharedSecret)
         request.httpBody = try jsonEncoder.encode(requestBody)
 
         return try await NetworkRetryHelper.performWithRetry {

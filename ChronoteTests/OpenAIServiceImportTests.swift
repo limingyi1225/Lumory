@@ -17,9 +17,10 @@
 //   - 200 + 含无效日期条目 → 该条 filter 掉
 //   - 200 + 空数组 → 合法成功,返 []
 //
-//  **AppSecrets 依赖**:`chatThrowing` 先 guard `appSharedSecret.isEmpty`。AppSecrets 走
-//  Bundle.main → 测试 host 同享 Info.plist,本地 Lumory.local.xcconfig 设置正常时即非空。
-//  缺失则 XCTSkip(避免 false 错断)。
+//  **AppSecrets 解耦**:`chatThrowing` 头部 guard `appSharedSecret.isEmpty` 会在我们的
+//  mock URLSession 前直接抛 401。原来用 `XCTSkipIf` 跳过整个 suite —— codex review P2 指出
+//  这让干净 clone / CI 上跑 0 条回归测试也能"green"。现在通过 `OpenAIService` init 注入
+//  dummy secret,不改全局 AppSecrets,任意环境都能跑这套 mock 测试。
 //
 //  **网络重试 vs 测试速度**:用 non-retryable 错误(HTTP 401 / URLError.badServerResponse)
 //  让测试快速失败,而非走 1s+2s+4s exponential backoff。
@@ -34,11 +35,9 @@ final class OpenAIServiceImportTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
-        try XCTSkipIf(
-            AppSecrets.appSharedSecret.isEmpty,
-            "Skipping: APP_SHARED_SECRET not configured (Lumory.local.xcconfig missing). See AppSecrets.swift."
-        )
-        service = OpenAIService(session: MockURLProtocol.makeSession())
+        // Codex P2 fix: 注入 dummy secret 而非 XCTSkipIf 真值缺失。让 MockURLProtocol 路径
+        // 跟 Lumory.local.xcconfig 是否存在解耦,fresh clone / CI 也能跑。
+        service = OpenAIService(session: MockURLProtocol.makeSession(), appSharedSecret: "test-secret")
     }
 
     override func tearDown() async throws {
@@ -89,6 +88,44 @@ final class OpenAIServiceImportTests: XCTestCase {
         XCTAssertEqual(parsed?["client_year"] as? Int, 2026)
     }
 
+    /// Codex P1 fix regression test: client_today / client_year **必须同时区**。
+    ///
+    /// 旧实现 client_today 走 `ISO8601DateFormatter`(UTC default),client_year 走 caller calendar。
+    /// 纽约用户 5/15 晚上 23:00(= UTC 03:00 5/16):
+    ///   - 旧:client_today="2026-05-16" (UTC) + client_year=2026
+    ///   - 一条无年份 "5/16" 日记 → prompt 规则"日期晚于 client_today 用 year-1" → 误判为本年(应为去年)
+    /// 修后两个字段都按 caller calendar.timeZone:client_today="2026-05-15" + client_year=2026,逻辑一致。
+    func test_encodeImportPayload_nonUTCBoundary_usesLocalDate() throws {
+        // 纽约 2026-05-15 23:00 EDT = UTC 2026-05-16 03:00
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/New_York")!
+        let nyEvening = cal.date(from: DateComponents(
+            year: 2026, month: 5, day: 15, hour: 23, minute: 0
+        ))!
+
+        let json = try OpenAIService.encodeImportPayload(
+            rawText: "x", today: nyEvening, calendar: cal
+        )
+        let parsed = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        XCTAssertEqual(parsed?["client_today"] as? String, "2026-05-15",
+                       "本地日期必须用 calendar.timeZone,不能用 UTC")
+        XCTAssertEqual(parsed?["client_year"] as? Int, 2026)
+    }
+
+    func test_encodeImportPayload_nonGregorianCalendarStillUsesGregorianISOYear() throws {
+        var cal = Calendar(identifier: .buddhist)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let date = ISO8601DateFormatter().date(from: "2026-05-16T12:00:00Z")!
+
+        let json = try OpenAIService.encodeImportPayload(
+            rawText: "x", today: date, calendar: cal
+        )
+        let parsed = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        XCTAssertEqual(parsed?["client_today"] as? String, "2026-05-16")
+        XCTAssertEqual(parsed?["client_year"] as? Int, 2026,
+                       "Import payload must stay Gregorian/ISO even when the user's system calendar is non-Gregorian.")
+    }
+
     func test_encodeImportPayload_escapesDelimitersAsDefenseInDepth() throws {
         let json = try OpenAIService.encodeImportPayload(
             rawText: ">>>attack<<< normal text",
@@ -107,19 +144,18 @@ final class OpenAIServiceImportTests: XCTestCase {
         _ = try await service.parseImportedDiaries(rawText: "用户输入 with >>>delim<<<")
 
         XCTAssertEqual(MockURLProtocol.recordedRequests.count, 1)
+        let request = MockURLProtocol.recordedRequests[0].request
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-App-Secret"), "test-secret")
+
         let body = try XCTUnwrap(MockURLProtocol.recordedRequests[0].body, "请求 body 应非空")
         let outer = try JSONSerialization.jsonObject(with: body) as? [String: Any]
         let messages = try XCTUnwrap(outer?["messages"] as? [[String: Any]])
         let content = try XCTUnwrap(messages.first?["content"] as? String)
+        let payload = try inputPayload(fromPrompt: content)
 
-        // prompt 文本里要出现真正的 payload 字段(用唯一的 raw 输入子串锚定,排除文档段误命中)
-        XCTAssertTrue(content.contains("用户输入 with"),
-                      "prompt 应包含用户原文(已 escape 形式)")
-        XCTAssertFalse(content.contains(">>>delim<<<"),
-                       "delimiter 必须被 escape")
-        XCTAssertTrue(content.contains("\"raw_text\""))
-        XCTAssertTrue(content.contains("\"client_today\""))
-        XCTAssertTrue(content.contains("\"client_year\""))
+        XCTAssertEqual(payload["raw_text"] as? String, "用户输入 with \u{203A}\u{203A}\u{203A}delim\u{2039}\u{2039}\u{2039}")
+        XCTAssertNotNil(payload["client_today"] as? String)
+        XCTAssertNotNil(payload["client_year"] as? Int)
     }
 
     // MARK: - 网络错误路径
@@ -223,13 +259,31 @@ final class OpenAIServiceImportTests: XCTestCase {
                 httpVersion: nil,
                 headerFields: ["Content-Type": "application/json"]
             )!
-            let escaped = content
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-                .replacingOccurrences(of: "\n", with: "\\n")
-            let body = #"{"choices":[{"message":{"role":"assistant","content":"\#(escaped)"}}]}"#
-            return (response, Data(body.utf8))
+            let body: [String: Any] = [
+                "choices": [
+                    [
+                        "message": [
+                            "role": "assistant",
+                            "content": content
+                        ]
+                    ]
+                ]
+            ]
+            return (response, try JSONSerialization.data(withJSONObject: body))
         }
+    }
+
+    private func inputPayload(fromPrompt prompt: String,
+                              file: StaticString = #filePath,
+                              line: UInt = #line) throws -> [String: Any] {
+        guard let markerRange = prompt.range(of: "# Input\n\n") else {
+            XCTFail("Prompt should contain # Input marker", file: file, line: line)
+            return [:]
+        }
+        let json = String(prompt[markerRange.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let object = try JSONSerialization.jsonObject(with: Data(json.utf8))
+        return try XCTUnwrap(object as? [String: Any], "Input payload should be a JSON object", file: file, line: line)
     }
 
     private func assertThrowsNetwork(rawText: String, file: StaticString = #filePath, line: UInt = #line) async {

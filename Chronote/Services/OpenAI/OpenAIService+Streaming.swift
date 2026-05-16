@@ -97,7 +97,7 @@ Diary Entries:
             max_completion_tokens: 1500
         )
 
-        guard !AppSecrets.appSharedSecret.isEmpty else {
+        guard !appSharedSecret.isEmpty else {
             await MainActor.run { onEvent(.failed(BackendErrorMapper.missingSharedSecretError())) }
             return
         }
@@ -111,7 +111,7 @@ Diary Entries:
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.applyBackendAuth()
+        request.applyBackendAuth(sharedSecret: appSharedSecret)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("keep-alive", forHTTPHeaderField: "Connection")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
@@ -423,7 +423,7 @@ Diary Entries:
                     continuation.finish()
                     return
                 }
-                guard !AppSecrets.appSharedSecret.isEmpty else {
+                guard !appSharedSecret.isEmpty else {
                     continuation.yield(.failed(BackendErrorMapper.missingSharedSecretError()))
                     continuation.finish()
                     return
@@ -432,7 +432,7 @@ Diary Entries:
                 request.httpMethod = "POST"
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-                request.applyBackendAuth()
+                request.applyBackendAuth(sharedSecret: appSharedSecret)
                 // (2026-05-15 megareview P2-2)同 generateReportFromData,显式 catch encode 失败。
                 do {
                     request.httpBody = try self.jsonEncoder.encode(body)

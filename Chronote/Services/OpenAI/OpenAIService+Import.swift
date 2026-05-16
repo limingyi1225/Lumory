@@ -43,16 +43,31 @@ extension OpenAIService {
     }
 
     /// 把 ImportPayload 编成 JSON 字符串内嵌进 user message。**internal** 给单测验 schema 契约。
+    ///
+    /// **client_today / client_year 必须同一套"公历 + 用户时区"**(2026-05-16 codex review P1):
+    /// 旧实现 `client_today` 走 `ISO8601DateFormatter`(默认 UTC),`client_year` 走 caller calendar
+    /// (本地),纽约用户 5/15 晚上 23:00 拿到 `client_today=2026-05-16` + `client_year=2026`,
+    /// 一条无年份 "5/16" 日记本该被分到去年(因 5/16 晚于 user 的"今天"5/15),按旧规则却被
+    /// 误判为本年。修法:用 calendar.timeZone 配置 DateFormatter,两个字段同时区。
+    ///
+    /// POSIX locale 防数字系漂移(阿拉伯/波斯/缅甸 locale 下 `Locale.current` 会渲染 `٢٠٢٦-٠٥-١٦`,
+    /// LLM 可能误读)。**不能直接用** `LumoryDateFormatters.isoDatePOSIX` —— 那是 UTC-locked,
+    /// 跟 client_year 的本地年仍会跨日期分歧。也不能照单全收非公历 `Calendar.current`
+    /// 的 identifier,否则佛历 / 和历会生成非 ISO 年份；这里只继承 caller 的 timeZone。
     static func encodeImportPayload(rawText: String, today: Date, calendar: Calendar = .current) throws -> String {
         let safe = rawText
             .replacingOccurrences(of: ">>>", with: "\u{203A}\u{203A}\u{203A}")
             .replacingOccurrences(of: "<<<", with: "\u{2039}\u{2039}\u{2039}")
 
-        // POSIX-locked ISO 防数字系漂移(见 LumoryDateFormatters)。
-        let df = ISO8601DateFormatter()
-        df.formatOptions = [.withFullDate]
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = calendar.timeZone
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.calendar = gregorian
+        df.timeZone = gregorian.timeZone
+        df.dateFormat = "yyyy-MM-dd"
         let todayStr = df.string(from: today)
-        let year = calendar.component(.year, from: today)
+        let year = gregorian.component(.year, from: today)
 
         let payload = ImportPayload(rawText: safe, clientToday: todayStr, clientYear: year)
         let encoder = JSONEncoder()

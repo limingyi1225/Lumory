@@ -85,6 +85,26 @@ struct NarrativeStreamAccumulatorTests {
         #expect(acc.isIncomplete == false)
     }
 
+    /// (round-5 D9)overflow 后再来空 chunk:state 不动,truncatedReason 仍是 cap fallback。
+    /// 防 future 优化让"空 chunk 重置 isIncomplete"等边角 bug。
+    @Test func appendChunkOverflow_thenEmptyChunk_isNoop() {
+        var acc = NarrativeStreamAccumulator()
+        let limit = NarrativeStreamLimits.rawOutputCharacterLimit
+        let overflow = String(repeating: "a", count: limit + 10)
+        _ = acc.appendChunk(overflow)
+        let stateBeforeEmpty = (
+            rawOutput: acc.rawOutput,
+            isIncomplete: acc.isIncomplete,
+            truncatedReason: acc.truncatedReason
+        )
+
+        let didCap = acc.appendChunk("")
+        #expect(didCap == false, "空 chunk 不算 cap 触发")
+        #expect(acc.rawOutput == stateBeforeEmpty.rawOutput, "空 chunk 不动 rawOutput")
+        #expect(acc.isIncomplete == stateBeforeEmpty.isIncomplete, "空 chunk 不动 isIncomplete")
+        #expect(acc.truncatedReason == stateBeforeEmpty.truncatedReason, "空 chunk 不动 truncatedReason")
+    }
+
     // MARK: - markTruncated
 
     @Test func markTruncated_normalReason_setsBothFlags() {

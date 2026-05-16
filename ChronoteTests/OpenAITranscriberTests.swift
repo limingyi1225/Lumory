@@ -56,15 +56,22 @@ final class OpenAITranscriberTests: XCTestCase {
         }
     }
 
+    /// (round-5 D3)用 sparse file(`FileHandle.truncate(atOffset:)`)造 25MB 文件 size,
+    /// 实际不占盘(APFS hole)。`prepareUpload` 内 `attributesOfItem.size` guard 走 `>` 路径
+    /// 直接 throw,根本读不到 mapped data。原版每次 test 真写 25MB+1 byte 真数据,CI 累积浪费。
+    private func makeSparseFile(at url: URL, size: UInt64) throws {
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: size)
+    }
+
     /// 文件 > 25MB → audioTooLarge
     func testPrepareUpload_overMaxBytes_throwsAudioTooLarge() throws {
         let maxBytes = OpenAITranscriber.maxFileBytesForTesting
         let oversize = tempDir.appendingPathComponent("huge.m4a")
 
-        // 写 maxBytes + 1 字节(用 0x00 填充就够,文件 IO 不关心内容)
-        // 实际场景测试这条要写 ~25MB 数据,在 CI 上稍慢但能跑。
-        let oneByteOverData = Data(repeating: 0, count: Int(maxBytes) + 1)
-        try oneByteOverData.write(to: oversize)
+        try makeSparseFile(at: oversize, size: UInt64(maxBytes) + 1)
 
         XCTAssertThrowsError(try OpenAITranscriber.prepareUploadForTesting(fileURL: oversize)) { error in
             XCTAssertEqual(error as? TranscriptionFailure, .audioTooLarge,
@@ -76,9 +83,8 @@ final class OpenAITranscriberTests: XCTestCase {
     func testPrepareUpload_exactlyMaxBytes_succeeds() throws {
         let maxBytes = OpenAITranscriber.maxFileBytesForTesting
         let atLimit = tempDir.appendingPathComponent("at-limit.m4a")
-        // 25 MB 是上限,正好等于上限应该通过。
-        let exactData = Data(repeating: 0, count: Int(maxBytes))
-        try exactData.write(to: atLimit)
+
+        try makeSparseFile(at: atLimit, size: UInt64(maxBytes))
 
         XCTAssertNoThrow(try OpenAITranscriber.prepareUploadForTesting(fileURL: atLimit),
                          "size == maxFileBytes 是 inclusive 上限,应该不抛")

@@ -149,6 +149,22 @@ const activeStreams = new Set();
 
 let unhandledRejectionCount = 0;
 
+// (round-5 D11)抽出 handler 让 test 能直接调验"counter ++ + /health 透出"契约。
+// 老 inline `process.on('unhandledRejection', (reason) => { ... })` 只在 `if (require.main === module)`
+// 内挂,test 走 `require('./index')` 不会触发 → 完全无覆盖。导出 named function 后 test 直接调。
+function recordUnhandledRejection(reason) {
+  unhandledRejectionCount += 1;
+  // (2026-05-15 superreview-4 P2)log 原始 `reason` 而不是 `safeUpstreamError(reason)`。
+  // `safeUpstreamError` 抽 name/message/code/status,**丢 stack**;给 client 的 SSE 响应
+  // 走那个抽取无可厚非(防 upstream 信息泄漏),但 unhandledRejection 是给自己 debug 看的,
+  // 而且我们改 log-only 后不重启进程,stack 是唯一能定位野 promise 来源的线索。pino 用
+  // `err` serializer 接到 Error 实例时会自动序列化 stack;非 Error reason(rare)就原样塞。
+  log.error(
+    { err: reason, count: unhandledRejectionCount },
+    'unhandledRejection (continuing — not fatal)'
+  );
+}
+
 // Shared-secret 鉴权中间件：time-safe compare 避免 timing attack 逐字节泄漏。
 // 不挂在 /health 上，方便负载均衡 / PM2 健康检查。
 function requireAppSecret(req, res, next) {
@@ -797,18 +813,7 @@ if (require.main === module) {
   // 老路径:任何 await 路径上的野 promise 拒绝 → 整个 server 重启 → 所有在飞 SSE 流被打断。
   // 代理场景下 unhandledRejection 几乎都是非致命的(下游 OpenAI 抛错没 catch 等),不应等同
   // `uncaughtException`。`uncaughtException` 仍 fatal — 那个真的可能让进程处于 corrupt 状态。
-  process.on('unhandledRejection', (reason) => {
-    unhandledRejectionCount += 1;
-    // (2026-05-15 superreview-4 P2)log 原始 `reason` 而不是 `safeUpstreamError(reason)`。
-    // `safeUpstreamError` 抽 name/message/code/status,**丢 stack**;给 client 的 SSE 响应
-    // 走那个抽取无可厚非(防 upstream 信息泄漏),但 unhandledRejection 是给自己 debug 看的,
-    // 而且我们改 log-only 后不重启进程,stack 是唯一能定位野 promise 来源的线索。pino 用
-    // `err` serializer 接到 Error 实例时会自动序列化 stack;非 Error reason(rare)就原样塞。
-    log.error(
-      { err: reason, count: unhandledRejectionCount },
-      'unhandledRejection (continuing — not fatal)'
-    );
-  });
+  process.on('unhandledRejection', recordUnhandledRejection);
   process.on('uncaughtException', (err) => {
     log.fatal({ err: safeUpstreamError(err) }, 'uncaughtException');
     shutdown('uncaughtException');
@@ -817,6 +822,7 @@ if (require.main === module) {
 
 module.exports = {
   app,
+  recordUnhandledRejection,
   countMessageContentChars,
   positiveNumberEnv,
   modelAllowlistEnv,

@@ -70,6 +70,9 @@ final class StreakMilestoneService: ObservableObject {
     }
 
     private func handleStreak(_ streak: Int, moodValue: Double) {
+        #if DEBUG
+        commitObservationsForTesting.append((streak: streak, moodValue: moodValue))
+        #endif
         guard let milestone = Self.milestoneFor(streak: streak) else { return }
         guard !celebrated.contains(milestone) else { return }
         celebrated.insert(milestone)
@@ -85,8 +88,15 @@ final class StreakMilestoneService: ObservableObject {
     /// **测试 seam** — 让单测能 inject "已庆祝过" 集合 / 重置 / 直接 evaluate。
     /// `private(set)` `celebrated` 加显式 reset/set 接口,不让 production 代码绕过 milestone 算法。
     #if DEBUG
+    /// 测试 spy:`handleStreak` 每次被调时记一条 `(streak, moodValue)`。
+    /// 用来锁住 cancel-and-replace 的真契约:被 cancel 的 task 不应跑到 handleStreak。
+    /// 老 `firstTask?.isCancelled == true` 断言是 tautology(cancel() 调过 flag 必 true,
+    /// 不证明 handleStreak 没跑)。spy 直接观察 commit 次数 + 顺序就明确。
+    var commitObservationsForTesting: [(streak: Int, moodValue: Double)] = []
+
     func resetCelebratedForTesting() {
         celebrated.removeAll()
+        commitObservationsForTesting.removeAll()
         defaults.removeObject(forKey: celebratedKey)
     }
 
@@ -94,10 +104,10 @@ final class StreakMilestoneService: ObservableObject {
         handleStreak(streak, moodValue: moodValue)
     }
 
-    /// 测试 seam:让单测能 await 当前在飞 evaluate task 完成,并通过快照 task handle 验证
-    /// cancel-and-replace 语义(连续两次 evaluateAfterSave 时第一次该被 cancel)。
-    var inFlightEvaluateTaskForTesting: Task<Void, Never>? { evaluateTask }
-
+    /// 测试 seam:让单测能 await 当前在飞 evaluate task 完成。
+    /// (老 `inFlightEvaluateTaskForTesting` 已删 — 暴露 Task ivar 让 test 用
+    /// `firstTask?.isCancelled` 锁死 implementation 策略,改世代号模式时 test 会废。
+    /// 现在用 `commitObservationsForTesting` spy 测对外可观察契约,跟实现解耦。)
     func drainEvaluateTaskForTesting() async {
         await evaluateTask?.value
     }

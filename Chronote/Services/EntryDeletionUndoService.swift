@@ -97,10 +97,16 @@ final class EntryDeletionUndoService {
     /// **Test-only**:观察 commitTask 是否还在飞 — 断言 cancel 行为。
     var commitTaskIsActiveForTesting: Bool { commitTask != nil }
     /// **Test-only**:把内部状态 reset 到 init 状态,跨 test 隔离 singleton 污染。
-    func resetForTesting() {
+    /// (round-5 D10)改 `async` + `await commitTask?.value` 等被 cancel 的 task 真正退出,
+    /// 防"上一条 commit 的 4s sleep task 在下一条 test setUp/初始 register 中途醒来" race。
+    /// `Task.sleep` 是 cooperative cancel,sleep 调用点抛 CancellationError 后 body 还要
+    /// 走 `guard !Task.isCancelled else { return }` + 主 actor hop 才退,跨 test 边界可能漏。
+    func resetForTesting() async {
+        let snapshotTask = commitTask
         commitTask?.cancel()
         commitTask = nil
         pending = nil
+        _ = await snapshotTask?.value
     }
     #endif
 

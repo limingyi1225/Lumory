@@ -2750,10 +2750,13 @@ struct StreakMilestoneTests {
         service.resetCelebratedForTesting()
     }
 
-    /// (2026-05-15 superreview P1#4-2)cancel-and-replace 契约:连写多篇时只让最新一次的
-    /// evaluateAfterSave 走到 handleStreak。第一次 task 应被 cancel,第二次 task 应正常
-    /// 跑完且 pendingMilestone 来自第二次的 moodValue。
-    @Test func evaluateAfterSave_cancelAndReplace_lastWriteWins() async throws {
+    /// (2026-05-15 superreview P1#4-2 + round-5 D2)cancel-and-replace 真契约:
+    /// 第一次 evaluate 被 cancel → handleStreak **不应被调**,只有第二次能 commit。
+    ///
+    /// 老 `firstTask?.isCancelled == true` 是 tautology(`cancel()` 调过 flag 必 true,
+    /// 不证明 handleStreak 没跑)。改用 `commitObservationsForTesting` spy 直接观察
+    /// commit 次数,跟 cancel 实现策略(Task ivar / 世代号)解耦。
+    @Test func evaluateAfterSave_cancelAndReplace_onlyLatestReachesHandleStreak() async throws {
         let persistence = PersistenceController(inMemory: true)
         let context = persistence.container.viewContext
         let cal = Calendar.current
@@ -2777,19 +2780,19 @@ struct StreakMilestoneTests {
         service.dismiss()
 
         service.evaluateAfterSave(persistence: persistence, latestEntryMood: 0.3)
-        let firstTask = service.inFlightEvaluateTaskForTesting
         service.evaluateAfterSave(persistence: persistence, latestEntryMood: 0.9)
-
-        // 第一次 task 应已被 cancel(被第二次替换)。await 让它结束读 isCancelled。
-        await firstTask?.value
-        #expect(firstTask?.isCancelled == true, "第二次 evaluateAfterSave 应该 cancel 第一次的 task")
-
         await service.drainEvaluateTaskForTesting()
 
-        // 第二次胜出:moodValue=0.9 在 pendingMilestone。第一次的 0.3 不该到。
+        // **真契约**:cancel-and-replace 后只有第二次走到 handleStreak。
+        // 老 task 跑完 bg fetch 后 `guard !Task.isCancelled` 早返,不调 handleStreak。
+        #expect(service.commitObservationsForTesting.count == 1,
+                "cancel-and-replace 后只一次 handleStreak,实际 \(service.commitObservationsForTesting.count) 次")
+        #expect(service.commitObservationsForTesting.first?.moodValue == 0.9,
+                "唯一一次 commit 必须来自第二次 evaluate(moodValue=0.9),实际 \(String(describing: service.commitObservationsForTesting.first?.moodValue))")
+
+        // pendingMilestone 也对(冗余但显式锁 UI-side 行为)
         #expect(service.pendingMilestone?.days == 7)
-        #expect(service.pendingMilestone?.moodValue == 0.9,
-                "cancel-and-replace 后只第二次写 pendingMilestone,moodValue 应为 0.9,实际 \(String(describing: service.pendingMilestone?.moodValue))")
+        #expect(service.pendingMilestone?.moodValue == 0.9)
 
         service.dismiss()
         service.resetCelebratedForTesting()

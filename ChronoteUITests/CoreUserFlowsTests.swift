@@ -160,7 +160,10 @@ final class CoreUserFlowsTests: XCTestCase {
             app.buttons["设置"].waitForExistence(timeout: timeout),
             "Home 未加载完成(设置按钮未出现)"
         )
-        usleep(800_000)
+        // (round-5 D8)`usleep(800_000)` 改成等 composer 出现 — 那是 splash fade 完 + seed
+        // 数据 fetch 完的 user-visible 信号。原 800ms magic number 在快机浪费、慢机不够。
+        // composer a11y id 在 round-3 P1-5 fix 已经加了,这里复用。
+        _ = app.textFields["home.composer.text"].waitForExistence(timeout: 5)
     }
 
 }

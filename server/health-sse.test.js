@@ -24,7 +24,7 @@ process.env.APP_SHARED_SECRET = process.env.APP_SHARED_SECRET || 'test-app-secre
 process.env.GLOBAL_IP_LIMIT_MAX = process.env.GLOBAL_IP_LIMIT_MAX || '3';
 process.env.NODE_ENV = 'test';
 
-const { app } = require('./index');
+const { app, recordUnhandledRejection } = require('./index');
 
 function listen(app) {
   return new Promise((resolve, reject) => {
@@ -432,4 +432,34 @@ test('chat_streamingUpstreamEndsWithoutDone_destroysClientSocket', async (t) => 
   assert.equal(complete, false, 'response must be destroyed (complete=false), not ended cleanly');
   // Sanity: the partial frame did reach the client before the destroy.
   assert.equal(body.includes('"hi"'), true, 'expected partial frame "hi" to reach client');
+});
+
+// ---------------------------------------------------------------------------
+// Group 3 — recordUnhandledRejection counter (round-5 D11)
+// ---------------------------------------------------------------------------
+
+test('unhandledRejection_handlerIncrementsCounterExposedViaHealth', async (t) => {
+  // (round-5 D11)修复 P1#4 backlog 中 "server unhandledRejection counter 0 测覆盖" 一条。
+  // Counter 走 module 级 `let unhandledRejectionCount` + 暴露在 /health body。
+  // 老 production 把 handler 内嵌到 `if (require.main === module)` 内 → test
+  // `require('./index')` 不挂 handler → `process.emit('unhandledRejection', ...)`
+  // 完全摸不到。本次 commit 把 handler 抽成 named function `recordUnhandledRejection`
+  // 导出,test 直接调,**契约**变成可单测:
+  //   1. 每次调 counter +1
+  //   2. /health 实时透出更新后的 count
+  //   3. handler 不抛(log-only,不再 fatal shutdown)
+  const server = await listen(app);
+  t.after(() => close(server));
+
+  // Counter 是 module 级累积,跨 test 不重置,只断"增量 ≥ 我们触发的次数"。
+  const before = (await getJSON(server, '/health')).body?.unhandledRejectionCount ?? 0;
+
+  assert.doesNotThrow(() => recordUnhandledRejection(new Error('test rejection A')));
+  assert.doesNotThrow(() => recordUnhandledRejection(new Error('test rejection B')));
+
+  const after = (await getJSON(server, '/health')).body?.unhandledRejectionCount ?? 0;
+  assert.ok(
+    after - before >= 2,
+    `counter must advance by at least 2 (before=${before}, after=${after})`
+  );
 });

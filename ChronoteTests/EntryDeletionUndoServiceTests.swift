@@ -25,12 +25,12 @@ final class EntryDeletionUndoServiceTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
-        EntryDeletionUndoService.shared.resetForTesting()
+        await EntryDeletionUndoService.shared.resetForTesting()
         LumoryToastCenter.shared.dismissNow()
     }
 
     override func tearDown() async throws {
-        EntryDeletionUndoService.shared.resetForTesting()
+        await EntryDeletionUndoService.shared.resetForTesting()
         LumoryToastCenter.shared.dismissNow()
         try await super.tearDown()
     }

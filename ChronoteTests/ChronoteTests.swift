@@ -3261,15 +3261,25 @@ struct ThemeAliasStoreCollateralLabelsTests {
         #expect(resolver.collateralLabels(forMerging: "宝贝", into: "Abby") == [])
     }
 
-    /// (d) target 是 alias → 用 resolved canonical 比对,正确识别已在同组
+    /// (d) target 是 alias → 用 resolved canonical 比对,正确识别已在同组。
+    /// 这条**真正**走 ThemeAliasStore.swift:177-180 的 `resolvedTargetLower == sourceCanonical.lowercased()` 早返路径
+    /// (round 2 P1 #1 修正:之前用裸标签 source 会在 line 179 sourceCanonical guard 早返,
+    /// 根本不经过 target-resolution 比对)。
+    ///
+    /// 构造:source = Abby(group canonical),target = 宝贝(Abby 的 alias)
+    /// 期望:resolved target = "abby" = sourceCanonical(=Abby).lowercased() → 早返 [](已同组)
     @Test func targetIsAlias_usesResolvedCanonicalForComparison() {
         let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
         let sugg = PendingSuggestion(newTag: "宝贝", canonicalGuess: "Abby", confidence: .high, source: .scan)
         _ = resolver.enqueue(sugg); resolver.confirm(sugg, canonical: "Abby")
 
-        // source=老婆(裸标签,不在 group)merge into target=宝贝(alias of Abby)
-        // resolved target = Abby,源不在 Abby group → collateral 空数组
-        // (老婆本身不是 canonical 且无 group,sourceCanonical 是 nil → 早返 [])
-        #expect(resolver.collateralLabels(forMerging: "老婆", into: "宝贝") == [])
+        // source="Abby" 在 reverse index 里 sourceCanonical=Abby(canonical 自指 — rebuildIndex
+        // 把 canonical 也加进 aliasToCanonical[lowercased canonical] = canonical)。
+        // target="宝贝" 是 Abby 的 alias,resolvedTargetLower = "abby"。
+        // sourceCanonical.lowercased() == resolvedTargetLower → 早返 [](line 180)。
+        // 如果 target-resolution 错了(比如把 "宝贝" 当裸标签),resolvedTargetLower="宝贝" != "abby",
+        // 进入 collateral 收集,会把 Abby group 的 aliases 错搬走。这个测试 catch 那个 bug。
+        #expect(resolver.collateralLabels(forMerging: "Abby", into: "宝贝") == [],
+                "target 是 alias 时必须 resolve 到 canonical 再比对,识别出已同组")
     }
 }

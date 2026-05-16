@@ -75,6 +75,11 @@ final class ThemeAliasResolver: ObservableObject {
     // 测试用 init,不读 UserDefaults
     init(testingWithEmptyState defaults: UserDefaults) {
         self.store = ThemeAliasStore(testingWithEmptyState: defaults)
+        // 跟 private init() / testingWithStoredState 对称(round 2 P2 #4 防御性修)。
+        // 当前 store.coolUntil = nil,scheduleCoolUntilExpiry 内 guard 早返 no-op;
+        // 但未来若有人扩展让 init 后立刻 set coolUntil(e.g., testing fixture),
+        // 没这行 timer 不起,redDot 7d 后该亮但不亮的 bug 重现。
+        scheduleCoolUntilExpiry()
     }
 
     // 测试用 init,从指定 UserDefaults 读已有 DiskState,验证持久化往返。

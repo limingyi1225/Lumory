@@ -311,16 +311,41 @@ final class OpenAIServiceImportTests: XCTestCase {
                       "prompt content 应包含 raw text 不被截断")
     }
 
-    // MARK: - Codex P2 #9: encodeImportPayload helper 空输入契约锁定
+    // MARK: - Round 2 P1 #2 修:配对契约 —— helper permissive, 主入口 strict
 
-    /// helper 自身**不 throw** 空 rawText —— 主入口 `parseImportedDiaries` trim+empty 早抛
-    /// `.emptyInput`。这是"碰巧"行为:未来谁觉得"helper 也该 guard 空" 加 `guard !rawText.isEmpty`,
-    /// 主入口测试仍过(因为它先 trim 早抛),但 helper 直接 caller(如果以后有)的行为变了。
-    /// 一行 XCTAssertNoThrow 锁住契约。
-    func test_encodeImportPayload_emptyRawText_doesNotThrow() throws {
-        XCTAssertNoThrow(try OpenAIService.encodeImportPayload(
-            rawText: "", today: Date()
-        ))
+    /// 设计**配对契约**:
+    ///   - `encodeImportPayload` helper **permissive**(空 rawText 也照常 encode,不 guard)
+    ///   - `parseImportedDiaries` 主入口 **strict**(空 / 仅空白 trim 后早抛 `.emptyInput`)
+    ///
+    /// 旧测试 `XCTAssertNoThrow(try OpenAIService.encodeImportPayload(rawText: "", today: Date()))`
+    /// 实质 vacuous —— `JSONEncoder` 在固定 3 个 Codable scalar 字段 struct 上从不 throw,
+    /// `XCTAssertNoThrow` 永远 pass(round 2 P1 #2 finding)。
+    ///
+    /// 改成"both ends"一起测:helper 接受空、主入口拒绝空。任何一端违反都 fail。
+    func test_emptyInput_contract_helperPermissiveMainEntryStrict() async throws {
+        // (1) helper 接受空 rawText — 实际**生成**了一段含空 raw_text 的 JSON payload
+        //     (而非 throw)。这是"helper 把策略推给主入口"的设计意图,锁住。
+        let json = try OpenAIService.encodeImportPayload(rawText: "", today: Date())
+        let parsed = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        XCTAssertEqual(parsed?["raw_text"] as? String, "",
+                       "helper 应 permissive 接受空 rawText, encode 进 JSON 字段")
+        XCTAssertNotNil(parsed?["client_today"] as? String)
+        XCTAssertNotNil(parsed?["client_year"] as? Int)
+
+        // (2) 主入口 strict 拒绝空 —— **不**打网络,直接抛 .emptyInput。
+        //     如果未来谁把 guard 挪到 helper 让它 throw,这条 (2) 仍 pass(主入口接住转抛),
+        //     但 (1) 会 fail —— 配对契约逃不掉。
+        let countBefore = MockURLProtocol.recordedRequests.count
+        do {
+            _ = try await service.parseImportedDiaries(rawText: "")
+            XCTFail("主入口应抛 .emptyInput")
+        } catch DiaryImportError.emptyInput {
+            // ok
+        } catch {
+            XCTFail("应抛 .emptyInput, 实际 \(error)")
+        }
+        XCTAssertEqual(MockURLProtocol.recordedRequests.count, countBefore,
+                       "主入口 trim+early-throw,不该打网络")
     }
 
     // MARK: - Helpers

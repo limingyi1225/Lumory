@@ -193,12 +193,11 @@ final class OpenAIService: AIServiceProtocol {
         // Reviewer 二轮指出:shared secret 注入失败(xcconfig 没挂、Info.plist 没填)
         // 时,客户端会把空 header 送上去,后端 timing-safe compare 直接判 401。我们在这里
         // 提前拦下来,转成 `network` 错误带明确说明,而不是让用户看到"AI 未返回内容"误导提示。
+        // 2026-05-16 superreview P2 #6:统一走 BackendErrorMapper.missingSharedSecretError()
+        // —— streaming / OneShotAI 已经这么做,Transcriber 的 catch 也按 `domain == "BackendError"` 分流,
+        // 这里改对齐让 domain 语义一致。
         guard !appSharedSecret.isEmpty else {
-            throw NSError(
-                domain: "OpenAIService",
-                code: 401,
-                userInfo: [NSLocalizedDescriptionKey: "Backend shared secret not configured (xcconfig injection failed)."]
-            )
+            throw BackendErrorMapper.missingSharedSecretError()
         }
 
         let requestBody = RequestBody(

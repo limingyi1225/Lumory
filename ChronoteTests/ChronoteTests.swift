@@ -3157,3 +3157,119 @@ struct LeapYearCycleBoundsTests {
         #expect(bounds.end == expectedEnd, "leap day anchor + weekly:cycle 3 end 应是 anchor + 21 天")
     }
 }
+
+// MARK: - ThemeAliasStore / Resolver helpers — 2026-05-16 superreview P1 #3/#4/#5
+
+/// `ThemeAliasStore.update { state in ... }` 批 mutation 不变量。Resolver 几乎所有 mutation
+/// 都靠"一次闭包改多字段 → 一次 rebuildIndex + save"。若未来谁把 `rebuildIndex()` 提前到闭包中间或
+/// 拆成 per-field call,index 与 state 跨字段不一致 → 用户看到 ghost canonical / Insights 错位。
+/// 这条测试钉死"mutation 一次完整完成,reverse index 一次性更新"的契约。
+@MainActor
+struct ThemeAliasStoreUpdateBatchTests {
+    @Test func mergeThemes_singleClosureBatch_reverseIndexConsistentAcrossAllAffectedTags() {
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+
+        // 先建一个 group:Abby ← 宝贝
+        let firstSugg = PendingSuggestion(
+            newTag: "宝贝", canonicalGuess: "Abby", confidence: .high, source: .scan
+        )
+        #expect(resolver.enqueue(firstSugg))
+        resolver.confirm(firstSugg, canonical: "Abby")
+
+        // mergeThemes 触发 update 一次性改 groups + pending + negativePairs + coolUntil
+        let outcome = resolver.mergeThemes(source: "老婆", into: "Abby")
+        #expect(outcome == .merged)
+
+        // 关键 invariant:**所有受影响 label** 都立刻 resolve 到新 canonical(不在中间态)。
+        // 如果 rebuildIndex 漏了任何一条 alias,canonicalize 返回原文 ≠ "Abby"。
+        #expect(resolver.canonicalize("Abby") == "Abby")
+        #expect(resolver.canonicalize("宝贝") == "Abby")
+        #expect(resolver.canonicalize("老婆") == "Abby")
+        #expect(resolver.canonicalize("ABBY") == "Abby", "case-insensitive lookup must still hit")
+        // 无关 label 不被污染
+        #expect(resolver.canonicalize("Work") == "Work")
+    }
+}
+
+/// `ThemeAliasStore.aliasToCanonicalLowerLookup(in:key:)` static helper 直接单测。
+/// 文件注释明确说"早期版本写错过一行 `if canonical.lowercased() == key { return key }`,
+/// 导致 confirm() 误删独立 pending"(superreview P1 #4 fix)。confirm 测试间接覆盖,但
+/// helper 自身契约要钉死:**canonical 自己不返 self,只命中 alias bucket**。
+@MainActor
+struct ThemeAliasStoreAliasLookupTests {
+    @Test func canonicalSelfReturnsNil_onlyAliasMatchesReturnsParent() {
+        let groups: [String: [String]] = ["Abby": ["宝贝", "老婆"]]
+
+        // canonical 本身 → 返 nil(不是 self)
+        #expect(ThemeAliasStore.aliasToCanonicalLowerLookup(in: groups, key: "abby") == nil)
+        // case 不同的 canonical → 仍 nil(comparison 用 lowercased)
+        #expect(ThemeAliasStore.aliasToCanonicalLowerLookup(in: groups, key: "ABBY") == nil)
+        // alias → 返 lowercased canonical
+        #expect(ThemeAliasStore.aliasToCanonicalLowerLookup(in: groups, key: "宝贝") == "abby")
+        #expect(ThemeAliasStore.aliasToCanonicalLowerLookup(in: groups, key: "老婆") == "abby")
+        // 未知 key → nil
+        #expect(ThemeAliasStore.aliasToCanonicalLowerLookup(in: groups, key: "未知") == nil)
+    }
+
+    @Test func emptyGroupsReturnsNil() {
+        #expect(ThemeAliasStore.aliasToCanonicalLowerLookup(in: [:], key: "anything") == nil)
+    }
+}
+
+/// `ThemeAliasStore.collateralLabels(forMerging:into:)` 边界。
+/// `Insights ThemeCard` 长按合并 sheet 显示"将一并搬走的标签",算错 → 用户预览 1 条实际搬 5 条
+/// (违反最小惊讶)。4 个边界 case 钉死 UX 契约。
+@MainActor
+struct ThemeAliasStoreCollateralLabelsTests {
+    /// (a) source 是 canonical → collateral = 该 group 内所有 aliases(canonical 自己不入,因为是 source)
+    @Test func sourceIsCanonical_returnsAllAliases() {
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let sugg1 = PendingSuggestion(newTag: "宝贝", canonicalGuess: "Abby", confidence: .high, source: .scan)
+        _ = resolver.enqueue(sugg1); resolver.confirm(sugg1, canonical: "Abby")
+        let sugg2 = PendingSuggestion(newTag: "老婆", canonicalGuess: "Abby", confidence: .high, source: .scan)
+        _ = resolver.enqueue(sugg2); resolver.confirm(sugg2, canonical: "Abby")
+
+        let collateral = resolver.collateralLabels(forMerging: "Abby", into: "Work")
+        // 整组的 aliases 都跟着搬,canonical 自己不入(它就是 source)
+        #expect(Set(collateral) == Set(["宝贝", "老婆"]),
+                "source 是 canonical → collateral 应包含所有 aliases")
+    }
+
+    /// (b) source 是别人的 alias → collateral = parent canonical + 所有 sibling aliases(**整组搬移**)
+    /// 注意:这与 `mergeThemes` 实际行为(`labelsToMerge` 包括 sc + group[sc] 全部)一致 ——
+    /// 长按一个 alias 合并,会把它整个 group 都带走,不是只带它自己。
+    @Test func sourceIsAlias_returnsParentCanonicalAndSiblingAliases() {
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let sugg1 = PendingSuggestion(newTag: "宝贝", canonicalGuess: "Abby", confidence: .high, source: .scan)
+        _ = resolver.enqueue(sugg1); resolver.confirm(sugg1, canonical: "Abby")
+        let sugg2 = PendingSuggestion(newTag: "老婆", canonicalGuess: "Abby", confidence: .high, source: .scan)
+        _ = resolver.enqueue(sugg2); resolver.confirm(sugg2, canonical: "Abby")
+
+        let collateral = resolver.collateralLabels(forMerging: "宝贝", into: "Work")
+        // parent canonical "Abby" + 同组其他 alias "老婆" 都跟着搬
+        #expect(Set(collateral) == Set(["Abby", "老婆"]),
+                "source 是 alias → collateral 应包含 parent canonical + sibling aliases(整组带走)")
+    }
+
+    /// (c) source / target 已在同组 → 返 []
+    @Test func sourceAndTargetSameGroup_returnsEmpty() {
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let sugg = PendingSuggestion(newTag: "宝贝", canonicalGuess: "Abby", confidence: .high, source: .scan)
+        _ = resolver.enqueue(sugg); resolver.confirm(sugg, canonical: "Abby")
+
+        // source=宝贝(alias) merge into target=Abby(canonical of same group)
+        #expect(resolver.collateralLabels(forMerging: "宝贝", into: "Abby") == [])
+    }
+
+    /// (d) target 是 alias → 用 resolved canonical 比对,正确识别已在同组
+    @Test func targetIsAlias_usesResolvedCanonicalForComparison() {
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let sugg = PendingSuggestion(newTag: "宝贝", canonicalGuess: "Abby", confidence: .high, source: .scan)
+        _ = resolver.enqueue(sugg); resolver.confirm(sugg, canonical: "Abby")
+
+        // source=老婆(裸标签,不在 group)merge into target=宝贝(alias of Abby)
+        // resolved target = Abby,源不在 Abby group → collateral 空数组
+        // (老婆本身不是 canonical 且无 group,sourceCanonical 是 nil → 早返 [])
+        #expect(resolver.collateralLabels(forMerging: "老婆", into: "宝贝") == [])
+    }
+}

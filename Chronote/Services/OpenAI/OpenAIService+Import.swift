@@ -146,7 +146,7 @@ extension OpenAIService {
             throw DiaryImportError.network(nsError)
         } catch {
             // 走到这里通常是空内容(code -2)或 JSONDecoder 失败 —— 视为解析失败。
-            Log.info("[OpenAIService] parseImportedDiaries: chatThrowing -> parsingFailed: \(error)", category: .persistence)
+            Log.info("[OpenAIService] parseImportedDiaries: chatThrowing -> parsingFailed: \(error)", category: .ai)
             throw DiaryImportError.parsingFailed(
                 reason: NSLocalizedString("error.import.noContent",
                                           value: "AI 未返回内容,请稍后再试。",
@@ -156,7 +156,7 @@ extension OpenAIService {
 
         // 只 log 长度,不要把模型回包(里面套了用户日记原文)落到 sysdiagnose 里。
         Log.info("[OpenAIService] parseImportedDiaries: raw content length \(content.count) chars",
-                 category: .persistence)
+                 category: .ai)
 
         guard let startIndex = content.firstIndex(of: "["),
               let endIndex = content.lastIndex(of: "]") else {

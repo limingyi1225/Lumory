@@ -497,6 +497,13 @@ final class ThemeAliasResolver: ObservableObject {
     /// 拆掉整组。同时清理 pending 队列里**任何 newTag/canonicalGuess 命中已删 group 标签的建议** ——
     /// 否则用户后续 confirm 那些 stale 建议会无声地把 group 重新建出来(codex P2 fix)。
     func deleteGroup(canonical: String) {
+        // **顺序约定**(2026-05-16 superreview P2 #13 文档强化):
+        // 1) 先**读** store.groups 算 `removedLabels`(只读,不 mutate);
+        // 2) 再 `objectWillChange.send()`(通知 SwiftUI 即将变);
+        // 3) 最后 `store.update {}` 在闭包内**写** state.groups + state.pending。
+        // SwiftUI willChange 后下一 run loop 才拉值,所以读旧值 → send → 写新值的顺序正确。
+        // 算 removedLabels **必须在 send 之前** —— 闭包内重算意义不大且让逻辑分散。
+
         // 大小写不敏感找真实 key
         let exactKey = store.groups.keys.first(where: { $0.lowercased() == canonical.lowercased() })
             ?? canonical
@@ -560,6 +567,11 @@ final class ThemeAliasResolver: ObservableObject {
 
         // 把每个 raw label 通过 alias map canonicalize 一次,union 进 active set。
         // 一个 alias 在日记里出现 → 它对应的 canonical 也算 active(group 仍然活着)。
+        //
+        // **invariant**:`indexSnapshot` 在 await 之**后**抓(此时拿到最新 alias map),
+        // 从这行到下面 `store.update` 入口之间**无 await hop**,MainActor 上是连续的 —— 因此
+        // `idsToRemove` 计算用的 active set 和实际 mutation 的 store.pending 一致。
+        // **未来如在 dry-run 中间引入新的 await,本块需要重新审 freshness**(2026-05-16 superreview P2 #11)。
         let indexSnapshot = store.snapshotIndex()
         var active = rawActiveLabels
         for raw in rawActiveLabels {

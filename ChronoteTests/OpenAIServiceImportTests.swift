@@ -248,6 +248,81 @@ final class OpenAIServiceImportTests: XCTestCase {
         XCTAssertEqual(entries.count, 0)
     }
 
+    // MARK: - Codex P2 #7 + Superreview P1: empty secret fail-closed path
+
+    /// 生产场景 fail-closed:用户没填 `Lumory.local.xcconfig` → `AppSecrets.appSharedSecret == ""`
+    /// → `chatThrowing` 顶部 guard 在打 URLSession 前直接抛 `BackendErrorMapper.missingSharedSecretError()`
+    /// (domain="BackendError" code=401)→ `parseImportedDiaries` 的 `nsError.code >= 100 && < 600`
+    /// catch 命中 → 抛 `DiaryImportError.network`。
+    /// 这条 path 是 fresh clone 用户的真实生产体验,锁住 contract 防未来 secret 注入路径漂移。
+    func test_emptySecret_throwsNetworkWithoutHittingMockURLSession() async throws {
+        // 独立 service,覆盖 setUp 注入的 "test-secret"
+        let emptySecretService = OpenAIService(
+            session: MockURLProtocol.makeSession(),
+            appSharedSecret: ""
+        )
+        // 用一个会 fail 的 handler 验证我们**不打**网络 — guard 应在打 URLSession 之前抛
+        MockURLProtocol.requestHandler = { _ in
+            throw URLError(.cannotFindHost)
+        }
+        let countBefore = MockURLProtocol.recordedRequests.count
+        do {
+            _ = try await emptySecretService.parseImportedDiaries(rawText: "随便写点")
+            XCTFail("空 secret 应抛 .network")
+        } catch DiaryImportError.network {
+            // ok
+        } catch {
+            XCTFail("应抛 .network,实际 \(error)")
+        }
+        XCTAssertEqual(MockURLProtocol.recordedRequests.count, countBefore,
+                       "guard 应在 URLSession 前早抛,不该有 mock 请求被记录")
+    }
+
+    // MARK: - Codex P2 #8: MockURLProtocol body capture 大 payload 边界
+
+    /// `MockURLProtocol.readBody` 用 4096-byte buffer + while-loop 读 stream。
+    /// 如果未来谁优化成 single-shot read 或缩小 buffer,>4KB payload 会静默截断而 schema assert 仍过。
+    /// 这条测试钉死:发 ~12KB rawText(穿过多个 4096 buffer 边界)→ recorded body 大小完全匹配
+    /// httpBody encode 结果,无截断。
+    func test_recordedBody_largePayloadCrossesBufferBoundary() async throws {
+        MockURLProtocol.requestHandler = Self.handler(status: 200, content: "[]")
+
+        // ~12KB rawText:纯字母数字(无需 JSON escape 影响长度对账),重复出 3 个 4096 buffer round。
+        let largeRawText = String(repeating: "abcdefghABCDEFGH0123456789ab", count: 430)
+        XCTAssertGreaterThan(largeRawText.utf8.count, 12_000)
+
+        _ = try await service.parseImportedDiaries(rawText: largeRawText)
+
+        XCTAssertEqual(MockURLProtocol.recordedRequests.count, 1)
+        let body = try XCTUnwrap(MockURLProtocol.recordedRequests[0].body)
+        // 主断言:body 完整 capture 没被 4096 buffer 边界切断。chat completion outer body
+        // 至少要包含 raw text 长度(12KB+)+ JSON 结构开销 → 至少 12KB。
+        XCTAssertGreaterThan(body.count, 12_000,
+                             "body capture 必须穿过 4096 buffer 边界完整读完")
+        // 次断言:body 末尾必须是合法 JSON `}` 结束(无截断 → JSON 完整)。
+        let bodyString = String(data: body, encoding: .utf8) ?? ""
+        XCTAssertTrue(bodyString.hasSuffix("}"),
+                      "body 末尾应是 JSON 闭合 `}`,truncate 会缺尾")
+        // 复述:解 outer JSON 拿 content,再 grep raw text 的可识别前缀(JSON 内不 escape 字母数字)。
+        let outer = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        let messages = try XCTUnwrap(outer?["messages"] as? [[String: Any]])
+        let content = try XCTUnwrap(messages.first?["content"] as? String)
+        XCTAssertTrue(content.contains("abcdefghABCDEFGH0123456789ababcdefgh"),
+                      "prompt content 应包含 raw text 不被截断")
+    }
+
+    // MARK: - Codex P2 #9: encodeImportPayload helper 空输入契约锁定
+
+    /// helper 自身**不 throw** 空 rawText —— 主入口 `parseImportedDiaries` trim+empty 早抛
+    /// `.emptyInput`。这是"碰巧"行为:未来谁觉得"helper 也该 guard 空" 加 `guard !rawText.isEmpty`,
+    /// 主入口测试仍过(因为它先 trim 早抛),但 helper 直接 caller(如果以后有)的行为变了。
+    /// 一行 XCTAssertNoThrow 锁住契约。
+    func test_encodeImportPayload_emptyRawText_doesNotThrow() throws {
+        XCTAssertNoThrow(try OpenAIService.encodeImportPayload(
+            rawText: "", today: Date()
+        ))
+    }
+
     // MARK: - Helpers
 
     /// 构造一个返回 chat completion 响应壳的 handler(content 字段填可控字符串)。

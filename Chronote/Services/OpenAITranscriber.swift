@@ -26,13 +26,26 @@ final class OpenAITranscriber: TranscriberProtocol {
     private let backendURL: URL
     private let jsonDecoder = JSONDecoder()
 
+    /// URLSession 注入点。生产走 `.sharedRetrySession`(默认),URLProtocol-mocked 单测可传 mock session。
+    /// 跟 `OpenAIService` 的 session 注入模式对齐(2026-05-16 superreview P1 #2 fix)。
+    let session: URLSession
+
+    /// 后端共享密钥注入点。生产走 `AppSecrets.appSharedSecret`(默认),单测可注入 dummy。
+    /// 跟 `OpenAIService.init(appSharedSecret:)` 对齐 —— 整个 OpenAI service surface 一套约定。
+    let appSharedSecret: String
+
     private(set) var lastFailure: TranscriptionFailure?
 
-    init() {
+    init(
+        session: URLSession = .sharedRetrySession,
+        appSharedSecret: String = AppSecrets.appSharedSecret
+    ) {
         guard let url = URL(string: Self.endpoint) else {
             preconditionFailure("[OpenAITranscriber] Invalid backend endpoint: \(Self.endpoint)")
         }
         self.backendURL = url
+        self.session = session
+        self.appSharedSecret = appSharedSecret
     }
 
     func transcribeAudio(fileURL: URL, localeIdentifier _: String) async -> String? {
@@ -41,7 +54,7 @@ final class OpenAITranscriber: TranscriberProtocol {
         // 用例是中英混合,自动检测正合适;以后要传就映射 `zh-*` → `zh`、`en-*` → `en`。
         lastFailure = nil
 
-        guard !AppSecrets.appSharedSecret.isEmpty else {
+        guard !appSharedSecret.isEmpty else {
             Log.error("[OpenAITranscriber] APP_SHARED_SECRET 未注入,直接失败", category: .ai)
             lastFailure = .sharedSecretMissing
             return nil
@@ -69,7 +82,7 @@ final class OpenAITranscriber: TranscriberProtocol {
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(prepared.boundary)", forHTTPHeaderField: "Content-Type")
-        request.applyBackendAuth()
+        request.applyBackendAuth(sharedSecret: appSharedSecret)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = prepared.body
 
@@ -79,7 +92,7 @@ final class OpenAITranscriber: TranscriberProtocol {
 
         do {
             let text = try await NetworkRetryHelper.performWithRetry { [self] () -> String in
-                let (data, response) = try await URLSession.sharedRetrySession.data(for: request)
+                let (data, response) = try await self.session.data(for: request)
                 guard let http = response as? HTTPURLResponse else {
                     throw URLError(.badServerResponse)
                 }

@@ -17,7 +17,8 @@ import PhotosUI
 extension HomeView {
 
     /// handleSendAction 内部抓取 `inputVM` / `recordingVM` / `photoVM` 三个 VM 的当前值,失败回滚时复原。
-    /// `private` 因为只在本 extension 文件内消费,跨 extension 无意义。
+    /// `internal` 因 extension scope 默认无 private 修饰;只在本文件消费,无外部 caller
+    /// (grep `SendSnapshot` 全仓 4 处全在 +Send.swift)。
     struct SendSnapshot {
         let text: String
         let audio: String?

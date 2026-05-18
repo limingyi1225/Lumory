@@ -566,3 +566,8 @@
 "settings.resetNarrative.cleared" = "Cleared %d AI recaps";
 "settings.resetNarrative.empty" = "No AI recaps to clear";
 "音频播放失败" = "Audio playback failed";
+"正在生成中,稍后再点" = "Still generating. Try again soon.";
+"分享" = "Share";
+"主题:%@" = "Themes: %@";
+"去年的今天" = "This Day Last Year";
+"3 个月前的这一天" = "This Day 3 Months Ago";

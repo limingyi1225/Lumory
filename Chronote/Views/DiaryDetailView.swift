@@ -131,6 +131,9 @@ struct DiaryDetailView: View {
                             } label: {
                                 Label(NSLocalizedString("编辑", comment: "Edit button"), systemImage: "pencil")
                             }
+                            ShareLink(item: shareText) {
+                                Label(NSLocalizedString("分享", comment: "Share diary entry"), systemImage: "square.and.arrow.up")
+                            }
                             Button(role: .destructive) {
                                 // 删除直接执行 — 4 秒撤销 toast 替代 confirmation。Detail 会 dismiss,
                                 // toast 在父视图(Home / Insights sheet)的 root overlay 渲染。

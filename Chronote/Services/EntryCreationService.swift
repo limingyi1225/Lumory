@@ -222,18 +222,13 @@ enum EntryCreationService {
     nonisolated static func persistAudioOffMain(audioFileName: String?) async -> String? {
         guard let audioFileName = audioFileName else { return nil }
         return await Task.detached(priority: .userInitiated) { () -> String? in
-            let localURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent(audioFileName)
+            let localURL = LumoryAttachmentPaths.legacyURL(fileName: audioFileName)
 
             if FileManager.default.fileExists(atPath: localURL.path),
                let audioData = try? Data(contentsOf: localURL),
-               let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-                let audioDir = iCloudURL.appendingPathComponent("Documents/LumoryAudio")
+               let audioDir = try? LumoryAttachmentPaths.ensureICloudDirectory(for: .audio) {
                 let iCloudAudioURL = audioDir.appendingPathComponent(audioFileName)
                 do {
-                    if !FileManager.default.fileExists(atPath: audioDir.path) {
-                        try FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
-                    }
                     try audioData.write(to: iCloudAudioURL, options: .atomic)
                     try? FileManager.default.removeItem(at: localURL)
                     Log.info("[EntryCreationService] Saved audio to iCloud: \(audioFileName)", category: .ui)

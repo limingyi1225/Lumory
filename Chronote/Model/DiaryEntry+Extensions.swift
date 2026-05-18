@@ -246,26 +246,13 @@ extension DiaryEntry {
         let fileName = fileName ?? "\(UUID().uuidString).jpg"
 
         // Always save to local first
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let localImagesDir = documentsPath.appendingPathComponent("LumoryImages")
-
-        // Create directory if needed
-        if !FileManager.default.fileExists(atPath: localImagesDir.path) {
-            try FileManager.default.createDirectory(at: localImagesDir, withIntermediateDirectories: true, attributes: nil)
-        }
-
+        let localImagesDir = try LumoryAttachmentPaths.ensureLocalDirectory(for: .image)
         let localFileURL = localImagesDir.appendingPathComponent(fileName)
         try imageData.write(to: localFileURL)
         Log.info("[DiaryEntry] Saved image locally to: \(localFileURL.path)", category: .persistence)
 
         // Also try to save to iCloud if available
-        if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-            let iCloudImagesDir = iCloudURL.appendingPathComponent("Documents/LumoryImages")
-
-            if !FileManager.default.fileExists(atPath: iCloudImagesDir.path) {
-                try? FileManager.default.createDirectory(at: iCloudImagesDir, withIntermediateDirectories: true, attributes: nil)
-            }
-
+        if let iCloudImagesDir = try? LumoryAttachmentPaths.ensureICloudDirectory(for: .image) {
             let iCloudFileURL = iCloudImagesDir.appendingPathComponent(fileName)
             try? imageData.write(to: iCloudFileURL)
             Log.info("[DiaryEntry] Also saved image to iCloud: \(iCloudFileURL.path)", category: .persistence)
@@ -276,44 +263,19 @@ extension DiaryEntry {
 
     /// Deletes an image file from documents directory
     static func deleteImageFromDocuments(_ fileName: String) throws {
-        let fm = FileManager.default
-        var urls: [URL] = []
-
-        if let iCloudURL = fm.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-            urls.append(iCloudURL.appendingPathComponent("Documents/LumoryImages").appendingPathComponent(fileName))
-        }
-        let documentsPath = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        urls.append(documentsPath.appendingPathComponent("LumoryImages").appendingPathComponent(fileName))
-        urls.append(documentsPath.appendingPathComponent(fileName))
-
-        var firstError: Error?
-        for fileURL in urls {
-            guard fm.fileExists(atPath: fileURL.path) else { continue }
-            do {
-                try fm.removeItem(at: fileURL)
-            } catch {
-                if firstError == nil { firstError = error }
-                Log.error("[DiaryEntry] Failed to delete image copy \(fileURL.path): \(error)", category: .persistence)
-            }
-        }
         DiaryEntry.imageCache.removeObject(forKey: fileName as NSString)
-        if let firstError {
-            throw firstError
-        }
+        try LumoryAttachmentPaths.deleteAllCopies(fileName: fileName, kind: .image)
     }
 
     /// Gets the proper URL for image storage (iCloud or local)
     private static func getImageURL(for fileName: String) -> URL {
         // Try to use iCloud container
-        if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-            // Use a specific directory for images in iCloud
-            let imagesURL = iCloudURL.appendingPathComponent("Documents/LumoryImages")
+        if let imagesURL = LumoryAttachmentPaths.iCloudDirectory(for: .image) {
             Log.info("[DiaryEntry] Using iCloud URL for image: \(imagesURL.path)", category: .persistence)
             return imagesURL.appendingPathComponent(fileName)
         } else {
             // Fallback to local documents directory
-            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let imagesURL = documentsPath.appendingPathComponent("LumoryImages")
+            let imagesURL = LumoryAttachmentPaths.localDirectory(for: .image)
             Log.info("[DiaryEntry] iCloud not available, using local URL for image: \(imagesURL.path)", category: .persistence)
             return imagesURL.appendingPathComponent(fileName)
         }
@@ -324,9 +286,7 @@ extension DiaryEntry {
     /// 这个 path 进程内永远不变,thumbnail miss 时反复问让 fast-scroll 看见"placeholder 一闪再出图"。
     /// `Lazy var` 不安全(static let 是,且 Swift 跑一次 thread-safe)。
     private static let iCloudImagesDirectory: URL? = {
-        FileManager.default
-            .url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory")?
-            .appendingPathComponent("Documents/LumoryImages")
+        LumoryAttachmentPaths.iCloudDirectory(for: .image)
     }()
 
     /// Loads image data from file name with caching — **静态版本**，不需要 DiaryEntry 实例。
@@ -336,31 +296,17 @@ extension DiaryEntry {
         let cacheKey = fileName as NSString
         if let cached = DiaryEntry.imageCache.object(forKey: cacheKey) as Data? { return cached }
 
-        // iCloud(用静态缓存 URL,避免每次 ubiquity IPC 查询 — 见 iCloudImagesDirectory 注释)
-        if let iCloudDir = iCloudImagesDirectory {
-            let iCloudFileURL = iCloudDir.appendingPathComponent(fileName)
-            if FileManager.default.fileExists(atPath: iCloudFileURL.path),
-               let data = try? Data(contentsOf: iCloudFileURL) {
+        // iCloud / local LumoryImages / legacy Documents root
+        for fileURL in LumoryAttachmentPaths.candidateURLs(
+            fileName: fileName,
+            kind: .image,
+            iCloudDirectoryOverride: iCloudImagesDirectory
+        ) {
+            if FileManager.default.fileExists(atPath: fileURL.path),
+               let data = try? Data(contentsOf: fileURL) {
                 DiaryEntry.imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
                 return data
             }
-        }
-
-        // Local LumoryImages
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let localFileURL = documentsPath.appendingPathComponent("LumoryImages").appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: localFileURL.path),
-           let data = try? Data(contentsOf: localFileURL) {
-            DiaryEntry.imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
-            return data
-        }
-
-        // Legacy: bare Documents root
-        let oldFileURL = documentsPath.appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: oldFileURL.path),
-           let data = try? Data(contentsOf: oldFileURL) {
-            DiaryEntry.imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
-            return data
         }
 
         return nil
@@ -406,30 +352,7 @@ extension DiaryEntry {
     }
 
     static func deleteAudioFromDocuments(_ fileName: String) {
-        let fm = FileManager.default
-
-        // iCloud 位置
-        if let iCloudURL = fm.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-            let iCloudFile = iCloudURL
-                .appendingPathComponent("Documents/LumoryAudio")
-                .appendingPathComponent(fileName)
-            if fm.fileExists(atPath: iCloudFile.path) {
-                try? fm.removeItem(at: iCloudFile)
-            }
-        }
-
-        // 本地 LumoryAudio/
-        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let localFile = docs.appendingPathComponent("LumoryAudio").appendingPathComponent(fileName)
-        if fm.fileExists(atPath: localFile.path) {
-            try? fm.removeItem(at: localFile)
-        }
-
-        // 老的扁平 Documents/ 位置（向后兼容）
-        let legacyFile = docs.appendingPathComponent(fileName)
-        if fm.fileExists(atPath: legacyFile.path) {
-            try? fm.removeItem(at: legacyFile)
-        }
+        _ = try? LumoryAttachmentPaths.deleteAllCopies(fileName: fileName, kind: .audio)
     }
 
     // (2026-05-15 megareview OPT-MID-1)`deleteAllImages()` 已删 — grep 全仓 0 caller。

@@ -6,7 +6,7 @@
 //  入口:`playAudio(fileName:)` —— composer 行内播放按钮回调。
 //
 //  辅助:
-//   - `resolvedAudioURL(fileName:)` 三层 fallback(iCloud → Documents/LumoryAudio → 旧 Documents 根)。
+//   - `resolvedAudioURL(fileName:)` 三层 fallback 统一走 `LumoryAttachmentPaths`。
 //     `retryTranscription`(HomeView+Recording.swift)也用,跨 extension 需 internal。
 //   - `hideKeyboard()` —— UIKit `resignFirstResponder` 兜底。`handleSendAction`(HomeView+Send.swift)也调。
 //
@@ -19,24 +19,7 @@ import UIKit
 extension HomeView {
 
     static func resolvedAudioURL(fileName: String) -> URL? {
-        let fm = FileManager.default
-        if let iCloudURL = fm.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-            let audioURL = iCloudURL
-                .appendingPathComponent("Documents/LumoryAudio")
-                .appendingPathComponent(fileName)
-            if fm.fileExists(atPath: audioURL.path) { return audioURL }
-        }
-
-        let documentsURL = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let localAudioURL = documentsURL
-            .appendingPathComponent("LumoryAudio")
-            .appendingPathComponent(fileName)
-        if fm.fileExists(atPath: localAudioURL.path) { return localAudioURL }
-
-        let legacyURL = documentsURL.appendingPathComponent(fileName)
-        if fm.fileExists(atPath: legacyURL.path) { return legacyURL }
-
-        return nil
+        LumoryAttachmentPaths.existingAudioURL(fileName: fileName)
     }
 
     func playAudio(fileName: String) {

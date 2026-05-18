@@ -15,7 +15,7 @@
 //   - `deleteRecording(_:)` — 删除单条录音(含取消进行中的转写上传 + 删磁盘文件)
 //
 //  辅助(本文件 private):
-//   - `deleteAudioFileFromDocuments(_:)` — 删 documents/ 下音频文件
+//   - `deleteAudioFileFromDocuments(_:)` — 删三层音频副本(iCloud / LumoryAudio / legacy)
 //   - `separatorBeforeAppendingTranscription(...)` — 转写文本拼接前的分隔决策
 //
 
@@ -232,12 +232,8 @@ extension HomeView {
     }
 
     private func deleteAudioFileFromDocuments(_ fileName: String) {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let audioURL = documentsURL.appendingPathComponent(fileName)
         do {
-            try FileManager.default.removeItem(at: audioURL)
-        } catch CocoaError.fileNoSuchFile {
-            // already gone, nothing to do
+            try LumoryAttachmentPaths.deleteAllCopies(fileName: fileName, kind: .audio)
         } catch {
             Log.error("[HomeView] 删除音频文件出错 (\(fileName)): \(error.localizedDescription)", category: .ui)
         }

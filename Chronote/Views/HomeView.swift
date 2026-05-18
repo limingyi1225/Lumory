@@ -104,6 +104,13 @@ struct HomeView: View {
     /// 冷启动首帧 @FetchRequest 尚未完成时为 false——避免 emptyState 闪一帧。
     @State var hasLoadedOnce: Bool = false
 
+    /// "On This Day" cache — 改成 `@State` 而非 computed property,避免 SwiftUI body 每次
+    /// re-eval(composer typing / mood slider 拖动 / recording state 变化等高频触发)都遍历
+    /// 整个 `entries` FetchedResults。`refreshOnThisDayHighlights()` 只在 entries.count 变
+    /// (新增/删除日记)或 scenePhase=.active(跨午夜兜底)时调,长 timeline 用户不再被
+    /// O(N) 主线程扫描卡顿。
+    @State var cachedOnThisDayHighlights: [OnThisDayHighlight] = []
+
     // Search state — 由系统 .searchable 托管输入;下面是结果 + 节流 task。
     // wave14 — 改成"无感"双引擎融合:keyword 立刻出 + 600ms 后 semantic 后台补,
     // 删除 SearchMode picker。embed 失败时给一次轻提示,避免用户以为搜索条件太窄。
@@ -307,8 +314,16 @@ struct HomeView: View {
                 .task {
                     // FetchRequest 此时已经第一轮完成，把 hasLoadedOnce 置位
                     // 让 empty state 从此时起才允许显示（避免冷启动闪一帧）。
-                    await MainActor.run { hasLoadedOnce = true }
+                    await MainActor.run {
+                        hasLoadedOnce = true
+                        // FetchRequest 第一轮完成,这里 compute 一次 On This Day 填 cache。
+                        refreshOnThisDayHighlights()
+                    }
                     await loadContextPrompts()
+                }
+                .onChange(of: entries.count) { _, _ in
+                    // 新增/删除日记 → recompute(targets 仍是同两个日子,但底层 entries 集合变了)。
+                    refreshOnThisDayHighlights()
                 }
             }
     }
@@ -325,6 +340,42 @@ struct HomeView: View {
             .padding(.horizontal, 16)
         }
     }
+
+    /// "On This Day" 计算 — **在 body 外调,结果写 `cachedOnThisDayHighlights` @State**。
+    /// SwiftUI body 内只读 cache,不再扫 `entries` FetchedResults(长 timeline 用户避免
+    /// 主线程 O(N) fault)。trigger 点见 `.task` / `.onChange(of: entries.count)` /
+    /// `.onChange(of: scenePhase)` active(跨午夜)。
+    private func refreshOnThisDayHighlights() {
+        let calendar = Calendar.current
+        let now = Date()
+        let targets: [(Date?, String)] = [
+            (
+                calendar.date(byAdding: .year, value: -1, to: now),
+                NSLocalizedString("去年的今天", comment: "On This Day card title for last year")
+            ),
+            (
+                calendar.date(byAdding: .month, value: -3, to: now),
+                NSLocalizedString("3 个月前的这一天", comment: "On This Day card title for three months ago")
+            )
+        ]
+
+        var usedEntryIDs = Set<NSManagedObjectID>()
+        var highlights: [OnThisDayHighlight] = []
+        highlights.reserveCapacity(targets.count)
+
+        for (targetDate, title) in targets {
+            guard let targetDate,
+                  let entry = entries.first(where: { entry in
+                      guard !usedEntryIDs.contains(entry.objectID),
+                            let date = entry.date else { return false }
+                      return calendar.isDate(date, inSameDayAs: targetDate)
+                  }) else { continue }
+            usedEntryIDs.insert(entry.objectID)
+            highlights.append(OnThisDayHighlight(id: entry.objectID, title: title, entry: entry))
+        }
+
+        cachedOnThisDayHighlights = highlights
+    }
     
     @ViewBuilder
     private var mainListContent: some View {
@@ -333,6 +384,21 @@ struct HomeView: View {
                 // 心情光谱滑块 - Mac优化布局
                 moodSliderSection
                     .id(topAnchorID)
+
+                let highlights = cachedOnThisDayHighlights
+                if !highlights.isEmpty {
+                    OnThisDaySection(
+                        highlights: highlights,
+                        appLanguage: appLanguage,
+                        onTap: { entry in
+                            shouldStartEditing = false
+                            selectedEntry = entry
+                        }
+                    )
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 14, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
 
                 // 输入框和录音功能容器。视觉/交互拆到 `HomeComposerCard`(`Components/`),
                 // parent 这里负责 wire callbacks(send / 录音生命周期 / 草稿 debounce / 图片压缩任务)
@@ -379,6 +445,12 @@ struct HomeView: View {
                 if newPhase == .background {
                     draftSaveTask?.cancel()
                     Self.persistDraft(inputVM.inputText)
+                }
+                // 跨午夜兜底:用户长时间挂着 app(锁屏 / 切走 → 再回来),"今天"已经变了,
+                // On This Day 的两个 target date 也跟着移一天。.active 时无脑 recompute 一次,
+                // 成本低(只 2 个 target + entries.first(where:),数千 entry 内不到 ms 级)。
+                if newPhase == .active {
+                    refreshOnThisDayHighlights()
                 }
             }
             .onChange(of: composerFocusRequestID) { _, requestID in

@@ -277,13 +277,20 @@ struct NarrativeSummaryCard: View {
             // 整卡是 button — tap 行为按状态 dispatch:
             //   - 有 headline + cached payload → present detail sheet
             //   - 其他(未生成 / 失败但无 cached headline)→ 触发流(失败时即重试)
-            //   - streaming:自然忽略
+            //   - streaming:给轻反馈 + toast,避免用户以为卡片坏了
             //
             // failed 状态下 streamFailedView 内嵌"重试"按钮自带 hit-test,onTapGesture 不会
             // 截断它;卡空白区域 tap 也走 startGeneration,跟按钮语义一致。
             // (2026-05-13 superreview:之前 `else if isIncomplete` / `else if !isIncomplete`
             // body 完全相同 + 注释跟实际行为相反,合并掉。)
-            guard !blocksUserTap else { return }
+            guard !blocksUserTap else {
+                HapticManager.shared.impact(.soft)
+                LumoryToastCenter.shared.show(
+                    NSLocalizedString("正在生成中,稍后再点", comment: "Toast when narrative card is tapped while streaming"),
+                    severity: .info
+                )
+                return
+            }
             HapticManager.shared.impact(.light)
             if !displayHeadline.isEmpty, let payload = cachedNarrative {
                 detailSubject = NarrativeDetailSubject(payload: payload)

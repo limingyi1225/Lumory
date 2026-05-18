@@ -27,33 +27,16 @@ extension DiaryEntry {
     func audioURL() -> URL? {
         guard let fileName = audioFileName else { return nil }
 
-        // Try iCloud location first
-        if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") {
-            let audio = iCloudURL.appendingPathComponent("Documents/LumoryAudio").appendingPathComponent(fileName)
-            if FileManager.default.fileExists(atPath: audio.path) {
-                return audio
-            }
-        }
-
-        // Try local with subdirectory
-        let localURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("LumoryAudio")
-            .appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: localURL.path) {
-            return localURL
-        }
-
-        // Try old location for backward compatibility
-        let oldURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: oldURL.path) {
+        if let url = LumoryAttachmentPaths.existingAudioURL(fileName: fileName) {
             // 触发迁移：成功 → 返新 URL(老 URL 已被同步删除);失败 → 返老 URL,文件保留。
             // 原实现 sync migrate + remove old + 返 oldURL —— caller 拿到一个已被删除的 URL,
             // 后续 `AVAudioPlayer(contentsOf: oldURL)` 直接失败。改成返 newURL 后 caller 可正常用。
-            if let newURL = migrateAudioToiCloud(fileName: fileName, oldURL: oldURL) {
-                return newURL
+            if url.path == LumoryAttachmentPaths.legacyURL(fileName: fileName).path {
+                if let newURL = migrateAudioToiCloud(fileName: fileName, oldURL: url) {
+                    return newURL
+                }
             }
-            return oldURL
+            return url
         }
 
         return nil
@@ -63,17 +46,11 @@ extension DiaryEntry {
     /// 写新 URL 成功后才删老文件;任何失败保留 oldURL,让调用方仍可读取。
     @discardableResult
     private func migrateAudioToiCloud(fileName: String, oldURL: URL) -> URL? {
-        guard let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: "iCloud.com.Mingyi.Lumory") else {
-            return nil
-        }
+        guard let audioDir = try? LumoryAttachmentPaths.ensureICloudDirectory(for: .audio) else { return nil }
         guard let audioData = try? Data(contentsOf: oldURL) else { return nil }
 
-        let audioDir = iCloudURL.appendingPathComponent("Documents/LumoryAudio")
         let newURL = audioDir.appendingPathComponent(fileName)
         do {
-            if !FileManager.default.fileExists(atPath: audioDir.path) {
-                try FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true, attributes: nil)
-            }
             try audioData.write(to: newURL, options: .atomic)
             Log.info("[DiaryEntry] Migrated audio \(fileName) to iCloud", category: .persistence)
 

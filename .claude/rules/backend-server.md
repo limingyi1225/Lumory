@@ -6,7 +6,7 @@ paths:
 
 # Lumory 后端 — Node.js + Express 5 代理
 
-部署在 `https://lumory.isaabby.com`(Cloudflare → nginx:443 → node:3000),PM2 进程管理。代码主体集中在 [index.js](server/index.js)(约 700 行,Express 5 + pino + pino-http + express-rate-limit + axios + cors + dotenv)。其余:`package.json` / `package-lock.json` / `eslint.config.js`。`ecosystem.config.js`(PM2 配置:`lumory-server`,fork 模式,`max_memory_restart: 512M`)。
+部署在 `https://lumory.isaabby.com`(Cloudflare → nginx:443 → node:3000),PM2 进程管理。代码主体集中在 [index.js](server/index.js)(约 840 行,2026-05-17 verified;Express 5 + pino + pino-http + express-rate-limit + axios + cors + dotenv)。其余:`package.json` / `package-lock.json` / `eslint.config.js`。`ecosystem.config.js`(PM2 配置:`lumory-server`,fork 模式,`max_memory_restart: 512M`)。
 
 ## 鉴权
 

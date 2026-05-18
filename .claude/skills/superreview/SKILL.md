@@ -34,7 +34,7 @@ description: 不计成本对 uncommitted changes(或指定 diff range)做最严�
 
 ## 何时**不**该用
 
-- 只动了 1-2 个文件 / 几十行 → 直接 `/codex:review` 或起一个 `code-reviewer` agent 就够,起 6 个 Opus 是浪费
+- 只动了 1-2 个文件 / 几十行 → 直接 `/codex:review` 或起一个 `general-purpose` agent 就够,起 6 个 Opus 是浪费
 - 用户只要"扫一眼"而非"严审"
 - 改动还没保存(git diff 看不到 buffer 内容)→ 先提醒用户保存
 
@@ -71,21 +71,23 @@ git log <RANGE> --oneline                            # 仅 commit range 模式
 - **专项焦点**(只看这个角度,其他视角别人会看)
 - 要求输出格式:`P0/P1/P2 + file:line + 一句话问题 + 一句话修复`
 - 明确说明:**所有数字 / 行号 / "X 处 Y"类陈述都要给出 grep 结果或截取的代码块,主 agent 会逐条核对**
-- 显式 `subagent_type: "code-reviewer"`(或更专项的)+ `model: "opus"`
+- 显式 `subagent_type: "general-purpose"`(或更专项的 namespaced agent,见下表)+ `model: "opus"`
 
-视角池(按改动类型挑,不必全用):
+视角池(按改动类型挑,不必全用)。⚠️ **subagent_type 池随插件状态变化 —— 每会话起点 system reminder 列的就是当前全集,spawn 前先核**;不在池里 hard error。下表是 2026-05-17 实测有效的映射,裸名 `code-reviewer` / `security-auditor` / `architect-review` / `test-automator` / `performance-engineer` / `database-optimizer` 等**都不在池里**,改走 `general-purpose` + prompt 写焦点。
 
 | 视角 | 推荐 subagent_type | 重点 |
 |---|---|---|
-| Correctness | code-reviewer | 逻辑错 / off-by-one / 边界 / null / 异常吞掉 / 错误返回值 |
-| Architecture | architect-review / general-purpose | 抽象泄漏 / 耦合 / SRP 违反 / 未来扩展 |
-| Security | security-auditor / backend-security-coder | 注入 / 鉴权 / 密钥泄漏 / OWASP / SSE 错误处理 |
-| Performance | performance-engineer / database-optimizer | 主线程阻塞 / N+1 / 缓存 / 内存泄漏 / O(n²) |
+| Correctness | general-purpose | 逻辑错 / off-by-one / 边界 / null / 异常吞掉 / 错误返回值 |
+| Architecture | general-purpose(深度可换 code-modernization:architecture-critic) | 抽象泄漏 / 耦合 / SRP 违反 / 未来扩展 |
+| Security | general-purpose(深度 OWASP 可换 code-modernization:security-auditor) | 注入 / 鉴权 / 密钥泄漏 / SSE 错误处理 |
+| Performance | general-purpose | 主线程阻塞 / N+1 / 缓存 / 内存泄漏 / O(n²) |
 | Concurrency | general-purpose(Lumory: Swift Concurrency 重点) | actor / race / deadlock / cancellation / @MainActor 违反 |
-| Test gap | test-automator | 关键路径缺单测 / 边界没测 / mock 是否合理 |
-| API contract | api-design-principles / general-purpose | breaking change / 向后兼容 / 错误码 / SSE 协议 |
-| Data migration | **coredata-migration-reviewer**(Lumory 项目专用 agent) | CoreData schema / CloudKit 兼容 / backfill |
-| Style / convention | code-reviewer | 项目既有约定(CLAUDE.md)/ 命名 / 风格 |
+| Test gap | general-purpose(深度可换 code-modernization:test-engineer) | 关键路径缺单测 / 边界没测 / mock 是否合理 |
+| API contract | general-purpose | breaking change / 向后兼容 / 错误码 / SSE 协议 |
+| Data migration / CoreData | **coredata-migration-reviewer**(Lumory 项目自定义) | CoreData schema / CloudKit 兼容 / backfill |
+| SSE pipeline | **sse-pipeline-reviewer**(Lumory 项目自定义) | server `res.destroy` / 客户端 SSEParser / NetworkRetryHelper / `activeStreams` invariant |
+| Simplify / 死代码 | code-simplifier:code-simplifier | 可简化逻辑 / 未引用 symbol / 注释掉的代码 |
+| Style / convention | general-purpose | 项目既有约定(CLAUDE.md)/ 命名 / 风格 |
 
 **Lumory 强制视角**:
 - 任何 `Chronote/Model/` / `PersistenceController.swift` / `DiaryEntry+Extensions.swift` 被改 → **必须**召唤 `coredata-migration-reviewer`
@@ -177,8 +179,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --background
 ## Reviewer 矩阵
 | 视角 | subagent | 提了 N 条 | 命中率(被纳入最终) |
 |---|---|---|---|
-| correctness | code-reviewer (Opus) | 8 | 6/8 |
-| security | security-auditor (Opus) | 4 | 3/4 |
+| correctness | general-purpose (Opus) | 8 | 6/8 |
+| security | general-purpose (Opus, security focus in prompt) | 4 | 3/4 |
 | codex | codex:review | 5 | 4/5 |
 | ...
 ```
@@ -189,7 +191,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --background
 
 **用户要"跳过 codex"时:直接跳到 Step 6,在 Reviewer 矩阵补一行 `codex-final | skipped (user request)`。**
 
-Step 4 报告草稿落盘后，召唤一个 `codex:codex-rescue` subagent（read-only task）完整读取报告文件 + 所有被改动的源文件，做最后一轮独立扫描。
+Step 4 报告草稿落盘后，跑一次 Codex rescue 的 **read-only task**（通过 `codex-companion.mjs task` 或对应 skill 调用,**不是** `Agent` 工具的 `subagent_type` —— `codex:*` 不在 subagent_type 池里,当 subagent 派会 hard error）完整读取报告文件 + 所有被改动的源文件，做最后一轮独立扫描。
 
 **Prompt 要点**（主 agent 在召唤时必须包含）：
 - 给出报告文件路径（`CodeReview/superreview-*.md`）和所有被改动文件的绝对路径
@@ -268,7 +270,7 @@ Step 4 报告草稿落盘后，召唤一个 `codex:codex-rescue` subagent（read
 5. 收齐结果
 6. 跑核对(grep + Read + context7)
 7. 写报告草稿到 `CodeReview/superreview-*.md`
-8. 召唤 `codex:codex-rescue` 终审(用户没跳过才有)
+8. 跑 Codex rescue read-only task 终审(用户没跳过才有;Skill / Bash 路径,**非** Agent subagent_type)
 9. 按 Codex 终审结果更新报告(新增 / 纠正 finding)
 10. **强制**生成配套 HTML 到 `CodeReview/superreview-*.html`(给非程序员的版本,人话+类比+严重程度直观比喻)
 11. 主对话只回:MD 路径 + HTML 路径 + P0 数量 + 一句话总结

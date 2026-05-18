@@ -44,7 +44,7 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,target/sch
   - `Utils/` — `AnimationConfig`、`LiquidGlass`、`LocalizationHelper`、`Log`、`PerformanceOptimization`
 - `ChronoteTests/` · `ChronoteUITests/` — 单测 / UI 测试
 - `Lumory.xcodeproj` · `Lumory-Info.plist` · `Lumory.entitlements` · `Lumory.icon`
-- `server/` — Node 后端。代码主体集中在 [index.js](server/index.js)(约 280 行,Express 5 + pino + pino-http + express-rate-limit + axios + cors + dotenv),目录内还有 `package.json` / `package-lock.json` / `eslint.config.js`。
+- `server/` — Node 后端。代码主体集中在 [index.js](server/index.js)(约 840 行,2026-05-17 verified;Express 5 + pino + pino-http + express-rate-limit + axios + cors + dotenv),目录内还有 `package.json` / `package-lock.json` / `eslint.config.js`。
 - `ecosystem.config.js` — PM2 配置(`lumory-server`,fork 模式,`max_memory_restart: 512M`)。
 - `Scripts/reset-database.sh`、根目录 `clean-build.sh` / `deep-clean.sh` / `clean-corrupted-db.sh` — 维护脚本。
 - `Scripts/generate-screenshots.sh` — 自动跑 `ChronoteUITests/ScreenshotTests` 出 6 张 1320×2868 的 App Store 截图到 `Screenshots/zh-Hans/`。流程:boot iPhone 17 Pro Max → `simctl status_bar override`(9:41 / 满电) → `xcodebuild test -only-testing ... -parallel-testing-enabled NO` → `xcresulttool export attachments`。
@@ -166,10 +166,9 @@ iOS:
 
 ### 重构 / 待续
 
-- **`ThemeAliasResolver` 拆分** —— 882 行(2026-04-29 状态),class body ~500 行,SRP 三件套(read API / queue 生命周期 / persistence)混一坨。下次大动作前拆 `ThemeAliasStore`(read+disk)+ `ThemeAliasResolver`(queue+throttle)。
-- **`OpenAIService.swift:1633` 的 `// TODO: migrate to structured JSON payload`** —— 把 rawText 放进 JSON 字段而不是 raw body。具体 endpoint 看代码上下文,工作量看 schema 改动量。
-- **`CloudKitSyncMonitor` 内 8 处 `DispatchQueue.main.async` wrap 是 redundant**(class 已 `@MainActor`)—— 行为等价于 `MainActor.assumeIsolated`,清不清都安全。要清要审 8 处 callback 路径来源(确保是主线程 callback,不是 CK 后台 callback),工作量小但要细心。
-- **超长文件**(都是预存技术债,SwiftLint 阈值 600 行):HomeView 1700 / OpenAIService 1772 / DiaryDetailView 797 / ThemeAliasResolver 881 / ReminderService 699 / AskPastView 667 / ThemeAliasManagementView 666 / InsightsEngine 658。SettingsView (465) 和 InsightsView (480) 已通过 2026-05-01 拆分降下来。重构机会但都不算 bug。
+> 历史 backlog(2026-04-29 至 2026-05-01 写的 3 条:`ThemeAliasResolver` 拆 `ThemeAliasStore` / `OpenAIService.swift:1633` 的 structured JSON payload TODO / `CloudKitSyncMonitor` 8 处 `DispatchQueue.main.async` 迁 `@MainActor`)**已全部在 2026-05-16 wave 完成**:Resolver 拆 Store+Resolver 见超长文件段;Import payload 走 `OpenAIService+Import.swift` 的 `encodeImportPayload` 结构化 JSON;CloudKitSyncMonitor 全文件已 0 处 `DispatchQueue.main.async`,全部 `Task { @MainActor [weak self] in ... }`。所以本段当前只剩下面这一条。
+
+- **超长文件**(SwiftLint 阈值 600 行,2026-05-17 重测):ThemeAliasResolver 805 / AskPastView 783 / ReminderService 767 / ThemeAliasManagementView 709 / InsightsView 640 / InsightsEngine 508。near-threshold(已挨阈值,留意但不算超长):SettingsView 590。**已大幅拆下来的**(2026-05 多波 refactor):HomeView 1700→519(wave12 抽 4 子 view + EntryCreationService;2026-05-16 再拆 6 个 `HomeView+*.swift` extension 把 method logic 按功能区切,1433→519)/ OpenAIService 1772 不再单文件(wave11 拆 7 文件:主入口 + `OpenAI/SSEParser` + `+Streaming` + `+OneShotAI` + `+Suggestions` + `+ThemeAlias` + `+Import`)/ DiaryDetailView 797→229(2026-05-16 拆 3 个 `+Display` / `+Edit` / `+Audio` extension + 抽 `AsyncPhotoThumbnail`)/ ThemeAliasResolver 881→788+293(2026-05-16 拆 `ThemeAliasStore` 数据层,后续因 mutation 业务沉淀又长回 ~805)/ InsightsEngine 771→508+387(2026-05-16 round 3 拆 `InsightsSearchEngine` Search/RAG 子系统,拆完时 470+368,业务自然增长到现状)。重构机会但都不算 bug。
 
 ## Codex 自动化(本地,非生产)
 - **MCP servers**(`~/.Codex.json` 本项目 scope):
@@ -177,5 +176,11 @@ iOS:
   - `context7`(插件)— 查 SwiftUI / CoreData / CloudKit / Express 5 等官方文档时用,避免训练截止日之后的 API 漂移。
 - **Skills** 在 `.Codex/skills/`:`screenshot`(截图流水线 + 坑)。用户说截图 / 上架截图时会自动匹配。
 - **Subagent** `coredata-migration-reviewer`(`.Codex/agents/`):**改 `.xcdatamodeld` / `DiaryEntry+Extensions.swift` / `PersistenceController.swift` / 任何动 `DiaryEntry` schema 的服务后,主动召唤它跑一遍审查**,别等出事。
-- **可用的 `subagent_type` 池**(harness allowlist,**派单前别瞎猜**):`code-reviewer` / `general-purpose` / `Explore` / `Plan` / `coredata-migration-reviewer` / `sse-pipeline-reviewer` / `debugger` / `code-simplifier:code-simplifier` / `feature-dev:*` / `plugin-dev:*` / `agent-sdk-dev:*` / `codex:codex-rescue` / `Codex-guide` / `statusline-setup`。**`security-auditor` / `test-automator` / `architect-review` / `performance-engineer` / `database-optimizer` 等行业常见名字都不在池里**(直接 hard error)—— security / test-gap / architecture / perf review 这类专项视角统一走 `code-reviewer` 或 `general-purpose`,焦点写在 prompt 里。superreview 流水线踩过这坑(3/8 个 agent 派失败重新发)。
+- **`subagent_type` 池随插件安装 / 升级状态变化**(2026-05-17 重新核过 Claude Code 端;Codex 自己 spawn 时以你当前实际可用的 task type 为准):每会话起点 system reminder 列的就是当前全集,**spawn 前先核**;不在池里 hard error,无静默回退。Claude Code 端 2026-05-17 实测可用、对 Lumory review 工作有用的:
+  - 项目自定义:`coredata-migration-reviewer` / `sse-pipeline-reviewer`(`.claude/agents/*.md`,2026-05-17 verified **会**被注册成有效 `subagent_type` —— 早期版本曾不在池里,本节历史曾写"派单会 hard error",已纠正)
+  - Namespaced(命名带 "modernization" 但角度通用):`code-modernization:security-auditor` / `:architecture-critic` / `:test-engineer` / `:legacy-analyst` / `:business-rules-extractor`
+  - 其他:`code-simplifier:code-simplifier` / `plugin-dev:*` / `agent-sdk-dev:*`
+  - 兜底:`general-purpose` / `Explore`(只读搜索)/ `Plan`(设计实现)/ `claude-code-guide` / `statusline-setup` / `claude`
+- **历史上常被瞎猜、今天 Claude Code 端 spawn 仍 hard error**:裸名 `code-reviewer` / `debugger` / `security-auditor` / `architect-review` / `test-automator` / `performance-engineer` / `database-optimizer` / `api-design-principles` / `backend-security-coder`;前缀 `codex:*` / `feature-dev:*` / `superpowers:*`。**注意**:`codex:codex-rescue` / `codex:review` 在 Claude Code 端**不是**有效 `subagent_type`,要跑 Codex rescue 走 `codex-companion.mjs task` Bash / 对应 Skill,不要当 `Agent` 工具的 subagent 派。
+- **不确定时**:走 `general-purpose` + 把视角焦点写进 prompt;`.claude/agents/*.md` 内容可抄进 prompt 当 system 提示,等价手贴。superreview / megareview 流水线历史上踩过 3/8 agent 派失败的坑,现在统一表述后不再触发。
 - **Hook** `.Codex/hooks/server-lint.sh`(PostToolUse):编辑 `server/*.js` 后自动 `eslint --fix` + `prettier --write`,失败不阻塞对话。改了 hook 脚本记得 `chmod +x`。

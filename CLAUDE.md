@@ -26,7 +26,7 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,主 target
 - `ChronoteTests/` · `ChronoteUITests/` — 单测 / UI 测试。详见 [`testing.md`](.claude/rules/testing.md)。
 - `LumoryWidgetShared/` — **双 target 共享 sources**(主 App + LumoryWidgets extension 同时编),**只 import Foundation**。
 - `LumoryWidgets/` — Widget extension target(QuickWriteWidget + LockStreakWidget)。
-- `server/` — Node 后端,代码主体集中在 [server/index.js](server/index.js)(约 700 行)。详见 [`backend-server.md`](.claude/rules/backend-server.md)。
+- `server/` — Node 后端,代码主体集中在 [server/index.js](server/index.js)(约 840 行,2026-05-17 verified)。详见 [`backend-server.md`](.claude/rules/backend-server.md)。
 - `Lumory.xcodeproj` · `Lumory-Info.plist` · `Lumory.entitlements` · `Lumory.icon` · `LumoryWidgets-Info.plist` · `LumoryWidgets.entitlements`(widget plist / entitlement **放项目根目录**,不放 `LumoryWidgets/` —— 那是 PBXFileSystemSynchronizedRootGroup,扔进去会被自动塞进 Resources copy phase)。
 - `ecosystem.config.js` — PM2 配置(`lumory-server`,fork 模式,`max_memory_restart: 512M`)。
 - `Scripts/` — `generate-screenshots.sh`、`reset-database.sh`;根目录 `clean-build.sh` / `deep-clean.sh` / `clean-corrupted-db.sh` 维护脚本。
@@ -71,7 +71,7 @@ iOS:
 
 ### 重构 / 待续
 
-- **超长文件**(SwiftLint 阈值 600 行,2026-05-16 round 3 实测):ThemeAliasResolver 788(已拆 Store + 加 round 1-3 注释)/ AskPastView 783 / ReminderService 746 / ThemeAliasManagementView 709 / InsightsView 640 / SettingsView 590 / EntryCreationService 267。重构机会但都不算 bug。**已拆完的**:OpenAIService 在 wave11 拆 7 文件;HomeView 在 wave12 抽 4 个 SwiftUI 子 view + EntryCreationService;2026-05-16 把 method logic 按功能区拆 6 个 HomeView+*.swift extension 文件(Search / Recording / Audio / Send / Entry / Helpers),1433 → 519 行;2026-05-16 `ThemeAliasResolver` 拆 `ThemeAliasStore`(read+disk+pure reads+persistence)+ `ThemeAliasResolver`(facade ObservableObject + mutation + queue/throttle/cool-down timer),883 → 788 + 293,callsite 零改动(Resolver 仍 ~790 行因为 mutation 业务逻辑实质保留;真要再降需把 mutation 切 `+Confirm.swift` / `+Merge.swift` extension);2026-05-16 `DiaryDetailView` 拆 3 个 `+Display.swift` / `+Edit.swift` / `+Audio.swift` extension + 抽 `AsyncPhotoThumbnail` 独立 Component,861 → 229 行;**2026-05-16 round 3** `InsightsEngine` 拆 facade + `InsightsSearchEngine`(Search/RAG 子系统),771 → 470 + 368,Phase 3.1 完成(Phase 3.2 aggregator 拆 + 嵌套类型抽顶层留 backlog,见 `.claude/rules/ios-codebase.md` `InsightsSearchEngine.swift` 行的注释)。**
+- **超长文件**(SwiftLint 阈值 600 行,2026-05-17 重测):ThemeAliasResolver 805(已拆 Store + 加 round 1-3 注释)/ AskPastView 783 / ReminderService 767 / ThemeAliasManagementView 709 / InsightsView 640。near-threshold(已挨阈值,留意但不算超长):SettingsView 590。重构机会但都不算 bug。**已拆完的**:OpenAIService 在 wave11 拆 7 文件;HomeView 在 wave12 抽 4 个 SwiftUI 子 view + EntryCreationService;2026-05-16 把 method logic 按功能区拆 6 个 HomeView+*.swift extension 文件(Search / Recording / Audio / Send / Entry / Helpers),1433 → 519 行;2026-05-16 `ThemeAliasResolver` 拆 `ThemeAliasStore`(read+disk+pure reads+persistence)+ `ThemeAliasResolver`(facade ObservableObject + mutation + queue/throttle/cool-down timer),883 → 788 + 293(callsite 零改动,Resolver 后续因 mutation 业务逻辑沉淀又长回 ~805,真要再降需把 mutation 切 `+Confirm.swift` / `+Merge.swift` extension);2026-05-16 `DiaryDetailView` 拆 3 个 `+Display.swift` / `+Edit.swift` / `+Audio.swift` extension + 抽 `AsyncPhotoThumbnail` 独立 Component,861 → 229 行;**2026-05-16 round 3** `InsightsEngine` 拆 facade + `InsightsSearchEngine`(Search/RAG 子系统),771 → 470 + 368(2026-05-17 重测 508 + 387,业务自然增长),Phase 3.1 完成(Phase 3.2 aggregator 拆 + 嵌套类型抽顶层留 backlog,见 `.claude/rules/ios-codebase.md` `InsightsSearchEngine.swift` 行的注释)。**
 
 ## Claude Code 自动化(本地,非生产)
 
@@ -79,9 +79,13 @@ iOS:
   - `xcodebuildmcp` — 封装 `xcodebuild` / `simctl` / UI 自动化。**优先用它的工具**而不是 Bash 跑 `xcodebuild`。坑:(1) `build_run_sim({extraArgs: [...]})` 的 extraArgs 是**编译 flag**,不是 app 启动参数 —— 塞 `-LumoryUITestSampleData YES` 会被 xcodebuild 拒。要传 app 启动参数走三步:`build_sim` → `install_app_sim({appPath: ".../Debug-iphonesimulator/Lumory.app"})` → `launch_app_sim({args: ["-LumoryUITestSampleData", "YES"]})`。`session_set_defaults({bundleId: "Mingyi.Lumory"})` 一次,后续不用再传。(2) 默认配置不暴露 tap/gesture,`snapshot_ui` 只读但可用;真要驱动 UI 走 computer-use 或 ChronoteUITests。(3) Sim 窗口可能投到"External Display"虚拟屏,computer-use 看不到但 `xcodebuildmcp.snapshot_ui` 走 simctl 是 headless 的不受影响。
   - `context7`(插件)— 查 SwiftUI / CoreData / CloudKit / Express 5 等官方文档时用,避免训练截止日之后的 API 漂移。
 - **Skills** 在 `.claude/skills/`(共 4 个):`screenshot`(截图流水线 + 坑,"截图/上架截图"自动触发)/ `megareview`(整库 bug+优化+功能机会审计,分波 Opus subagent)/ `superreview`(默认审 working tree;自然语言开关支持"未 push 到 main" → `origin/main..HEAD`、"vs main" → `main..HEAD`、"跳过 codex" 等;每次强制出 MD + 给非程序员看的 HTML 双报告到 `CodeReview/`)/ `sync-to-mac`(双 Mac 协作 git 同步,push/pull/ship)。
-- **Subagents** 项目级定义在 `.claude/agents/`(`coredata-migration-reviewer.md` / `sse-pipeline-reviewer.md`)。**但**:这些 `.md` 文件**不会**被当前 harness 自动注册成 `subagent_type` —— 它们的内容只是项目自留文档,提示"改这块代码该怎么审"。
-- **`Agent` 工具实际接受的 `subagent_type` 池**(2026-05-13 verified by hard-error 多次):**只有** `general-purpose` / `Explore` / `Plan` / `claude` / `claude-code-guide` / `statusline-setup`。
-  - **不要瞎猜**这些名字以外的:`coredata-migration-reviewer` / `sse-pipeline-reviewer` / `superpowers:code-reviewer` / `codex:codex-rescue` / `feature-dev:*` / `plugin-dev:*` / `agent-sdk-dev:*` / `code-simplifier:*` 全部**不在池里**,提交会 hard error。
-  - **裸的行业常见名**`code-reviewer / debugger / security-auditor / test-automator / architect-review / performance-engineer / database-optimizer` 也**不在池里**。
-  - **怎么办**:全部 code review / coredata / SSE / security / test-gap / architecture / perf 视角统统走 `general-purpose`,把 focus + 项目约定写进 prompt 里。`.claude/agents/*.md` 的内容可以**抄进 prompt**(指明"按 coredata-migration-reviewer 角度审")。读 / 搜代码走 `Explore`,设计实现计划走 `Plan`。
+- **Subagents** 项目级定义在 `.claude/agents/`(`coredata-migration-reviewer.md` / `sse-pipeline-reviewer.md`)。**2026-05-17 verified**:harness **会**把这两个注册成有效 `subagent_type`(早期版本不会,本节历史曾写"不在池里" —— 已纠正)。
+- **`Agent` 工具的 `subagent_type` 池随插件安装 / 升级状态变化**,每个会话起点的 system reminder 列的就是当前全集。spawn 前**先看那份列表**确认目标在池里;不在池里 hard error,无静默回退。
+- **2026-05-17 实测在池里、对 Lumory review 工作有用的**:
+  - 项目自定义:`coredata-migration-reviewer` / `sse-pipeline-reviewer`
+  - Namespaced(命名带 "modernization" 但角度通用,可做安全 / 架构 / 测试缺口审计):`code-modernization:security-auditor` / `:architecture-critic` / `:test-engineer` / `:legacy-analyst` / `:business-rules-extractor`
+  - 其他:`code-simplifier:code-simplifier`(代码简化)/ `plugin-dev:*`(改 `.claude/skills` / plugin 时用)/ `agent-sdk-dev:*`
+  - 兜底通用:`general-purpose`(把 focus 写进 prompt)/ `Explore`(只读搜索)/ `Plan`(设计实现)/ `claude-code-guide` / `statusline-setup` / `claude`
+- **历史上常被瞎猜、但今天 spawn 仍会 hard error 的**:裸名 `code-reviewer` / `debugger` / `security-auditor` / `architect-review` / `test-automator` / `performance-engineer` / `database-optimizer` / `api-design-principles` / `backend-security-coder`;前缀 `codex:*` / `feature-dev:*` / `superpowers:*`。
+- **怎么办**:不确定走 `general-purpose` + 把 focus 写进 prompt。`.claude/agents/*.md` 的内容也可以**抄进 prompt** 给 `general-purpose` 用,等同手贴 system prompt。读 / 搜代码走 `Explore`,设计 plan 走 `Plan`。
 - **Hooks**:`.claude/hooks/server-lint.sh`(PostToolUse)— 编辑 `server/*.js` 后静默跑 `eslint --fix` + `prettier --write`,失败不阻塞对话。改 hook 脚本记得 `chmod +x`。

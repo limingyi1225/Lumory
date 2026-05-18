@@ -9,11 +9,11 @@ paths:
 
 ## 字号
 
-用语义 `.body` / `.title3` / `.footnote` / `.callout` 等,**不要** `.font(.system(size: N))`(reviewer 实测全仓 51 处硬编码,日记 summary 同一字段在 3 处用 3 个字号 16/15/17)。例外:monospaced 计时(确实需要等宽)、widget 字号约束。
+用语义 `.body` / `.title3` / `.footnote` / `.callout` 等,**不要** `.font(.system(size: N))`(2026-05-17 audit:`Chronote/` 全仓 37 处 `.system(size:` 残留,日记 summary 同一字段在 3 处用 3 个字号 16/15/17)。例外:monospaced 计时(确实需要等宽)、widget 字号约束(LumoryWidgets 另算 8 处)。
 
 ## 圆角
 
-用 `LumoryCornerRadius.card` (16) / `.chip` (22) / `.inline` (12)。规则:**内容卡 16,toast / overlay 22,inline banner 12**。仍有 ~38 处 14/18/10/12 硬编码散布(`grep cornerRadius:` 实数);要做一致性 sweep 时再加 `.thumbnail`(8)token(2026-05 删除时全仓 0 caller)。
+用 `LumoryCornerRadius.card` (16) / `.chip` (22) / `.inline` (12)。规则:**内容卡 16,toast / overlay 22,inline banner 12**。2026-05-17 audit:`Chronote/Views` 共 45 处硬编码 `cornerRadius:`,top values 14(×10)/ 8(×8)/ 4(×7)/ 12(×5)/ 16(×3);说明 `.thumbnail`(8)在 view 层确实有需要,要做一致性 sweep 时再加这个 token(2026-05 删除时全仓 0 caller,现在 8(×8)说明用例长出来了)。
 
 ## 动画
 

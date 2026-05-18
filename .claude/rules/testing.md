@@ -81,7 +81,7 @@ MockURLProtocol.requestHandler = { request in
 
 **关键 gotcha**:
 1. **`nonisolated(unsafe) static var requestHandler` / `recordedRequests`** —— URLProtocol 是 Foundation instantiate,我们没法注入 instance state,只能 static。**tearDown 必须 `reset()`**,否则 handler 泄漏到下一条测试 → 难诊断的 false positive/negative。
-2. **`Lumory.xcscheme` 两个 `TestableReference` 都设 `parallelizable="NO"`**(2026-05-16 round 1 fix)—— MockURLProtocol static state 假设串行,Xcode UI 跑测试时 parallelizable=YES 会让两条 import test 并行 race,handler 互相覆盖。CLI 跑要传 `-parallel-testing-enabled NO` flag 兜底,Xcode UI 跑只能靠 scheme 设置。
+2. **`Lumory.xcscheme` 的 `ChronoteTests` TestableReference 设 `parallelizable="NO"`**(2026-05-16 round 1 fix;2026-05-17 verified 仅 unit-test reference 显式设此 attribute,`ChronoteUITests` 没设 —— UI tests 各跑独立 XCUITest 进程,不共享 MockURLProtocol static state,不需要)—— MockURLProtocol static state 假设串行,Xcode UI 跑单测时 parallelizable=YES 会让两条 import test 并行 race,handler 互相覆盖。CLI 跑要传 `-parallel-testing-enabled NO` flag 兜底,Xcode UI 跑只能靠 scheme 设置。
 3. **body capture 读 `httpBodyStream`**:URLSession 把 `request.httpBody` 转成 streaming body,URLProtocol 拦截时 `httpBody` 为 nil。`readBody(from:)` 用 4096-byte buffer + while-loop 读到 EOF,`read < 0` 返 nil(stream error 与 EOF 区分,2026-05-16 round 3 fix)。
 4. **non-retryable 错误让测试快**:`URLError(.cannotFindHost)` / HTTP 400/401 不在 NetworkRetryHelper 重试列表,测试快速失败而非走 1s+2s+4s exponential backoff。
 

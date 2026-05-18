@@ -78,6 +78,10 @@ lumory-backend.tar.gz
 .swift-module-cache/
 .xcodebuildmcp/
 .derivedData-review/
+# Xcode 用非标 `XCODE_DEVELOPER_USR_PATH` 跑时会在 CWD 落一个 PlugInCache 缓存目录,
+# 跟 Xcode 版本绑(目录名形如 `26.4.1-17E202`),反复 build 会脏 diff,且无任何代码价值。
+com.apple.DeveloperTools/
+*.xcplugincache
 
 # Code review reports (local-only, may contain quoted source / sensitive context)
 CodeReview/

@@ -43,6 +43,9 @@ enum EntryWipeOrchestrator {
         ThemeAliasResolver.shared.resetForBulkEntryWipe()
         PromptSuggestionEngine.shared.clearCache()
         InsightsResultCache.shared.clear()
+        // celebrated milestone 集合只在 bulk wipe 重置 — 让"删全部 → 重新写"的用户能再次解锁
+        // 7/14/30/... overlay。单删路径不调(streak 不会跌回 0,milestone 算法本就不会重新触发)。
+        StreakMilestoneService.shared.resetCelebrated()
         // Widget.clear 是 actor sync body + 写 App Group 文件 + WidgetCenter.reload。
         // 几 ms 内完成,但用户立刻锁屏 / 杀 App 时 unstructured Task 会被截 → 必须 await 而非 fire-and-forget。
         await WidgetSnapshotService.shared.clear()

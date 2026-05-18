@@ -3,7 +3,14 @@ import CoreData
 import CryptoKit
 
 @available(iOS 15.0, macOS 12.0, *)
-final class OpenAIService: AIServiceProtocol {
+// `@unchecked Sendable` — 协议 `AIServiceProtocol: Sendable` 要求 conformer 满足 Sendable。
+// 这个类全是 `let` immutable stored state(`backendURL` / `session` / `appSharedSecret` / 两个
+// JSONEncoder/Decoder),理论 inferred Sendable;但 `JSONEncoder` / `JSONDecoder` 类型自身在
+// Swift 类型系统上**不是** `Sendable`(reference type 有内部 cache state),所以无法 inferred。
+// 实际生产路径上两个 coder 只调 encode/decode 不改配置,跨线程使用安全。`@unchecked` 把这条
+// "我已经验过线程安全"的承诺挂出来。如果 future 加 mutable shared state,改用内部锁 + 保留
+// `@unchecked` 或者拆掉变成 actor。
+final class OpenAIService: AIServiceProtocol, @unchecked Sendable {
     /// 进程内共享实例——后台代理模式下不再需要每次编辑都 new 一个网络客户端。
     /// 调用方优先用 `.shared`，避免在 hot-path 上重复初始化。
     static let shared = OpenAIService()

@@ -424,6 +424,11 @@ struct AskPastView: View {
                 // activeTaskID 但本 task 还没 reach 这行"的极窄 race window 才生效。改用显式
                 // isSuperseded 表达意图,后人改时不会误以为是死代码。
                 if isSuperseded { return }
+                // **用户主动 cancel 不入库**:`persistConversationIfNeeded` 仅挡彻底空 cancel
+                // (`text == "" && errorText == ""`),挡不住"已流半句被用户点 stop"的场景 —
+                // 那种半截答案会进 History 让用户看到"咦我刚才取消的内容怎么还在",信任崩。
+                // 注意 errorText 仍走 persist 路径(让用户能回看"网络炸了那次问的什么")。
+                if wasCancelled { return }
                 self.persistConversationIfNeeded(question: question, aiMessageID: aiMessageID)
             }
         }

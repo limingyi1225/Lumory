@@ -565,3 +565,4 @@
 "清除 AI 回顾缓存失败。请稍后重试。错误:%@" = "Failed to reset AI recap cache. Please try again later. Error: %@";
 "settings.resetNarrative.cleared" = "Cleared %d AI recaps";
 "settings.resetNarrative.empty" = "No AI recaps to clear";
+"音频播放失败" = "Audio playback failed";

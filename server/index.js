@@ -394,6 +394,12 @@ app.post('/api/openai/chat/completions', async (req, res) => {
     return;
   }
 
+  // abortUpstream lifted out of try so the catch block can `res.off('close', ...)` it —
+  // axios() at line ~415 can throw (timeout / network / 401) **after** the listener is
+  // registered, leaving the listener attached when control falls into the catch path.
+  // Node Writable cleanup auto-removes listeners on destroy, but explicit `res.off` is
+  // less fragile to refactor (lint flags "registered but never removed" for `on(...)` calls).
+  let abortUpstream;
   try {
     if (isStreaming) {
       req.log.info('streaming request started');
@@ -404,7 +410,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       res.setHeader('X-Accel-Buffering', 'no');
 
       const abortController = new AbortController();
-      const abortUpstream = () => {
+      abortUpstream = () => {
         abortController.abort();
       };
       // `req.on('aborted')` 在 Node 17+ deprecated,'close' 覆盖更全面(含 TCP RST、
@@ -529,6 +535,12 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       }
     }
   } catch (err) {
+    // Cleanup listener on the streaming early-throw path — axios() reject before 'end' / 'error'
+    // listeners attach leaves res.on('close', abortUpstream) dangling. Node Writable destroy will
+    // sweep it eventually, but explicit off here keeps the EventEmitter accounting honest.
+    if (isStreaming && abortUpstream) {
+      res.off('close', abortUpstream);
+    }
     if (isStreaming && err.code === 'ERR_CANCELED') {
       req.log.info('streaming request cancelled');
       if (!res.destroyed) {
@@ -671,11 +683,13 @@ app.post('/api/openai/audio/transcriptions', (req, res) => {
     form.append('model', TRANSCRIPTION_MODEL);
     form.append('response_format', 'json');
     if (language) form.append('language', language);
-    form.append(
-      'file',
-      new Blob([req.file.buffer], { type: req.file.mimetype }),
-      req.file.originalname || 'audio.m4a'
-    );
+    // 客户端可控字符串 sanitize — 即使 Node 18 FormData 自身会 escape `\r\n`(防 multipart header
+    // injection),trust boundary 上仍不该让任意客户端字符串原样出现在传给 OpenAI 的 filename。
+    // 收紧到 `[A-Za-z0-9._-]` 100 字节内,iOS native 客户端发的 `recording.m4a` 类正常文件名不受影响。
+    const safeFilename =
+      (req.file.originalname || 'audio.m4a').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100) ||
+      'audio.m4a';
+    form.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), safeFilename);
 
     // 客户端断开时取消上游 — transcription 25 MB upload + 30-90s 上游耗时,
     // 不取消会让客户端关 sheet 后服务器仍跑完整套,烧无效 token。

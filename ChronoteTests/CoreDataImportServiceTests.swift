@@ -25,7 +25,10 @@ import CoreData
 /// 可配置的 AI 测试 double — 让单测控制 parseImportedDiaries 的返值 / 抛错。
 /// MockAIService 默认 parseImportedDiaries 返 [],不够灵活测各种场景。
 @MainActor
-private final class ImportTestDouble: AIServiceProtocol {
+// `@unchecked Sendable` — `AIServiceProtocol: Sendable` 要求 conformer 满足。test double 用
+// mutable `var` 字段记录 call count / fixtures,实际所有测试都从主线程驱动(单测 await 模式),
+// race 不存在但 Swift 类型系统看不出。`@unchecked` 把这条挂出来。
+private final class ImportTestDouble: AIServiceProtocol, @unchecked Sendable {
     var parseResult: [ParsedDiaryEntry] = []
     var parseError: Error?
     var parseCallCount = 0

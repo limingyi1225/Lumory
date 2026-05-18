@@ -119,8 +119,16 @@ final class AudioRecorder: NSObject, ObservableObject {
             // 启用分贝检测
             recorder?.isMeteringEnabled = true
 
-            // 开始录制
-            recorder?.record()
+            // 开始录制 — `record()` 返 Bool,false 表示系统拒录(权限被吊销 / audio session 抢占失败 /
+            // 磁盘满)。不 check 返回值会让 UI 进 isRecording=true + meter 跑,实际生成 0 字节 m4a。
+            guard recorder?.record() == true else {
+                Log.error("[AudioRecorder] AVAudioRecorder.record() returned false; aborting startRecording", category: .audio)
+                recorder = nil
+                #if !os(macOS)
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                #endif
+                return false
+            }
             startTime = Date()
             duration = 0
 
@@ -221,7 +229,12 @@ final class AudioRecorder: NSObject, ObservableObject {
                 Log.info("[AudioRecorder] Interruption began — stopped recording (file=\(filename ?? "nil"))", category: .audio)
             }
         case .ended:
-            // 中断结束不自动续录；让用户自己决定是否再开一段
+            // **不在 .ended reactivate session** — 我们的策略是不自动续录,reactivate 会让进程
+            // 占着 play-and-record audio route 不释放(没有 recorder 在跑也 hold 着),干扰其他
+            // app 接管 audio。下次用户主动 startRecording 时,内部会调 `setActive(.playAndRecord, ...)`
+            // 自己 reactivate,不需要这里提前做。原 megareview finding "interruption ended 不
+            // reactivate 会让 startRecording silent failure" 经 codex re-review verify 是 false alarm —
+            // startRecording 自己的 setActive 调用足以恢复 session。
             break
         @unknown default:
             break
@@ -284,8 +297,11 @@ final class AudioRecorder: NSObject, ObservableObject {
         if let observer = interruptionObserver {
             NotificationCenter.default.removeObserver(observer)
         }
-        // 尽力归还音频路由，失败也无所谓（session 可能已被销毁）
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        // **不在 deinit 调 `AVAudioSession.setActive(false)`** — session 是 process-shared 单例,
+        // `AudioPlaybackController` 可能正持有 active session 播一段录音,deinit 路径关 session 会让
+        // 那边的播放无声中断。`stopRecording()` 内部 defer 已经在录制结束的"正常"路径关 session,
+        // deinit 是"recorder 没 stopRecording 就被 dealloc"的边角 case(app 被 jetsam 或调用方忘 stop),
+        // 那种场景下进程级 session 状态轮不到 recorder 单独管。
         #endif
     }
 }

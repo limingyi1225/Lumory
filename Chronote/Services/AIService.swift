@@ -116,7 +116,15 @@ enum DiaryImportError: LocalizedError, Sendable {
     }
 }
 
-protocol AIServiceProtocol {
+// `: Sendable` — 协议实例(`OpenAIService.shared` / `MockAIService`)被 9+ 处当
+// `let ai: AIServiceProtocol` 跨 await / actor 边界传(`EntryCreationService` Task →
+// `performAIWriteback`,`InsightsEngine` / `InsightsSearchEngine` / `NarrativePrecomputeService`
+// 间接持等)。Swift 5 mode 是 warning,Swift 6 strict mode 全仓编不过 — 显式 Sendable
+// 锁住契约 + 未来再加 stored property 时编译器立刻强制满足 Sendable 不变量。
+// `OpenAIService` 是 immutable stored state(let session / let appSharedSecret / static
+// actor),`MockAIService` 是 struct,都满足 Sendable;若 future 实现含 mutable shared
+// state 必须改 `@unchecked Sendable` + 内部锁。
+protocol AIServiceProtocol: Sendable {
     /// 根据文本生成简要摘要
     func summarize(text: String) async -> String?
 

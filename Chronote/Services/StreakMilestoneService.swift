@@ -85,6 +85,24 @@ final class StreakMilestoneService: ObservableObject {
         pendingMilestone = nil
     }
 
+    /// **bulk wipe 入口**:清空 celebrated 集合,让用户"删除所有日记 → 重新开始"
+    /// 时能再次解锁 7/14/30/... milestone overlay。
+    /// 只该被 `EntryWipeOrchestrator.performBulkWipeCleanup` 调,单删不调
+    /// (单删 streak 不会跌回 0,milestone 算法本身就不会重新触发)。
+    ///
+    /// **必须先 cancel + nil `evaluateTask`** — bulk wipe 跟 in-flight 评估存在 race:
+    /// 老 task 用的是 wipe 前的 streak 数据,如果不 cancel,wipe 完成后老 task 跑到
+    /// `handleStreak` 仍会 `celebrated.insert(milestone)` 把刚清的集合塞回去,或者
+    /// 弹一个 pre-wipe milestone overlay。cancel 后 evaluation body 内的 await 边界会
+    /// throw CancellationError,handleStreak 不会跑。
+    func resetCelebrated() {
+        evaluateTask?.cancel()
+        evaluateTask = nil
+        celebrated.removeAll()
+        defaults.removeObject(forKey: celebratedKey)
+        pendingMilestone = nil
+    }
+
     /// **测试 seam** — 让单测能 inject "已庆祝过" 集合 / 重置 / 直接 evaluate。
     /// `private(set)` `celebrated` 加显式 reset/set 接口,不让 production 代码绕过 milestone 算法。
     #if DEBUG

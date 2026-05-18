@@ -1,8 +1,11 @@
 import Foundation
 import CoreData
 
-/// 简单的数据结构，用于在AI服务中传递日记数据，避免CloudKit同步冲突
-struct DiaryEntryData {
+/// 简单的数据结构,用于在 AI / Insights / Widget 等场景跨 actor 传递日记数据快照,
+/// 不直接持 NSManagedObject(后者不是 Sendable),避免 CloudKit 同步冲突 + Swift 6 strict
+/// 并发警告。所有字段都是值类型 Sendable,显式 conformance 锁住契约 — 未来加非 Sendable
+/// 字段时 Swift 编译器立刻报错而不是沉默退化。
+struct DiaryEntryData: Sendable {
     let id: UUID
     let date: Date
     let text: String

@@ -85,12 +85,15 @@ enum EntryCreationService {
             Log.info("[EntryCreationService] 日记已保存,标题稍后生成", category: .ui)
         } catch {
             Log.error("[EntryCreationService] 保存日记失败: \(error)", category: .ui)
-            // 已落盘的 image 文件孤儿清理 — entry save 失败时这些文件已经被 persistImagesOffMain
-            // 写到 Documents/LumoryImages,无人引用就是 storage leak,长期累积。best-effort 删,失败静默。
-            // (audio 暂不清:persistAudioOffMain 已把本地副本搬到 iCloud,iCloud 路径由 entry.audioURL 三层
-            // fallback 解析,这个 catch 分支拿不到 entry 实例,留给后续策略处理。)
+            // 已落盘的 image / audio 文件孤儿清理 — entry save 失败时这些附件已经被 persist*OffMain
+            // 写到 Documents/LumoryImages / iCloud LumoryAudio,无人引用就是 storage leak。
+            // `deleteAudioFromDocuments` 走三层 fallback(iCloud → 本地 LumoryAudio → legacy 扁平),
+            // best-effort 删,失败静默。
             for fileName in imageFileNames {
                 try? DiaryEntry.deleteImageFromDocuments(fileName)
+            }
+            if let audioName, !audioName.isEmpty {
+                DiaryEntry.deleteAudioFromDocuments(audioName)
             }
             return .failed
         }

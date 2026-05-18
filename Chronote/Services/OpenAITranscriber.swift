@@ -169,8 +169,9 @@ final class OpenAITranscriber: TranscriberProtocol {
             mimeType: mimeType,
             content: audioData
         )
-        // 后端不读这个字段(model 在服务端 hardcode 成 gpt-4o-mini-transcribe),
-        // 但保留 multipart 字段对调试 / 抓包语义清晰也无害。后端可以 ignore。
+        // **故意不附 `model` 字段** — 后端 hardcode `gpt-4o-mini-transcribe`,任何 client 传的
+        // model 值都会被服务端忽略(防客户端篡改改更贵模型,trust boundary 在服务端)。这里只附
+        // `response_format` 让后端透传给 OpenAI;backend-server.md "转写路由 model hardcode" 段。
         body.appendBoundaryField(boundary: boundary, name: "response_format", value: "json")
         body.appendClosingBoundary(boundary: boundary)
         return PreparedUpload(body: body, boundary: boundary)

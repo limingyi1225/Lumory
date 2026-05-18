@@ -2206,7 +2206,12 @@ struct ThemeAliasJudgeServiceTests {
     }
 }
 
-private final class ThemeAliasAITestDouble: AIServiceProtocol {
+// `@unchecked Sendable` — `AIServiceProtocol` 加 Sendable 后,所有 conformer 必须满足。
+// test double 用 mutable `var` 字段记录 call counts / fixtures 给 assertion 用,在 actor 隔离
+// 上"承诺线程安全";所有测试都从主线程驱动它(单测 await 模式),实际 race 不存在,但 Swift
+// 类型系统看不出。`@unchecked` 把这条挂出来,Swift 6 strict 编译通过。如果 future 测试想从
+// 后台线程并发调用 fixtures,改用 `@MainActor` 标记 + actor isolation 或加内部锁。
+private final class ThemeAliasAITestDouble: AIServiceProtocol, @unchecked Sendable {
     var judgeCalls = 0
     var scanCalls = 0
     var judgeResult: [ThemeAliasJudgeMatch] = []

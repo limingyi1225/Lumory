@@ -567,3 +567,4 @@
 "清除 AI 回顾缓存失败。请稍后重试。错误:%@" = "清除 AI 回顾缓存失败。请稍后重试。错误：%@";
 "settings.resetNarrative.cleared" = "已清除 %d 条 AI 回顾";
 "settings.resetNarrative.empty" = "没有可清除的 AI 回顾";
+"音频播放失败" = "音频播放失败";

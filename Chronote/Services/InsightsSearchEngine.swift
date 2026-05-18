@@ -166,8 +166,12 @@ final class InsightsSearchEngine {
                     continuation.yield(InsightsEngine.AnswerChunk(citations: selected.map { $0.id }))
                 }
                 // 升级消费:走 askEvents,把 .truncated 单独冒泡给 UI
-                for await event in self.ai.askEvents(question: question, context: selected) {
-                    if Task.isCancelled { break }
+                // **streamLoop: label** — 裸 `break` 只跳 switch 不跳 for-await,
+                // sibling consumer(NarrativeGenerationCoordinator / NarrativePrecomputeService)
+                // 都用同款 label。当前 producer 自然 `continuation.finish()` 所以不暴露,
+                // 但契约破洞 — MockAIService / 测试 producer 只 yield `.done` 不 close 会永久挂住。
+                streamLoop: for await event in self.ai.askEvents(question: question, context: selected) {
+                    if Task.isCancelled { break streamLoop }
                     switch event {
                     case .chunk(let text):
                         continuation.yield(InsightsEngine.AnswerChunk(text: text))
@@ -179,7 +183,7 @@ final class InsightsSearchEngine {
                         // AskPastView 只显示空 bubble + 通用 banner,用户看不到具体错误。
                         continuation.yield(InsightsEngine.AnswerChunk(failureReason: error.localizedDescription))
                     case .done:
-                        break
+                        break streamLoop
                     }
                 }
                 continuation.finish()

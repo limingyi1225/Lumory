@@ -108,7 +108,7 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
             isPlaying = true
             startDisplayLink()
         } catch {
-            Log.error("[AudioPlaybackController] Could not play audio: \\(error)", category: .ui)
+            Log.error("[AudioPlaybackController] Could not play audio: \(error)", category: .ui)
             onPlayError?(error)
             stopPlaybackCleanup() // 出错时彻底清理
         }
@@ -128,16 +128,17 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
              currentPlayingFileName = nil
         }
         stopDisplayLink()
-        if audioPlayer != nil {
-            do {
+        // **无条件 setActive(false)** — 之前 guard `if audioPlayer != nil` 让 sequential 调用第二次
+        // (audioPlayer 已 nil)skip 这步,session 持续 active,系统其他 audio app(后台 podcast / music)
+        // 等几秒 timeout 才接管。重复 setActive(false) 无副作用,值得跨 app 礼貌性。
+        do {
 #if canImport(UIKit)
-                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
 #endif
-            } catch {
-                Log.error("[AudioPlaybackController] Could not deactivate audio session: \\(error)", category: .ui)
-            }
-            audioPlayer = nil
+        } catch {
+            Log.error("[AudioPlaybackController] Could not deactivate audio session: \(error)", category: .ui)
         }
+        audioPlayer = nil
     }
 
     /// 收拾 audio session / displayLink / player 状态,**不**触发 `onFinishPlaying`。
@@ -147,16 +148,15 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
     private func stopPlaybackCleanup() {
         isPlaying = false
         stopDisplayLink()
-        if audioPlayer != nil {
-            do {
+        // 同 stopPlayback —— 无条件 setActive(false) 让系统其他 audio app 立刻接管。
+        do {
 #if canImport(UIKit)
-                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
 #endif
-            } catch {
-                Log.error("[AudioPlaybackController] Could not deactivate audio session on cleanup: \\(error)", category: .ui)
-            }
-             audioPlayer = nil
+        } catch {
+            Log.error("[AudioPlaybackController] Could not deactivate audio session on cleanup: \(error)", category: .ui)
         }
+        audioPlayer = nil
     }
 
     @objc fileprivate func updateProgress() {

@@ -81,8 +81,11 @@ final class ContextPromptGenerator {
         let yesterdayEnd = calendar.startOfDay(for: now)
         let yesterdayEntries = recentEntries.filter { $0.date >= yesterdayStart && $0.date < yesterdayEnd }
         let themes = yesterdayEntries.flatMap { $0.themes }
-        // 挑一个有辨识度的主题（不是"情绪"这种太泛的）
-        let goodThemes = themes.filter { $0 != NSLocalizedString("情绪", comment: "") }
+        // 挑一个有辨识度的主题(避开"情绪 / 生活 / 工作"等元描述词)。
+        // 原实现只 filter `NSLocalizedString("情绪")` 一个,英文用户走 fallback 中文 key
+        // 对英文 themes "emotion" / "feeling" 完全不生效。改用 `InsightsEngine.isBannedTheme`
+        // (与 `topThemePrompt` 同款 30+ 词 banned set,跨语言)。
+        let goodThemes = themes.filter { !InsightsEngine.isBannedTheme($0) }
         guard let theme = goodThemes.first else { return nil }
         return ContextPrompt(text: String(format: NSLocalizedString("昨天你提到 %@，今天感觉如何？", comment: "Yesterday theme follow-up"), theme))
     }

@@ -21,20 +21,24 @@ extension DiaryDetailView {
     }
 
     func playOrPauseAudio(url: URL, fileName: String) {
-        audioPlaybackController.play(url: url, fileName: fileName)
-
-        // Removed problematic and unused knownDuration block.
-        // Duration loading is handled by .task and AudioPlaybackController internally.
-
-        // 设置播放结束和错误的回调
+        // **关键顺序**:callback 必须在 `play()` **之前**注册。AVAudioPlayer init 偶尔会同步抛
+        // (corrupt file / unsupported codec),controller.play 内 catch 后**同步** call onPlayError。
+        // 之前的顺序是 play → 设回调,这种同步错误就丢了用户提示。HomeView+Audio.swift 已是这个顺序。
         audioPlaybackController.onFinishPlaying = { [weak audioPlaybackController] in
-            // UI 可以在这里更新，例如重置播放按钮状态
             Log.info("[DiaryDetailView] Playback finished. Controller isPlaying: \(audioPlaybackController?.isPlaying ?? false)", category: .ui)
         }
-        audioPlaybackController.onPlayError = { [weak audioPlaybackController] error in // Added weak capture for consistency if needed
+        audioPlaybackController.onPlayError = { [weak audioPlaybackController] error in
             let fileName = audioPlaybackController?.currentPlayingFileName ?? "N/A"
             Log.error("[DiaryDetailView] Audio playback error: \(error.localizedDescription). Controller file: \(fileName)", category: .ui)
-            // 可以在这里向用户显示错误信息
+            // 向用户显示反馈 — 不再静默。走全局 LumoryToastCenter,DiaryDetailView root
+            // 已挂 `.lumoryToastOverlay()`(views-design-tokens rule "Toast 入口")。
+            // `.warning` 已经走红色 + 警示三角图标(LumoryToast.swift Severity 没有 `.error` case,
+            // `.warning` 就是 destructive 视觉档),语义足够覆盖播放失败。
+            LumoryToastCenter.shared.show(
+                NSLocalizedString("音频播放失败", comment: "DiaryDetailView audio playback error toast"),
+                severity: .warning
+            )
         }
+        audioPlaybackController.play(url: url, fileName: fileName)
     }
 }

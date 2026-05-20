@@ -115,36 +115,36 @@ struct DiaryDetailView: View {
                         }
                     }
                 }
-                // P1-Home-9 右上误触防护 — 编辑态显示明确"保存";阅读态把"编辑+删除"塞进
-                // ellipsis Menu,把 destructive 删除从主按钮区移走,防误触红色按钮。
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    if isEditing {
+                // 2026-05-19 wave19 + user feedback (2026-05-19 round 2) — 分享下线;阅读态显
+                // **编辑 + 删除两个独立 ToolbarItem**(原本同 HStack 被 iOS 26 自动合并成单个
+                // glass capsule,跟用户期望"两个独立按钮"不齐)。声明顺序:**编辑先 / 删除后**,
+                // SwiftUI 把后声明的 trailing item 渲染在更右 → trash 靠右,符合"删除最远端"语义。
+                // 编辑态收成单"保存"按钮。删除依赖 EntryDeletionUndoService 4 秒撤销 toast 兜底。
+                if isEditing {
+                    ToolbarItem(placement: .navigationBarTrailing) {
                         Button(NSLocalizedString("保存", comment: "Save button")) {
                             HapticManager.shared.impact(.light)
                             saveChanges()
                         }
                         .fontWeight(.semibold)
-                    } else {
-                        Menu {
-                            Button {
-                                startEditing()
-                            } label: {
-                                Label(NSLocalizedString("编辑", comment: "Edit button"), systemImage: "pencil")
-                            }
-                            ShareLink(item: shareText) {
-                                Label(NSLocalizedString("分享", comment: "Share diary entry"), systemImage: "square.and.arrow.up")
-                            }
-                            Button(role: .destructive) {
-                                // 删除直接执行 — 4 秒撤销 toast 替代 confirmation。Detail 会 dismiss,
-                                // toast 在父视图(Home / Insights sheet)的 root overlay 渲染。
-                                deleteEntry()
-                            } label: {
-                                Label(NSLocalizedString("删除", comment: "Delete button"), systemImage: "trash")
-                            }
+                    }
+                } else {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button {
+                            startEditing()
                         } label: {
-                            Image(systemName: "ellipsis.circle")
+                            Image(systemName: "pencil")
                         }
-                        .accessibilityLabel(NSLocalizedString("更多操作", comment: "More actions"))
+                        .accessibilityLabel(NSLocalizedString("编辑", comment: "Edit"))
+                    }
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button(role: .destructive) {
+                            // 删除直接执行 — 4 秒撤销 toast 替代 confirmation。
+                            deleteEntry()
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .accessibilityLabel(NSLocalizedString("删除", comment: "Delete"))
                     }
                 }
 #endif

@@ -127,6 +127,7 @@ struct DiaryExportView: View {
             }
         }
         .interactiveDismissDisabled(isExporting)
+        .lumoryToastOverlay()
     }
     
     private func performExport() {
@@ -155,13 +156,26 @@ struct DiaryExportView: View {
                     try? FileManager.default.removeItem(at: fileURL)
                     return
                 }
+                let exportedCount = snapshots.count
                 await MainActor.run {
                     isExporting = false
                     exportTask = nil
                     #if canImport(UIKit)
-                    HapticManager.shared.click()
-                    // 直接弹出分享菜单
-                    presentShareSheet(for: fileURL)
+                    HapticManager.shared.notification(.success)
+                    // §5.10 (2026-05-19) — 成功路径之前直接弹 share sheet 跳过 confirmation 反馈,
+                    // 用户看不到"导出了多少条"。给个 toast 跟 import 完成的 alert 形成对称。
+                    LumoryToastCenter.shared.show(
+                        String(
+                            format: NSLocalizedString("已导出 %d 条日记", comment: "Export success toast with count"),
+                            exportedCount
+                        ),
+                        severity: .success
+                    )
+                    // 让成功 toast 先有一拍可见,再弹系统分享菜单盖住当前 sheet。
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 600_000_000)
+                        presentShareSheet(for: fileURL)
+                    }
                     #endif
                 }
             } else {

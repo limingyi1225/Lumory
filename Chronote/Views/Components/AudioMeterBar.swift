@@ -118,7 +118,7 @@ struct RecordingLiveStatusView: View {
     var body: some View {
         HStack(spacing: 8) {
             AudioMeterBar(amplitude: amplitude, sampleID: sampleID, isActive: true)
-            Text(formattedDuration(currentTime: elapsed, totalDuration: 0))
+            Text(recordingDurationText)
                 .font(.footnote.weight(.medium).monospacedDigit())
                 .foregroundColor(.red)
         }
@@ -139,6 +139,12 @@ struct RecordingLiveStatusView: View {
             sampleID &+= 1
             try? await Task.sleep(for: .milliseconds(100))
         }
+    }
+
+    private var recordingDurationText: String {
+        let elapsedText = formattedDuration(currentTime: elapsed, totalDuration: 0)
+        let limitText = formattedDuration(currentTime: AudioRecorder.maximumDuration, totalDuration: 0)
+        return "\(elapsedText)/\(limitText)"
     }
 }
 

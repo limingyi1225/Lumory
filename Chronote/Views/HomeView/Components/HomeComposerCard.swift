@@ -172,86 +172,69 @@ struct HomeComposerCard: View {
     }
 
     /// 音频播放失败 inline banner。playAudio 的 onPlayError 把文案塞 VM,这里渲染。点 X 清。
+    /// §4.3 (2026-05-19) — 走共享 `InlineWarningBanner`,3 处 + AskPast incompleteBanner 全用同一组件。
     @ViewBuilder
     private func audioPlaybackErrorBanner(message: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .font(.footnote)
-            Text(message)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-            Button {
-                recordingVM.audioPlaybackError = nil
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel(NSLocalizedString("关闭", comment: "Dismiss"))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline))
+        InlineWarningBanner(
+            message: message,
+            onClose: { recordingVM.audioPlaybackError = nil }
+        )
     }
 
-    /// 图片压缩 / 加载失败 inline banner。9 张选 7 成功 → "2 张图片处理失败" 提醒,跟 transcription
-    /// banner 同 visual idiom。点 X 清。`compressionFailureCount = 0` 隐藏。
+    /// 图片压缩 / 加载失败 inline banner。9 张选 7 成功 → "2 张图片处理失败" 提醒。点 X 清。
     @ViewBuilder
     private var compressionFailureBanner: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .font(.footnote)
-            Text(String(
+        InlineWarningBanner(
+            message: String(
                 format: NSLocalizedString("有 %d 张图片处理失败", comment: "Photo compression failure banner"),
                 photoVM.compressionFailureCount
-            ))
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-            Button {
-                photoVM.compressionFailureCount = 0
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel(NSLocalizedString("关闭", comment: "Dismiss"))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline))
+            ),
+            onClose: { photoVM.compressionFailureCount = 0 }
+        )
     }
 
     @ViewBuilder
     private func transcriptionErrorBanner(failure: TranscriptionFailure) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: "waveform")
+                .font(.footnote.weight(.semibold))
                 .foregroundStyle(.orange)
-                .font(.footnote)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(transcriptionErrorMessage(for: failure))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                if failure.isRetryable {
-                    Button {
-                        onRetryTranscription()
-                    } label: {
-                        Text(NSLocalizedString("transcription.retry", comment: "Retry transcription button"))
-                            .font(.footnote.weight(.medium))
-                    }
-                    .buttonStyle(.borderless)
+                .accessibilityHidden(true)
+
+            Text(transcriptionErrorMessage(for: failure))
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 4)
+
+            if failure.isRetryable {
+                Button {
+                    #if canImport(UIKit)
+                    HapticManager.shared.impact(.light)
+                    #endif
+                    onRetryTranscription()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.footnote.weight(.semibold))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Circle())
                 }
+                .buttonStyle(.borderless)
+                .accessibilityLabel(NSLocalizedString("transcription.retry", comment: "Retry transcription button"))
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            Color.orange.opacity(0.07),
+            in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: LumoryCornerRadius.inline, style: .continuous)
+                .stroke(Color.orange.opacity(0.14), lineWidth: 0.5)
+        )
     }
 
     private func transcriptionErrorMessage(for failure: TranscriptionFailure) -> String {

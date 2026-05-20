@@ -34,16 +34,26 @@ struct RecordingRow: View {
                 ? NSLocalizedString("暂停", comment: "Pause")
                 : NSLocalizedString("播放", comment: "Play"))
 
+            // (2026-05-19) 转写中走 iOS 26 风格的 SF Symbol `.variableColor.iterative` 动画 —
+            // waveform 图标本身一直在,只是色彩从尾部向头部反复填充,告诉用户"转写正在进行"
+            // 而不需要任何文字。波形 + 计时区切到全 secondary,跟"已停止 / 等待落字"区分开。
             Image(systemName: "waveform")
                 .font(.footnote)
-                .foregroundStyle(Color.accentColor.opacity(0.85))
+                .foregroundStyle(isTranscribing
+                    ? Color.accentColor
+                    : Color.accentColor.opacity(0.85))
+                .symbolEffect(
+                    .variableColor.iterative.reversing,
+                    options: .repeat(.continuous),
+                    isActive: isTranscribing
+                )
 
             Text(formattedDuration(
                 currentTime: isCurrent ? controller.currentTime : 0,
                 totalDuration: recording.duration
             ))
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(.primary.opacity(0.85))
+                .foregroundStyle(Color.primary.opacity(isTranscribing ? 0.45 : 0.85))
 
             Spacer(minLength: 4)
 

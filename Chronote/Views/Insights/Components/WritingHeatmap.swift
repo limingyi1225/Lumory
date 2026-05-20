@@ -94,11 +94,14 @@ struct WritingHeatmap: View {
     private var tapGesture: some Gesture {
         SpatialTapGesture(coordinateSpace: .named(Self.gridCoordinateSpace))
             .onEnded { event in
-                guard let onSelectDay,
-                      let target = cellAt(point: event.location),
-                      target.hasEntry, !target.isFuture else { return }
+                guard onSelectDay != nil else { return }
+                guard let target = cellAt(point: event.location), !target.isFuture else { return }
+                guard target.hasEntry else {
+                    HapticManager.shared.impact(.soft)
+                    return
+                }
                 HapticManager.shared.impact(.light)
-                onSelectDay(target.date)
+                onSelectDay?(target.date)
             }
     }
 

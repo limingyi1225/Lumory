@@ -55,6 +55,7 @@ struct InsightsView: View {
     /// chip header 右上角 refresh 按钮的 loading flag。tap → forceRefresh → 完成后回填。
     /// refresh 期间老 chip 仍可见,只把 icon 换成 ProgressView,不闪空 / 不闪 skeleton。
     @State private var isRefreshingChips: Bool = false
+    @State private var didWarmRangeSnapshots: Bool = false
 
     // P0-2 toast 已迁到全局 LumoryToastCenter,旧 local toastMessage / toastTask state 删除。
 
@@ -90,20 +91,8 @@ struct InsightsView: View {
                         // chart 信息密度低,Y 轴 + 折线对长期日记用户 read-once 后没新意,
                         // 还跟下面 WritingHeatmap 的 mood 色信号重复(都告诉你"哪天什么心情")。
 
-                        // wave17 顺序调换(2026-05-13)— ThemeCardList 从 heatmap 下移到上方:
-                        // theme 是用户最关心的"我最近在想啥"语义信号,2×2 page-chunked LazyHStack 翻页
-                        // 本身更像 hero dashboard 内容;heatmap 是辅助节奏感知(回头看自己几天写一次),
-                        // 优先级低于 theme,放下面让用户先 scan theme 再回顾节奏。
-                        ThemeCardList(
-                            themes: themes,
-                            isLoading: isLoadingThemes,
-                            onSelect: { theme in themeFilter = theme },
-                            onDelete: { theme in themeToDelete = theme },
-                            onMergeRequest: { theme in themeToMerge = theme }
-                        )
-
-                        // wave14 — CalendarMonthModule 删除,WritingHeatmap 上移继承
-                        // tap-day 行为(短按 / 长按拖动选择,见 WritingHeatmap onSelectDay)。
+                        // 先给写作节奏,再给主题语义。Heatmap 是更轻的证据层,
+                        // 放在 theme cards 前面能让下面的彩色主题卡不直接压到 Summary 后。
                         WritingHeatmap(cells: dailyCells) { date in
                             let day = Calendar.current.startOfDay(for: date)
                             // 检查该天确实有 cell(否则 heatmap 触发空白格子时不弹 sheet)。
@@ -112,20 +101,22 @@ struct InsightsView: View {
                         }
                         .padding(.horizontal, 16)
 
-                        // 行动区 — 把 AskPastView 内的 preset 问题直接放到页面最底,用户不用
-                        // 进 AskPast 就能看见"可以问什么"。chip tap → askPastIntent 设 payload →
-                        // AskPastView 出场 `.task` 内自动 submit,跳过 empty 态。
-                        if !presetChips.isEmpty {
-                            presetChipsBlock
-                                .padding(.horizontal, 16)
-                                // heatmap ↔ chips 之前只有 LazyVStack 的 16pt,比上面几处
-                                // (Narrative/Theme/Heatmap 之间 ≈40pt)明显紧。+8 → 24pt 让节奏匀一点。
-                                .padding(.top, 8)
-                                .padding(.bottom, 32)
-                        } else {
-                            // 没 chip 时也给 ScrollView 一个底部 spacer,防 ThemeCardList 紧贴 home indicator。
-                            Color.clear.frame(height: 32)
-                        }
+                        ThemeCardList(
+                            themes: themes,
+                            isLoading: isLoadingThemes,
+                            onSelect: { theme in themeFilter = theme },
+                            onDelete: { theme in themeToDelete = theme },
+                            onMergeRequest: { theme in themeToMerge = theme }
+                        )
+
+                        // 行动区 — chip 有就显 chip,**没 chip 也显一个稳定的"问问过去"入口**
+                        // (2026-05-19 P1-04 audit):presetChips 为空时(冷启动 / <3 日记 / refresh 失败)
+                        // 用户失去了进 AskPastView 的视觉路径。改成至少一个 fallback CTA,确保入口稳。
+                        askPastActionBlock
+                            .padding(.horizontal, 16)
+                            // 间距交给 ThemeCardList 内部 8pt 呼吸 + LazyVStack 16pt,总视觉间距
+                            // 约 24pt,跟上方证据模块之间的节奏一致。
+                            .padding(.bottom, 32)
                     }
                 }
                 .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.insightsContentMaxWidth)
@@ -164,6 +155,8 @@ struct InsightsView: View {
                         .accessibilityLabel(NSLocalizedString("关闭", comment: "Close"))
                     }
                 }
+                // (2026-05-19 user feedback round 3) — toolbar trailing 不放 Ask Past 入口。
+                // 入口走页面最底的 askPastActionBlock 标题行,标题 "问问过去的你" 本身可点 → 进 empty 态。
             }
             .onAppear {
                 guard !didHydrateStoredRange else { return }
@@ -189,11 +182,8 @@ struct InsightsView: View {
                     onMerged: { message in
                         LumoryToastCenter.shared.show(message, severity: .success)
                     },
-                    onDeleted: { name in
-                        LumoryToastCenter.shared.show(
-                            String(format: NSLocalizedString("已删除主题「%@」", comment: "Delete toast"), name),
-                            severity: .success
-                        )
+                    onDeleted: { name, undoPayload in
+                        showThemeDeletedToast(name: name, undoPayload: undoPayload)
                     },
                     onEntryDeleted: {
                         reloadAfterChildEntryDelete()
@@ -229,7 +219,7 @@ struct InsightsView: View {
                     Task { await deleteTheme(theme) }
                 }
             } message: {
-                Text(NSLocalizedString("将从所有日记里抹掉这个主题(包括它的所有别名)。原日记内容不变。此操作不可撤销。", comment: "Delete theme message"))
+                Text(NSLocalizedString("将从所有日记里抹掉这个主题(包括它的所有别名)。原日记内容不变。删除后可短暂撤销。", comment: "Delete theme message"))
             }
             .alert(
                 NSLocalizedString("删除失败", comment: "Delete failed alert"),
@@ -293,6 +283,7 @@ struct InsightsView: View {
             InsightsResultCache.shared.clear()
             dailyCellsCache.removeAll()
             await reload()
+            showThemeDeletedToast(name: theme.name, undoPayload: outcome.undoPayload)
         } else {
             // CoreData save 失败 —— 用户看到主题没消失会困惑,显式提示。
             deleteFailureMessage = String(
@@ -300,6 +291,45 @@ struct InsightsView: View {
                 theme.name
             )
         }
+    }
+
+    private func showThemeDeletedToast(
+        name: String,
+        undoPayload: ThemeManagementService.ThemeDeletionUndoPayload?
+    ) {
+        let message = String(format: NSLocalizedString("已删除主题「%@」", comment: "Delete toast"), name)
+        guard let undoPayload else {
+            LumoryToastCenter.shared.show(message, severity: .success)
+            return
+        }
+        LumoryToastCenter.shared.show(
+            message,
+            severity: .success,
+            duration: EntryDeletionUndoService.undoWindow,
+            action: LumoryToastCenter.Action(
+                label: NSLocalizedString("撤销", comment: "Undo delete action")
+            ) {
+                Task { @MainActor in
+                    let outcome = await ThemeManagementService.shared.restoreDeletedTheme(undoPayload)
+                    if outcome.succeeded {
+                        #if canImport(UIKit)
+                        HapticManager.shared.notification(.success)
+                        #endif
+                        InsightsResultCache.shared.clear()
+                        dailyCellsCache.removeAll()
+                        await reload()
+                    } else {
+                        #if canImport(UIKit)
+                        HapticManager.shared.notification(.error)
+                        #endif
+                        LumoryToastCenter.shared.show(
+                            NSLocalizedString("撤销失败,请稍后再试。", comment: "Undo theme delete failed"),
+                            severity: .warning
+                        )
+                    }
+                }
+            }
+        )
     }
 
     // MARK: Range selector
@@ -325,45 +355,78 @@ struct InsightsView: View {
         }
     }
 
-    // MARK: AskPast preset chips (行动区)
+    // MARK: AskPast 行动区(hero header 入口 + chip 快捷快入)
 
-    /// 把 AskPastView 的 preset 问题平铺到 Insights 页面最底。用户决定 2026-05-12 改 iOS 26
-    /// 原生 `.buttonStyle(.glass)`:每 chip 一颗系统玻璃药丸,抹掉自定义 liquidGlassCard 形状
-    /// 不齐的"歪七扭八"问题。容器卡也撤掉 — 系统 .glass 自带形状/阴影,再套 insightsCard 会
-    /// 双重玻璃。Header(sparkles + hint + refresh)裸渲染在 chip 上方作 section caption。
-    /// tap chip → set askPastIntent payload → AskPastView modal 出场 `.task` 自动 submit。
-    /// 跟 AskPastView 内 presetGrid 共用同一份 SuggestionBundle cache,语料一致。
-    private var presetChipsBlock: some View {
+    /// (2026-05-19 user feedback round 3)Ask Past 入口设计:
+    /// - hero header "问问过去的你" 是**永远可点击**的标题行,tap → 进 AskPast empty 态自由提问
+    /// - chip 列表作为"快捷快入" — 有就显在下面,没就只显 header
+    /// - refresh icon 独立挂在 header 右侧(跟 hero button 同 HStack 但是 sibling,不嵌套)
+    /// 用户在 Insights 上始终能找到进 AskPastView 的路径,标题本身即入口。
+    private var askPastActionBlock: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Header inline — 不挂卡 chrome,只是上方的 caption。
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .font(.caption)
-                    .foregroundStyle(Color.accentColor)
-                Text(NSLocalizedString("insights.action.tryHint", comment: "Preset chip section header"))
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-                Spacer()
+            askPastHeroHeader
+            if !presetChips.isEmpty {
+                presetChipsList
+                    .padding(.top, 2)
+            }
+        }
+        // 整块 a11y container — UI test 走 hero / chip 自己的 label 定位,这里挂兜底 hint。
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(NSLocalizedString("与过去对话", comment: "Accessibility: Ask Your Past"))
+    }
+
+    /// Hero header:**标题本身即入口**。tap 整个 sparkles + "问问过去的你" + ↗ 区进 AskPast empty 态。
+    /// 右侧的 refresh icon 是 sibling button(只在有 chip 时显),不嵌套在 hero button 内 — SwiftUI
+    /// 嵌套 button 在 .glass / contentShape 上交互可能被 outer 吞,sibling 布局更稳。
+    private var askPastHeroHeader: some View {
+        HStack(spacing: 8) {
+            Button {
+                HapticManager.shared.impact(.light)
+                askPastIntent = AskPastIntent(initialQuestion: nil)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                    Text(NSLocalizedString("问问过去的你", comment: "Ask Your Past CTA title"))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Image(systemName: "arrow.up.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, 4)
+                .padding(.horizontal, 2)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("insightsAskPastHeroEntry")
+            .accessibilityLabel(NSLocalizedString("问问过去的你", comment: "Ask Your Past CTA title"))
+
+            Spacer(minLength: 8)
+
+            // refresh icon — 只在 chip 列表非空时显,避免空态时孤一个 refresh 没语义
+            if !presetChips.isEmpty {
                 chipsRefreshButton
             }
-            .padding(.horizontal, 6)
+        }
+        .padding(.horizontal, 4)
+    }
 
-            // 多个相邻 glass 元素归同一个 GlassEffectContainer,折射合批,边缘观感统一
-            // (跟 AskPastView 内 presetGrid 同 idiom)。spacing 10pt 让相邻 chip 间有清晰间隙。
-            GlassEffectContainer(spacing: 10) {
-                VStack(spacing: 10) {
-                    // **P2 fix (2026-05-13 superreview)**:`PromptSuggestionEngine` 偶尔吐出
-                    // 重复 chip text(LLM 输出非确定),`id: \.self` 让 String 当 id → 同 chip
-                    // 渲染冲突。改 enumerated offset 当稳定 id。
-                    ForEach(Array(presetChips.prefix(3).enumerated()), id: \.offset) { offset, question in
-                        presetChipButton(question, index: offset)
-                    }
+    /// chip 列表本身 — header 由 askPastHeroHeader 承担,这里只渲染 ForEach。
+    /// 多个相邻 glass 元素归同一个 GlassEffectContainer,折射合批,边缘观感统一
+    /// (跟 AskPastView 内 presetGrid 同 idiom)。spacing 10pt 让相邻 chip 间有清晰间隙。
+    private var presetChipsList: some View {
+        GlassEffectContainer(spacing: 10) {
+            VStack(spacing: 10) {
+                // **P2 fix (2026-05-13 superreview)**:`PromptSuggestionEngine` 偶尔吐出
+                // 重复 chip text(LLM 输出非确定),`id: \.self` 让 String 当 id → 同 chip
+                // 渲染冲突。改 enumerated offset 当稳定 id。
+                ForEach(Array(presetChips.prefix(3).enumerated()), id: \.offset) { offset, question in
+                    presetChipButton(question, index: offset)
                 }
             }
         }
-        // 整块 a11y container — UI test 走 chip 自己的 label 定位,这里挂兜底 hint。
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(NSLocalizedString("与过去对话", comment: "Accessibility: Ask Your Past"))
     }
 
     /// header 右上角 refresh icon — `isRefreshingChips` 期间换成小 ProgressView。
@@ -503,6 +566,49 @@ struct InsightsView: View {
         // 行动区 chip 跟主 reload 并行 hydrate(不阻塞主数据)。命中 cache 立即填,miss 静默
         // 后台 refreshIfNeeded → 几百 ms 后回填。chip 没显出来主页面也照常用,只是少个 affordance。
         updatePresetChipsFromCache()
+        warmRangeSnapshotsIfNeeded(excluding: range)
+    }
+
+    private func warmRangeSnapshotsIfNeeded(excluding currentRange: TimeRange) {
+        guard !didWarmRangeSnapshots else { return }
+        didWarmRangeSnapshots = true
+        let rangesToWarm = TimeRange.allCases.filter {
+            $0 != currentRange && InsightsResultCache.shared.snapshot(for: $0) == nil
+        }
+        guard !rangesToWarm.isEmpty else { return }
+
+        Task(priority: .utility) { @MainActor in
+            // (C-07 superreview 2026-05-19) 原实现一次性 3 range × 4 async let = 12 个并发
+            // `performBackgroundTask` 同时打到 store coordinator。本文件 :519 的 Fix #23 注释
+            // 明确警告"快速来回切 range 会让 N 个 bg fetch 同时跑完, 挤压 store coordinator"
+            // —— 新加的 warm 路径直接打那条警告的脸。改成 range 间串行 + 200ms 间隔,
+            // 让前景 reload() 始终有 priority,warm 只是 nice-to-have。
+            for (idx, rangeToWarm) in rangesToWarm.enumerated() {
+                if Task.isCancelled { return }
+                if idx > 0 {
+                    // 给当前 range 的前景 reload + UI 重渲一个呼吸空间,再 fire 下一组 fetch。
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    if Task.isCancelled { return }
+                }
+                let interval = rangeToWarm.dateInterval
+                async let themesTask = engine.themes(in: interval, limit: 30)
+                async let cellsTask = fetchDailyCells(in: interval)
+                async let entryCountTask = engine.entryCount(in: interval)
+                async let mostRecentDateTask = engine.mostRecentEntryDate(in: interval)
+                let (warmedThemes, warmedCells, warmedEntryCount, warmedMostRecent) =
+                    await (themesTask, cellsTask, entryCountTask, mostRecentDateTask)
+                if Task.isCancelled { return }
+                InsightsResultCache.shared.update(
+                    .init(
+                        themes: warmedThemes,
+                        dailyCells: warmedCells,
+                        entryCount: warmedEntryCount,
+                        mostRecentEntryDate: warmedMostRecent
+                    ),
+                    for: rangeToWarm
+                )
+            }
+        }
     }
 
     /// 从 PromptSuggestionEngine 拿 askPastPresets,跟 AskPastView 内 presetGrid 共用同一份

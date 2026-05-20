@@ -7,7 +7,7 @@
 //  覆盖:
 //  - latest(for:in:) 按 rangeKind 找最新一条 v2,忽略 v1 老 record
 //  - latest 在多 range 共存时只返指定 rangeKind 的
-//  - isStale 3 个 stale 触发条件(nil cache / 新日记后写 / entryCount 变化)+ fresh 路径
+//  - isStale 触发条件(nil cache / 新日记达到阈值 / 删除 / 编辑替换)+ fresh 路径
 //  - **2026-05-10**: age-based freshness window 整套删除(用户没写日记不该凭空重生)
 //
 
@@ -279,6 +279,7 @@ struct NarrativeCacheServiceTests {
 
     @Test func isStale_nilCache_returnsTrue() async throws {
         let stale = NarrativeCacheService.isStale(
+            range: .month,
             payload: nil, createdAt: nil,
             mostRecentEntryDate: Date(),
             currentEntryCount: 5
@@ -301,6 +302,7 @@ struct NarrativeCacheServiceTests {
             headline: "fresh"
         )
         let stale = NarrativeCacheService.isStale(
+            range: .month,
             payload: payload,
             createdAt: now,
             mostRecentEntryDate: Date(timeIntervalSinceNow: -3600),
@@ -326,6 +328,7 @@ struct NarrativeCacheServiceTests {
             headline: "old"
         )
         let stale = NarrativeCacheService.isStale(
+            range: .month,
             payload: payload,
             createdAt: cacheCreated,
             mostRecentEntryDate: newerEntry,
@@ -352,6 +355,7 @@ struct NarrativeCacheServiceTests {
             headline: "old"
         )
         let stale = NarrativeCacheService.isStale(
+            range: .month,
             payload: payload,
             createdAt: cacheCreated,
             mostRecentEntryDate: cacheCreated,
@@ -376,12 +380,95 @@ struct NarrativeCacheServiceTests {
             headline: "old"
         )
         let stale = NarrativeCacheService.isStale(
+            range: .month,
             payload: payload,
             createdAt: now,
             mostRecentEntryDate: Date(timeIntervalSinceNow: -3600),
             currentEntryCount: 4   // 现在是 4
         )
         #expect(stale, "entryCount 不一致(用户删了日记)必须 stale")
+    }
+
+    @Test func isStale_yearNewEntryBelowThreshold_returnsFalse() async throws {
+        let cacheCreated = Date(timeIntervalSinceNow: -3600)
+        let payload = AIConversation.NarrativePayload(
+            rangeStart: Date(timeIntervalSinceNow: -31_536_000),
+            rangeEnd: Date(),
+            body: "year",
+            isIncomplete: false,
+            truncatedReason: nil,
+            rangeKind: TimeRange.year.rawValue,
+            entryCount: 5,
+            sourceLatestEntryDate: Date(timeIntervalSinceNow: -7200),
+            generatedAt: cacheCreated,
+            headline: "year"
+        )
+        let stale = NarrativeCacheService.isStale(
+            range: .year,
+            payload: payload,
+            createdAt: cacheCreated,
+            mostRecentEntryDate: Date(),
+            currentEntryCount: 6
+        )
+        #expect(!stale, "year/all 新增未满 5 篇时不应自动重生")
+    }
+
+    @Test func isStale_yearFiveNewEntries_returnsTrue() async throws {
+        let cacheCreated = Date(timeIntervalSinceNow: -3600)
+        let payload = AIConversation.NarrativePayload(
+            rangeStart: Date(timeIntervalSinceNow: -31_536_000),
+            rangeEnd: Date(),
+            body: "year",
+            isIncomplete: false,
+            truncatedReason: nil,
+            rangeKind: TimeRange.year.rawValue,
+            entryCount: 5,
+            sourceLatestEntryDate: Date(timeIntervalSinceNow: -7200),
+            generatedAt: cacheCreated,
+            headline: "year"
+        )
+        let stale = NarrativeCacheService.isStale(
+            range: .year,
+            payload: payload,
+            createdAt: cacheCreated,
+            mostRecentEntryDate: Date(),
+            currentEntryCount: 10
+        )
+        #expect(stale, "year/all 新增满 5 篇后应重生")
+    }
+
+    @Test func isOutdated_quarterUsesThreeEntryThreshold() async throws {
+        let cacheCreated = Date(timeIntervalSinceNow: -3600)
+        let payload = AIConversation.NarrativePayload(
+            rangeStart: Date(timeIntervalSinceNow: -7_776_000),
+            rangeEnd: Date(),
+            body: "quarter",
+            isIncomplete: false,
+            truncatedReason: nil,
+            rangeKind: TimeRange.quarter.rawValue,
+            entryCount: 5,
+            sourceLatestEntryDate: Date(timeIntervalSinceNow: -7200),
+            generatedAt: cacheCreated,
+            headline: "quarter"
+        )
+
+        let belowThreshold = NarrativeCacheService.isOutdatedForCurrentEntries(
+            range: .quarter,
+            payload: payload,
+            createdAt: cacheCreated,
+            mostRecentEntryDate: Date(),
+            currentEntryCount: 7
+        )
+        let atThreshold = NarrativeCacheService.isOutdatedForCurrentEntries(
+            range: .quarter,
+            payload: payload,
+            createdAt: cacheCreated,
+            mostRecentEntryDate: Date(),
+            currentEntryCount: 8
+        )
+
+        #expect(!belowThreshold, "quarter 新增 2 篇不隐藏旧回顾")
+        #expect(atThreshold, "quarter 新增 3 篇后隐藏旧回顾并等待重生")
     }
 
     @Test func isStale_missingHeadline_returnsTrue() async throws {
@@ -398,6 +485,7 @@ struct NarrativeCacheServiceTests {
             generatedAt: now
         )
         let stale = NarrativeCacheService.isStale(
+            range: .month,
             payload: payload,
             createdAt: now,
             mostRecentEntryDate: Date(timeIntervalSinceNow: -3600),
@@ -421,6 +509,7 @@ struct NarrativeCacheServiceTests {
             headline: "partial"
         )
         let stale = NarrativeCacheService.isStale(
+            range: .month,
             payload: payload,
             createdAt: now,
             mostRecentEntryDate: Date(timeIntervalSinceNow: -3600),

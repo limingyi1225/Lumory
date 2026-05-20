@@ -66,8 +66,8 @@ struct DiaryPreviewView: View {
             }
             .padding(.init(top: 16, leading: 20, bottom: 14, trailing: 16))
             .frame(width: 300, height: 400, alignment: .topLeading)
-            .liquidGlassCard(cornerRadius: cornerRadius, interactive: false)
-            .moodAccentBar(entry.moodColor, cornerRadius: cornerRadius)
+            // §4.6 (2026-05-19) — `.liquidGlassCard + .moodAccentBar` 配对走共享 modifier。
+            .lumoryAccentCard(mood: entry.moodColor, cornerRadius: cornerRadius, interactive: false)
             .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .contentShape(
                 .contextMenuPreview,

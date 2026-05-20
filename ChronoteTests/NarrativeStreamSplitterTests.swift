@@ -151,6 +151,15 @@ struct NarrativeStreamSplitterTests {
         #expect(h == "你今天醒得早。")
     }
 
+    @Test func fallbackHeadline_stripsLeadingMarkdownMarkers() {
+        let body = "## 小标题\n\n正文继续。"
+        let h = NarrativeStreamSplitter.fallbackHeadline(fromBody: body)
+        #expect(h == "小标题")
+
+        let quoted = "> 这一段像引用。后面继续。"
+        #expect(NarrativeStreamSplitter.fallbackHeadline(fromBody: quoted) == "这一段像引用。")
+    }
+
     // MARK: - limits
 
     @Test func streamLimits_appendMarksDroppedSuffix() {

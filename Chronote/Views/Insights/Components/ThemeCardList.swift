@@ -29,6 +29,10 @@ struct ThemeCardList: View {
 
     @Environment(\.horizontalSizeClass) private var hSizeClass
 
+    /// 当前可见 page 的 index(0-based)— 跟 LazyHStack 内 ForEach 的 \.offset id 对齐。
+    /// 翻页时 `.scrollPosition(id:)` 自动更新,下方 page dots 跟着 highlight。
+    @State private var visiblePageIndex: Int? = 0
+
     private var columnsPerPage: Int { hSizeClass == .regular ? 3 : 2 }
     private var cardsPerPage: Int { columnsPerPage * 2 }
     private var pageWidth: CGFloat {
@@ -67,28 +71,55 @@ struct ThemeCardList: View {
             } else {
                 // 横向 ScrollView 跨越了外层 Insights 的 GlassEffectContainer 边界,
                 // 这里再套一层自己的 container,确保卡片之间的折射/模糊能正确合批并一次性渲染。
-                // 垂直 24pt 给 glass interactive 抬升投影充分的呼吸空间——
-                // 12pt 时投影虽然不被裁但显得局促,放到 24 后整张卡感觉是"自然浮起",
-                // 不像被夹在 section 之间的「凸起色块」。
-                ScrollView(.horizontal, showsIndicators: false) {
-                    GlassEffectContainer(spacing: 12) {
-                        // wave17 — themes 按 4 张一组打包成 page,LazyHStack 每个 child 是一整页
-                        // (2×2 mini grid)。`.scrollTargetLayout()` 标识这些 page 作 snap target,
-                        // `.viewAligned` 让翻一下精确滚 1 page 372pt,正好出 4 张新卡。
-                        // 上一版的自定义 ColumnPagingBehavior 在 iOS 26 行为不稳(snap 失效),用
-                        // page-as-child 这条 stock SwiftUI 路径绕开。
-                        LazyHStack(alignment: .top, spacing: Self.columnSpacing) {
-                            ForEach(Array(pagedThemes.enumerated()), id: \.offset) { _, pageThemes in
-                                themePageView(pageThemes)
-                                    .frame(width: pageWidth)
+                // 顶部间距交给父 LazyVStack 统一控制;底部只留 8pt 给 interactive glass
+                // 外延呼吸。ScrollView 不裁切,所以不需要再额外塞 24pt 垂直空间。
+                // (2026-05-19 user feedback) page dots 已删;省电模式下裁掉的 interactive
+                // glass blur 会在 theme/heatmap 之间读成突兀灰带,所以仍保持 scrollClipDisabled。
+                VStack(spacing: 0) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        GlassEffectContainer(spacing: 12) {
+                            // wave17 — themes 按 4 张一组打包成 page,LazyHStack 每个 child 是一整页
+                            // (2×2 mini grid)。`.scrollTargetLayout()` 标识这些 page 作 snap target,
+                            // `.viewAligned` 让翻一下精确滚 1 page 372pt,正好出 4 张新卡。
+                            // 上一版的自定义 ColumnPagingBehavior 在 iOS 26 行为不稳(snap 失效),用
+                            // page-as-child 这条 stock SwiftUI 路径绕开。
+                            LazyHStack(alignment: .top, spacing: Self.columnSpacing) {
+                                ForEach(Array(pagedThemes.enumerated()), id: \.offset) { index, pageThemes in
+                                    themePageView(pageThemes)
+                                        .frame(width: pageWidth)
+                                        .id(index)
+                                }
                             }
+                            .scrollTargetLayout()
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 8)
                         }
-                        .scrollTargetLayout()
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 24)
                     }
+                    .scrollClipDisabled()
+                    .scrollTargetBehavior(.viewAligned)
+                    .scrollPosition(id: $visiblePageIndex)
+                    // (2026-05-19 user feedback) 翻页触觉 — 每次 `visiblePageIndex` 落在新 page
+                    // 时给一下 `.soft` impact。`.soft` 比 `.light` 更轻,翻页是日常浏览动作,不要
+                    // 用强反馈打断阅读;guard `oldValue != newValue` 防止初始化时多 fire 一次。
+                    .onChange(of: visiblePageIndex) { oldValue, newValue in
+                        guard let newValue, newValue != oldValue else { return }
+                        #if canImport(UIKit)
+                        HapticManager.shared.impact(.soft)
+                        #endif
+                    }
+                    // (2026-05-19 superreview P1)主题数动态变化(用户合并 / 删主题)时,
+                    // visiblePageIndex 可能 stale 指向已经不存在的页。pagedThemes.count 变化时
+                    // clamp 到合法范围,跨进 0 是安全 fallback。
+                    .onChange(of: pagedThemes.count) { _, newCount in
+                        let target = max(0, min(visiblePageIndex ?? 0, newCount - 1))
+                        if target != (visiblePageIndex ?? 0) {
+                            visiblePageIndex = target
+                        }
+                    }
+
+                    // (2026-05-19 user feedback round 4) 不再额外塞 10pt 占位;AskPast 区紧跟在
+                    // 下面时,ThemeCardList 的内部 bottom padding + 外层 LazyVStack spacing 已足够。
                 }
-                .scrollTargetBehavior(.viewAligned)
             }
         }
     }
@@ -469,7 +500,8 @@ struct ThemeCard: View {
         .frame(minHeight: 100)
         // 所有主题统一走「玻璃白底 + 柔光色斑」语言:tint=nil 让 glass 保持白调,
         // RadialGradient 提供色彩信号。混合主题双点,单色主题单点;落点按主题名 hash 多样化。
-        // interactive=true 保留 glass 的 hover/press 高光,父 ScrollView 已留 12pt 垂直空间防裁剪。
+        // interactive=true 保留 glass 的 hover/press 高光;横向 ScrollView 已关闭裁切,
+        // 避免 dense grid 的原生 glass 外延被切成灰带。
         .background { cardBackground }
         .liquidGlassCard(
             cornerRadius: LumoryCornerRadius.card,

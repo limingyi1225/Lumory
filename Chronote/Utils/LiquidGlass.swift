@@ -8,6 +8,9 @@ import SwiftUI
 enum LumoryCornerRadius {
     /// 内容卡(timeline row、settings row、insights module、TextEditor 玻璃化等)
     static let card: CGFloat = 16
+    /// 嵌套子行(picker 候选 row / Ask Past message 气泡 / citation row)
+    /// — 介于 inline (12) 和 card (16) 之间,事实第 4 档。
+    static let nestedRow: CGFloat = 14
     /// toast / overlay 系统级 chip(底部 capsule、popover-style 浮层)
     static let chip: CGFloat = 22
     /// inline banner 类(略小于 card,跟 card 视觉层级有 4pt 差)— 错误 / 警告 / 不完整提示条
@@ -71,6 +74,27 @@ extension View {
     func insightsCard(cornerRadius: CGFloat = 18) -> some View {
         self.liquidGlassCard(cornerRadius: cornerRadius)
             .shadow(color: Color.primary.opacity(0.05), radius: 8, x: 0, y: 3)
+    }
+
+    /// §4.4 (2026-05-19) — Form / List 内 liquidGlassCard 行的三件套统一入口:隐分割线 +
+    /// 清空 row 背景 + 强制 leading=16 / trailing=16 inset(`views-design-tokens.md` 规则)。
+    /// 替 8+ 处 `.listRowSeparator(.hidden) + .listRowBackground(Color.clear) +
+    /// .listRowInsets(EdgeInsets(top:_, leading: 16, bottom:_, trailing: 16))` 散布。
+    /// `top` / `bottom` 各 callsite 不一(0/6/8/14/28),保留参数。
+    func lumoryGlassListRow(top: CGFloat = 0, bottom: CGFloat = 0) -> some View {
+        self.listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: top, leading: 16, bottom: bottom, trailing: 16))
+    }
+
+    /// §4.6 (2026-05-19) — 带心情色 accent bar 的卡:`.liquidGlassCard + .moodAccentBar` 配对
+    /// 在 HomeTimelineCard / OnThisDaySection / DiaryPreviewView 重复 3 次,抽统一入口。
+    /// **注**:不是 mood-tinted card(那是 DiaryEntryRow 独自的 `tint + tintStrength` 写法,
+    /// accent bar 和 tint 是两种 mood 信号)。这条只覆盖 "accent bar" 流。
+    func lumoryAccentCard(mood: Color, cornerRadius: CGFloat = LumoryCornerRadius.card, interactive: Bool = true) -> some View {
+        self
+            .liquidGlassCard(cornerRadius: cornerRadius, interactive: interactive)
+            .moodAccentBar(mood, cornerRadius: cornerRadius)
     }
 
     /// Left accent bar — a narrow colored strip clipped inside the card shape.

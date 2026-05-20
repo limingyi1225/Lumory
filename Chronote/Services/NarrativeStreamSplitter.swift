@@ -81,13 +81,26 @@ enum NarrativeStreamSplitter {
             .replacingOccurrences(of: "\r\n", with: "\n")
             .components(separatedBy: "\n\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map(Self.strippingLeadingMarkdownMarker)
             .first(where: { !$0.isEmpty })
-            ?? body.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? strippingLeadingMarkdownMarker(body.trimmingCharacters(in: .whitespacesAndNewlines))
         if firstPara.isEmpty { return "" }
         if let endIdx = firstSentenceEndIndex(in: firstPara) {
             return String(firstPara[firstPara.startIndex...endIdx])
         }
         return firstPara.count > 30 ? String(firstPara.prefix(30)) + "…" : firstPara
+    }
+
+    private static func strippingLeadingMarkdownMarker(_ text: String) -> String {
+        var stripped = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while stripped.hasPrefix("#") {
+            stripped.removeFirst()
+        }
+        stripped = stripped.trimmingCharacters(in: .whitespaces)
+        for marker in ["> ", "- ", "* "] where stripped.hasPrefix(marker) {
+            return String(stripped.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
+        }
+        return stripped
     }
 
     /// 找第一个"真句末标点"的位置。ASCII `.` 必须后跟空白 / 换行 / 字符串末尾才算;

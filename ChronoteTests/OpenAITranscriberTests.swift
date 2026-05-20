@@ -243,6 +243,14 @@ final class OpenAITranscriberTests: XCTestCase {
                       "boundary 应是 Lumory- 前缀;实际 \(contentType)")
         let body = try XCTUnwrap(MockURLProtocol.recordedRequests[0].body)
         XCTAssertGreaterThan(body.count, 0, "multipart body 应非空")
+        let bodyText = String(decoding: body, as: UTF8.self)
+        XCTAssertTrue(bodyText.contains("name=\"prompt\""), "转写请求应带 prompt 限定中英自动检测")
+        XCTAssertTrue(
+            bodyText.contains(OpenAITranscriber.transcriptionPromptForTesting),
+            "multipart prompt 应包含 OpenAITranscriber.transcriptionPrompt"
+        )
+        XCTAssertFalse(bodyText.contains("name=\"language\""),
+                       "用户可能说中文或英文,不应把转写固定到某一个 language")
     }
 
     /// (7) 200 + `{"text":""}` → 返 nil(service 把空 text 转 nil),`lastFailure` 不动。

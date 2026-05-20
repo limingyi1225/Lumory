@@ -152,6 +152,18 @@ struct LumoryToastOverlay: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
                 .liquidGlassCard(cornerRadius: LumoryCornerRadius.chip, interactive: false)
+                // §5.14 (2026-05-19) — severity 视觉差异:warning 加左色条 + tint,跟 success/info
+                // 的中性灰胶囊一眼区分;之前所有 toast 长得一样,失败/成功靠 icon 区分太弱。
+                .overlay(alignment: .leading) {
+                    if toast.severity == .warning {
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(toast.severity.iconColor)
+                            .frame(width: 3)
+                            .padding(.vertical, 10)
+                            .padding(.leading, 6)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: LumoryCornerRadius.chip, style: .continuous))
                 .shadow(color: Color.primary.opacity(0.10), radius: 14, y: 4)
                 .padding(.horizontal, 24)
                 // 距底 36 → 52:之前用户反馈"撤销"按钮跟下方 timeline row 太近,拇指从右下伸过去

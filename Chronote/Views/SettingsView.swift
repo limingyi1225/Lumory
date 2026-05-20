@@ -25,6 +25,7 @@ struct SettingsView: View {
     @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
         Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"
     }()
+    @AppStorage("home.showOnThisDay", store: AppGroup.userDefaults) private var showOnThisDay: Bool = true
 
     // 各种模态 / 确认态
     @State private var showImportSheet = false
@@ -32,6 +33,9 @@ struct SettingsView: View {
     @State private var showDeleteAllAlert = false
     @State private var showDeleteCompleteAlert = false
     @State private var isDeletingAllEntries = false
+    /// (2026-05-19 P1-09 audit)删除全部失败时弹这个 alert。原先 `deleteAllEntries() → false`
+    /// 只 log 不告知用户,用户以为操作成功但日记还在,信任崩。
+    @State private var deleteAllFailureMessage: String?
 
     @EnvironmentObject var importService: CoreDataImportService
 
@@ -55,6 +59,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 appHeaderSection
+                homeDisplaySection
                 aiIndexSection
                 reminderSection
                 privacySection
@@ -103,6 +108,21 @@ struct SettingsView: View {
             } message: {
                 Text(NSLocalizedString("已删除所有日记", comment: "All entries deleted"))
             }
+            // (2026-05-19 P1-09 audit)删除全部失败 alert — service 返 false(磁盘满 / CoreData
+            // save 失败 / 数据库正在被 CloudKit lock 等)时弹出来,而不是静默回到原状态让用户疑惑。
+            .alert(
+                NSLocalizedString("删除失败", comment: "Delete all failed alert title"),
+                isPresented: Binding(
+                    get: { deleteAllFailureMessage != nil },
+                    set: { if !$0 { deleteAllFailureMessage = nil } }
+                )
+            ) {
+                Button(NSLocalizedString("好", comment: "OK"), role: .cancel) {
+                    deleteAllFailureMessage = nil
+                }
+            } message: {
+                Text(deleteAllFailureMessage ?? "")
+            }
             .task {
                 // Settings 进来同步一次系统通知权限(用户可能在 Settings.app 改了)。
                 await reminderService.refreshAuthorizationStatus()
@@ -142,6 +162,25 @@ struct SettingsView: View {
             .padding(.vertical, 6)
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+        }
+    }
+
+    // MARK: - Home display
+
+    @ViewBuilder
+    private var homeDisplaySection: some View {
+        Section(header: Text(NSLocalizedString("首页", comment: "Home settings section"))) {
+            Toggle(isOn: $showOnThisDay) {
+                Label {
+                    Text(NSLocalizedString("首页显示历史回忆", comment: "Show memory prompts on Home toggle"))
+                        .foregroundStyle(Color.primary)
+                } icon: {
+                    Image(systemName: "calendar.badge.clock")
+                        .foregroundStyle(Color.accentColor)
+                        .symbolRenderingMode(.hierarchical)
+                        .frame(width: 24)
+                }
+            }
         }
     }
 
@@ -460,9 +499,19 @@ struct SettingsView: View {
                     }
                 }
             }
-            .disabled(isDeletingAllEntries)
+            // (E-11 superreview 2026-05-19) entries 为空时禁用 —— 否则点进来弹"删除全部 0 条日记?"
+            // 很怪。空库没有可删的东西,按钮直接灰掉。
+            .disabled(isDeletingAllEntries || entries.isEmpty)
             // 用户决定:不要红底(2026-05-05),保留 alert 内的数量 + warning haptic 已足够强警示。
-            .alert(NSLocalizedString("确认删除所有日记？", comment: "Confirm delete all"), isPresented: $showDeleteAllAlert) {
+            // P0-UX (2026-05-19):title 直接量化,把数量从 message 第二行抬到 title —— Apple HIG 推荐
+            // destructive title 直接 "Delete 3 files?" 这种格式,数量是用户最关心的事实。
+            .alert(
+                String(
+                    format: NSLocalizedString("删除全部 %d 条日记？", comment: "Delete all confirm title with count"),
+                    entries.count
+                ),
+                isPresented: $showDeleteAllAlert
+            ) {
                 Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
                     // P1-Set-2 destructive 确认即时 warning haptic — 区别于普通 .medium impact。
                     #if canImport(UIKit)
@@ -472,16 +521,24 @@ struct SettingsView: View {
                         let didDelete = await deleteAllEntries()
                         if didDelete {
                             showDeleteCompleteAlert = true
+                        } else {
+                            // (2026-05-19 P1-09 audit + superreview P1-4)失败必须告知用户,但
+                            // **不要**引到"数据库修复"路径 — 这里失败原因通常是 iCloud / 磁盘 /
+                            // CoreData lock,跟数据库损坏是两件事,跑修复会把用户带进死循环。
+                            #if canImport(UIKit)
+                            HapticManager.shared.notification(.error)
+                            #endif
+                            deleteAllFailureMessage = NSLocalizedString(
+                                "删除暂时无法完成。请稍后再试。如果反复失败,先确认 iCloud 已完成同步,或重启 App 后再试。",
+                                comment: "Delete all failed body"
+                            )
                         }
                     }
                 }
                 Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
             } message: {
-                // P1-Set-2 inject 数量,让用户在确认前看到具体数字防误删。
-                Text(String(
-                    format: NSLocalizedString("将永久删除 %d 条日记,无法撤销。已合并的主题分组和 AI 历史对话也会一并清除。", comment: "Delete all undo with entry count"),
-                    entries.count
-                ))
+                // title 已量化,message 留 undo + 副作用说明。
+                Text(NSLocalizedString("无法撤销。已合并的主题分组和 AI 历史对话也会一并清除。", comment: "Delete all undo side-effect message"))
             }
             // 「清除 AI 回顾缓存」已挪到 进阶 → AdvancedSettingsView(2026-05-14 用户决定):
             // 它是低频维护操作,跟主层的导入/导出/删除全部不同档,放进阶更合适。

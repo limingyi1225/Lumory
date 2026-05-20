@@ -86,6 +86,13 @@ enum ThemeAliasError: LocalizedError, Sendable {
     }
 }
 
+/// 主题抽取的回填专用结果。普通写入路径仍可把失败降级成 `[]`,但批量重建必须区分
+/// "AI 合法判断无主题" 与 "请求/解析失败",否则会把已有主题误清空。
+enum ThemeExtractionOutcome: Sendable, Equatable {
+    case success([String])
+    case failed
+}
+
 /// 导入解析层错误。**与"成功但 0 条"(`[]`)严格区分**——后者是合法的"粘贴里没找到日记",
 /// 前者是网络 / 后端 / 模型解析失败,UI 必须给两种不同提示。
 enum DiaryImportError: LocalizedError, Sendable {
@@ -137,6 +144,9 @@ protocol AIServiceProtocol: Sendable {
     /// 返回值顺序不重要，语言应匹配输入文本。
     func extractThemes(text: String) async -> [String]
 
+    /// 区分失败与合法空数组的主题抽取。批量回填使用这条避免失败时抹掉已有主题。
+    func extractThemesOutcome(text: String) async -> ThemeExtractionOutcome
+
     /// 跨日记主题别名判断:给定一组**新抽出来的 tag** 和用户**已有的 tag 库存**,
     /// 让 LLM 找出"新 tag 可能与已有某 tag 指向同一实体"的对子。
     /// 用在 on-write 路径:写完日记 → extractThemes → 这一调用 → 入 PendingSuggestion 队列。
@@ -180,6 +190,12 @@ protocol AIServiceProtocol: Sendable {
     /// **不要再用旧的 static `DiaryImportService.parse`**——那条路径绕过了 DI、
     /// 也吞了所有错误。新路径走 `AIServiceProtocol`,Mock 注入对单测全程有效。
     func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry]
+}
+
+extension AIServiceProtocol {
+    func extractThemesOutcome(text: String) async -> ThemeExtractionOutcome {
+        .success(await extractThemes(text: text))
+    }
 }
 
 struct MockAIService: AIServiceProtocol {
@@ -355,4 +371,3 @@ extension EnvironmentValues {
         set { self[AIServiceEnvironmentKey.self] = newValue }
     }
 }
-

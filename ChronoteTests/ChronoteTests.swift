@@ -1671,6 +1671,22 @@ struct ThemeAliasResolverTests {
         #expect(r.pending.first?.newTag == "妈妈")
     }
 
+    @Test func restoreGroup_mergesCaseInsensitiveExistingGroupWithoutDoubleKey() {
+        let (r, _) = makeResolver()
+        let existing = PendingSuggestion(newTag: "bee", canonicalGuess: "abby", confidence: .high, source: .scan)
+        _ = r.enqueue(existing)
+        r.confirm(existing, canonical: "abby")
+
+        r.restoreGroup(canonical: "Abby", aliases: ["bee", "Cee", "Abby"])
+
+        #expect(r.groups["abby"] == nil, "restore 应删除旧大小写 key,避免双 group")
+        let aliases = r.groups["Abby"] ?? []
+        #expect(aliases.contains("bee"))
+        #expect(aliases.contains("Cee"))
+        #expect(!aliases.contains("Abby"), "canonical 自身不能进入 aliases")
+        #expect(Set(aliases.map { $0.lowercased() }).count == aliases.count, "aliases 应大小写不敏感去重")
+    }
+
     // MARK: mergeThemes 手动合并(Insights 长按入口 + custom editor 用)
 
     @Test func mergeThemes_freshIntoFresh_createsGroup() {
@@ -1961,6 +1977,72 @@ struct ThemeManagementServiceTests {
 
         #expect(outcome.succeeded)
         #expect(outcome.affected == 1)
+    }
+
+    @Test func restoreDeletedTheme_onlyRestoresActuallyRemovedLabels() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let context = persistence.container.viewContext
+        let entryID = UUID()
+        insertDiaryEntry(
+            context: context,
+            id: entryID,
+            date: makeDate(year: 2024, month: 6, day: 1),
+            themes: ["Person A", "Work"]
+        )
+        try context.save()
+
+        let service = ThemeManagementService(persistence: persistence, resolver: resolver)
+        let deleteOutcome = await service.deleteTheme(canonical: "Person A")
+        let payload = try #require(deleteOutcome.undoPayload)
+
+        await persistence.container.performBackgroundTask { bg in
+            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+            if let entry = try? bg.fetch(request).first {
+                entry.setThemes([])
+                try? bg.save()
+            }
+        }
+
+        let restoreOutcome = await service.restoreDeletedTheme(payload)
+
+        #expect(restoreOutcome.succeeded)
+        let themes = await fetchThemeArrays(persistence)
+        #expect(themes == [["Person A"]], "撤销只应恢复本次删除的 Person A,不应复活窗口内移除的 Work")
+    }
+
+    @Test func restoreDeletedTheme_saveFailureReportsFailure() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let context = persistence.container.viewContext
+        let entryID = UUID()
+        insertDiaryEntry(
+            context: context,
+            id: entryID,
+            date: makeDate(year: 2024, month: 6, day: 1),
+            themes: []
+        )
+        try context.save()
+
+        struct ForcedSaveError: Error {}
+        let service = ThemeManagementService(
+            persistence: persistence,
+            resolver: resolver,
+            saveAction: { _ in throw ForcedSaveError() }
+        )
+        let payload = ThemeManagementService.ThemeDeletionUndoPayload(
+            canonical: "Person A",
+            originalThemesByEntryID: [entryID: ["Person A"]],
+            aliasGroupCanonical: nil,
+            aliasGroupAliases: []
+        )
+
+        let outcome = await service.restoreDeletedTheme(payload)
+
+        #expect(!outcome.succeeded)
+        #expect(outcome.affected == 0)
+        #expect(outcome.undoPayload == nil)
     }
 }
 

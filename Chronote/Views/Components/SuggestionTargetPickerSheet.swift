@@ -152,7 +152,7 @@ struct SuggestionTargetPickerSheet: View {
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             // 中性 liquid glass —— 不传 tint,使用 iOS 26 默认 regular 玻璃材质
-            .liquidGlassCard(cornerRadius: 14, interactive: false)
+            .liquidGlassCard(cornerRadius: LumoryCornerRadius.nestedRow, interactive: false)
         }
     }
 
@@ -180,7 +180,7 @@ struct SuggestionTargetPickerSheet: View {
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             // 中性 liquid glass + interactive(让按下有反馈)
-            .liquidGlassCard(cornerRadius: 14, interactive: true)
+            .liquidGlassCard(cornerRadius: LumoryCornerRadius.nestedRow, interactive: true)
         }
         .buttonStyle(PressableScaleButtonStyle())
         .disabled(confirmingName != nil)
@@ -210,7 +210,7 @@ struct SuggestionTargetPickerSheet: View {
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .liquidGlassCard(cornerRadius: 14, interactive: true)
+            .liquidGlassCard(cornerRadius: LumoryCornerRadius.nestedRow, interactive: true)
         }
         .buttonStyle(PressableScaleButtonStyle())
         .disabled(confirmingName != nil)
@@ -240,7 +240,7 @@ struct SuggestionTargetPickerSheet: View {
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .liquidGlassCard(cornerRadius: 14, interactive: true)
+            .liquidGlassCard(cornerRadius: LumoryCornerRadius.nestedRow, interactive: true)
         }
         .buttonStyle(PressableScaleButtonStyle())
         .disabled(confirmingName != nil)

@@ -22,6 +22,16 @@ final class OpenAITranscriber: TranscriberProtocol {
     /// 和后端 `MAX_TRANSCRIPTION_FILE_BYTES` 对齐 —— OpenAI 上限 25 MB。
     /// 客户端预检让用户在拨号前就知道"文件太大",省一次失败上传。
     nonisolated private static let maxFileBytes: Int64 = 25 * 1024 * 1024
+    /// 不传 `language`:用户可能中英任一语言录入,跟 App 语言设置无关。用 prompt 把自动检测
+    /// 的候选收窄到中英,降低短句/噪声被误判成其他语言的概率,同时避免把英文强压成中文。
+    ///
+    /// **A-19 / I-11 superreview 2026-05-19** — 去掉个人化词典(`ACM / HPLC / calculus / orgo`)。
+    /// 这些是开发者个人 dogfooding 时加的术语,ship 给所有用户会让转写在含混音频上 1% 偏向这几个
+    /// token,对完全不说理科词的用户是噪音。保留 zh/en 语言约束 + App 通用术语;后续若要做用户级
+    /// 自适应可读 `ThemeAliasResolver.snapshotIndex` top-N 主题动态拼接。
+    nonisolated private static let transcriptionPrompt = """
+    Audio language: 中文或 English only. Transcribe exactly in the spoken language; do not translate. If the clip is brief or noisy, prefer Chinese or English and do not output other languages. Context words may include Lumory, diary, journal, mood, theme.
+    """
 
     private let backendURL: URL
     private let jsonDecoder = JSONDecoder()
@@ -51,7 +61,8 @@ final class OpenAITranscriber: TranscriberProtocol {
     func transcribeAudio(fileURL: URL, localeIdentifier _: String) async -> String? {
         // 注:`localeIdentifier` 故意忽略。AppStorage `appLanguage` 取值是 `zh-Hans` / `zh-Hant` /
         // `en` 等 BCP-47 tag,而 OpenAI `language` 字段要 ISO-639-1(`zh` / `en`)。我们的核心
-        // 用例是中英混合,自动检测正合适;以后要传就映射 `zh-*` → `zh`、`en-*` → `en`。
+        // 用例是每段录音只会是中文或英文,但不一定等于 App 语言;固定 `language` 会误导另一种语言。
+        // 所以这里保持自动检测,只用 prompt 把候选空间收窄到中英。
         lastFailure = nil
 
         guard !appSharedSecret.isEmpty else {
@@ -173,6 +184,7 @@ final class OpenAITranscriber: TranscriberProtocol {
         // model 值都会被服务端忽略(防客户端篡改改更贵模型,trust boundary 在服务端)。这里只附
         // `response_format` 让后端透传给 OpenAI;backend-server.md "转写路由 model hardcode" 段。
         body.appendBoundaryField(boundary: boundary, name: "response_format", value: "json")
+        body.appendBoundaryField(boundary: boundary, name: "prompt", value: transcriptionPrompt)
         body.appendClosingBoundary(boundary: boundary)
         return PreparedUpload(body: body, boundary: boundary)
     }
@@ -204,6 +216,9 @@ final class OpenAITranscriber: TranscriberProtocol {
 
     /// **Test-only**:暴露 25MB 阈值给单测验"刚好超 / 刚好等"边界。
     nonisolated static var maxFileBytesForTesting: Int64 { maxFileBytes }
+
+    /// **Test-only**:锁住转写 prompt 的 wire contract,防 future refactor 漏掉中英限定。
+    nonisolated static var transcriptionPromptForTesting: String { transcriptionPrompt }
     #endif
 }
 

@@ -151,7 +151,7 @@ final class InsightsSearchEngine {
 
     // MARK: - Ask Your Past (RAG)
 
-    func ask(_ question: String, topK: Int = 8) -> AsyncStream<InsightsEngine.AnswerChunk> {
+    func ask(_ question: String, topK: Int = 11) -> AsyncStream<InsightsEngine.AnswerChunk> {
         AsyncStream { continuation in
             let task = Task {
                 guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

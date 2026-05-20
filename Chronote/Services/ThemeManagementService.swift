@@ -34,6 +34,16 @@ final class ThemeManagementService: ObservableObject {
         let affected: Int
         /// CoreData save 是否成功 —— false 时 alias group 不会被删,UI 应展示错误。
         let succeeded: Bool
+        let undoPayload: ThemeDeletionUndoPayload?
+    }
+
+    struct ThemeDeletionUndoPayload: Sendable {
+        let canonical: String
+        /// 每条 entry 上本次删除实际移除的 label。只存移除集,不存完整旧数组,避免撤销时复活
+        /// 撤销窗口内被用户/同步/回填移除的无关主题。
+        let originalThemesByEntryID: [UUID: [String]]
+        let aliasGroupCanonical: String?
+        let aliasGroupAliases: [String]
     }
 
     /// 删除主题 + 所有别名,从所有 entry 的 themes CSV 抹掉。
@@ -52,13 +62,15 @@ final class ThemeManagementService: ObservableObject {
             tagsToRemove.insert(key.lowercased())
             for a in aliases { tagsToRemove.insert(a.lowercased()) }
         }
+        let aliasGroupCanonical = resolver.groups.keys.first { $0.lowercased() == canonLower }
+        let aliasGroupAliases = aliasGroupCanonical.flatMap { resolver.groups[$0] } ?? []
 
         // bg task 返回 (success, affected) 而不是 Int —— 之前的 `return 0` 既可能表示
         // "没 entry 命中"(正常)也可能表示"save 失败"(灾难),无法区分。
         // codex review 指出:保存失败时仍 deleteGroup 会让 alias map 删但 raw themes 留下,
         // 用户感知是"主题没删干净"。区分后只在 succeeded=true 时删 group。
         let saveAction = self.saveAction  // capture before sendable closure boundary
-        let outcome: (success: Bool, affected: Int) = await persistence.container.performBackgroundTask { context in
+        let outcome: (success: Bool, affected: Int, originals: [UUID: [String]]) = await persistence.container.performBackgroundTask { context in
             // 用户在 viewContext 上正改某条 entry 的 themes / 同步刚拉到一份,跟 bg 删除并发
             // 时,默认 errorMergePolicy 会让 save 抛 NSManagedObjectMergeError → rollback,
             // 用户感知是"删除没生效"且无错误信号。
@@ -73,13 +85,18 @@ final class ThemeManagementService: ObservableObject {
             let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
             request.predicate = NSPredicate(format: "themes != nil AND themes != %@", "")
             request.fetchBatchSize = 200
-            guard let entries = try? context.fetch(request) else { return (false, 0) }
+            guard let entries = try? context.fetch(request) else { return (false, 0, [:]) }
 
             var changed = 0
+            var originals: [UUID: [String]] = [:]
             for entry in entries {
                 let original = entry.themeArray
+                let removed = original.filter { tagsToRemove.contains($0.lowercased()) }
                 let filtered = original.filter { !tagsToRemove.contains($0.lowercased()) }
                 if filtered.count != original.count {
+                    if let id = entry.id {
+                        originals[id] = removed
+                    }
                     entry.setThemes(filtered)
                     changed += 1
                 }
@@ -87,20 +104,27 @@ final class ThemeManagementService: ObservableObject {
             if context.hasChanges {
                 do {
                     try saveAction(context)
-                    return (true, changed)
+                    return (true, changed, originals)
                 } catch {
                     Log.error("[ThemeManagement] deleteTheme save 失败: \(error)", category: .persistence)
                     context.rollback()
-                    return (false, 0)
+                    return (false, 0, [:])
                 }
             }
             // 没有 entry 命中也算"成功"(用户主题在 alias map 里但 raw 数据没用过)
-            return (true, 0)
+            return (true, 0, [:])
         }
 
         guard outcome.success else {
-            return DeletionOutcome(affected: 0, succeeded: false)
+            return DeletionOutcome(affected: 0, succeeded: false, undoPayload: nil)
         }
+
+        let undoPayload = ThemeDeletionUndoPayload(
+            canonical: canonical,
+            originalThemesByEntryID: outcome.originals,
+            aliasGroupCanonical: aliasGroupCanonical,
+            aliasGroupAliases: aliasGroupAliases
+        )
 
         // 同步从 alias resolver 删 group(用户已经决定它彻底没了,后续不应再被建议合并)。
         // deleteGroup 内部已经清理 pending(matching group labels),codex P2 fix。
@@ -115,6 +139,57 @@ final class ThemeManagementService: ObservableObject {
 
         Log.info("[ThemeManagement] deleted theme \(canonical), affected entries: \(outcome.affected)", category: .persistence)
         NotificationCenter.default.post(name: .themeAliasMapDidChange, object: nil)
-        return DeletionOutcome(affected: outcome.affected, succeeded: true)
+        return DeletionOutcome(affected: outcome.affected, succeeded: true, undoPayload: undoPayload)
+    }
+
+    @discardableResult
+    func restoreDeletedTheme(_ payload: ThemeDeletionUndoPayload) async -> DeletionOutcome {
+        let saveAction = self.saveAction
+        let originals = payload.originalThemesByEntryID
+        let restored: (success: Bool, affected: Int) = await persistence.container.performBackgroundTask { context in
+            guard !originals.isEmpty else { return (true, 0) }
+            context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+            let ids = Array(originals.keys)
+            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            request.predicate = NSPredicate(format: "id IN %@", ids as NSArray)
+            request.fetchBatchSize = 200
+            guard let entries = try? context.fetch(request) else { return (false, 0) }
+
+            // (D-01 / codex 终审 2026-05-19) **merge** 回被删除的 label,**不要** 盲覆盖整个 themeArray。
+            // 老实现 `entry.setThemes(themes)` 把 4 秒撤销窗口内 用户/CloudKit/backfill 加进来的
+            // 新 tag 全打回旧 snapshot 状态。新逻辑:只把 snapshot 里"目前不在 entry 上"的 label
+            // 补回去,保留同窗口内的所有并发改动。lowercased 大小写归一,跟 `sanitizeThemes` 的
+            // dedup 策略对齐。
+            var changed = 0
+            for entry in entries {
+                guard let id = entry.id, let snapshotThemes = originals[id] else { continue }
+                let currentThemes = entry.themeArray
+                let currentLowerSet = Set(currentThemes.map { $0.lowercased() })
+                let toRestore = snapshotThemes.filter { !currentLowerSet.contains($0.lowercased()) }
+                guard !toRestore.isEmpty else { continue }   // 全在 → 已被并发流程加回 → no-op
+                entry.setThemes(currentThemes + toRestore)
+                changed += 1
+            }
+            guard context.hasChanges else { return (true, changed) }
+            do {
+                try saveAction(context)
+                return (true, changed)
+            } catch {
+                Log.error("[ThemeManagement] restoreDeletedTheme save 失败: \(error)", category: .persistence)
+                context.rollback()
+                return (false, 0)
+            }
+        }
+
+        guard restored.success else {
+            return DeletionOutcome(affected: 0, succeeded: false, undoPayload: nil)
+        }
+
+        if let aliasGroupCanonical = payload.aliasGroupCanonical {
+            resolver.restoreGroup(canonical: aliasGroupCanonical, aliases: payload.aliasGroupAliases)
+        }
+        NotificationCenter.default.post(name: .themeAliasMapDidChange, object: nil)
+        Log.info("[ThemeManagement] restored theme \(payload.canonical), affected entries: \(restored.affected)", category: .persistence)
+        return DeletionOutcome(affected: restored.affected, succeeded: true, undoPayload: nil)
     }
 }

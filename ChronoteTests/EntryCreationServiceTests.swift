@@ -15,9 +15,7 @@
 //    embed 返 16-D 归一化伪向量。
 //
 //  **不测的事**(已留 backlog):
-//  - `viewContext.save()` 失败路径(原方案 v3 的 `test_saveFailure_cleansUpOrphanImages`)。
-//    in-memory store 上稳定造 save throw 需要专门加 test seam,污染 production API → 跳过。
-//  - Reminder reschedule 副作用:UN center 不 mock,默认闭包注入成 no-op 即可,不验证 schedule 调度。
+    //  - Reminder reschedule 副作用:UN center 不 mock,默认闭包注入成 no-op 即可,不验证 schedule 调度。
 //  - StreakMilestone 副作用:`evaluateAfterSave` 内部跑 detached Task 算 streak,异步且 fire-and-forget。
 //
 
@@ -130,6 +128,33 @@ struct EntryCreationServiceTests {
         #expect(parts.count == 2, "expect 2 image filenames, got: \(csv)")
         #expect(parts.allSatisfy { $0.hasPrefix("img_") && $0.hasSuffix(".jpg") })
         #expect((entry.imagesData?.count ?? 0) > 0, "imagesData should be non-empty NSKeyedArchiver blob")
+    }
+
+    @Test func create_saveFailureDeletesInsertedEntryAndReturnsFailure() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let ai = MockAIService()
+        struct ForcedSaveError: Error {}
+
+        let result = await EntryCreationService.create(
+            .init(text: "will fail", audioFileName: nil, images: [], moodValue: 0.5),
+            in: persistence,
+            viewContext: context,
+            ai: ai,
+            saveAction: { _ in throw ForcedSaveError() },
+            aliasJudge: { _, _ in },
+            requestReminderReschedule: {}
+        )
+
+        guard case .failed = result else {
+            Issue.record("expected .failed, got \(result)")
+            return
+        }
+
+        #expect(context.insertedObjects.isEmpty, "save 失败后 inserted DiaryEntry 必须从 context 移除")
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        let entries = try context.fetch(request)
+        #expect(entries.isEmpty, "save 失败不应留下 ghost entry")
     }
 
     @Test func performAIWriteback_staleText_skipsCommitAndAliasJudge() async throws {

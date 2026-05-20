@@ -49,6 +49,10 @@ struct OneClickRebuildRow: View {
     /// 待索引条目数 —— 进入设置时 / 重建完成后刷新一次。nil = 还没查过,不显示数字。
     @State private var pendingCount: Int?
     @State private var isCountingPending: Bool = false
+    /// (2026-05-19 superreview P1)stopAll 用的 stop sentinel — runAll 在每阶段 await 后读这个,
+    /// 一旦置 true 就立刻 stage=.idle return,后续 .embeddings / .suggestions 阶段不再启动。
+    /// 不用 Task.checkCancellation 因为 runAll 在 coordinator.runOneClick 内,外层 Task 没存 handle。
+    @State private var oneClickStopRequested: Bool = false
 
     private enum Stage: Equatable {
         case idle
@@ -185,12 +189,56 @@ struct OneClickRebuildRow: View {
             .disabled(isExternalBackfillActive)
         case .themes, .embeddings, .suggestions:
             VStack(alignment: .trailing, spacing: 4) {
-                ProgressView()
+                // (2026-05-19 P2-05 audit)运行中显式停止按钮 — 重建可能跑几分钟,之前只有
+                // ProgressView spin 没有出口。stage 是 .suggestions 时一条 LLM call 没法 cancel
+                // (PromptSuggestionEngine 不持 task handle),只能停 theme/embedding 两个阶段。
+                if stage == .themes || stage == .embeddings {
+                    Button {
+                        #if canImport(UIKit)
+                        HapticManager.shared.impact(.light)
+                        #endif
+                        stopAll()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "stop.fill")
+                                .font(.caption2)
+                            Text(NSLocalizedString("停止", comment: "Stop backfill"))
+                                .font(.caption.weight(.semibold))
+                        }
+                    }
+                    .buttonStyle(.glass)
+                    .accessibilityLabel(NSLocalizedString("停止重建", comment: "Stop rebuild a11y"))
+                } else {
+                    ProgressView()
+                }
                 Text(progressDetail)
                     .font(.caption2.monospacedDigit())
                     .foregroundColor(.secondary)
             }
         }
+    }
+
+    /// (2026-05-19 P2-05 audit + superreview P1)停止 OneClick 三阶段 chain。
+    /// 关键:**只 cancel 当前 service 不够** — runAll 是 sequential await chain,前一阶段返
+    /// 后立刻起下一阶段。设 oneClickStopRequested=true 让 runAll 在阶段间隙 short-circuit。
+    /// 不主动翻 stage=.idle:runAll 内部 stop check 会自己翻,避免跟 service progress publish 的
+    /// 终态写入 race(service.cancel() 不清 runningRunID,publish(...isRunning:false) 仍会到达)。
+    private func stopAll() {
+        oneClickStopRequested = true
+        switch stage {
+        case .themes:
+            themeService.cancel()
+        case .embeddings:
+            embeddingService.cancel()
+        case .suggestions:
+            // suggestions 阶段是单次 LLM call,没 task handle;无法 cancel,只能等它自己结束。
+            // 设 stopRequested 后 runAll 跑完该 await 立刻 short-circuit 出 .done/.idle。
+            break
+        default:
+            oneClickStopRequested = false  // idle/done/failed 不该被点,清回去
+            return
+        }
+        Task { await refreshPendingCount() }
     }
 
     /// 本 row 当前不在 OneClick 运行态(那时 trailing 另走进度分支)时,外部是否有 rebuild 在跑。
@@ -282,6 +330,9 @@ struct OneClickRebuildRow: View {
             return
         }
 
+        // 进入 runOneClick 前重置 sentinel(防上一轮 stopAll 残留 true)
+        oneClickStopRequested = false
+
         await coordinator.runOneClick {
             stage = .themes
             // wordCount backfill 和主题一起跑——两者都扫全表，挂一块儿不额外往返。
@@ -289,13 +340,38 @@ struct OneClickRebuildRow: View {
             _ = await WordCountBackfillService.forceBackfill()
             _ = await ThemeBackfillService.shared.backfillAll()
 
+            // (2026-05-19 superreview P1)stop check 1:theme 阶段结束后用户若按停止,
+            // 立刻 short-circuit,不再起 embedding 阶段。
+            if oneClickStopRequested {
+                stage = .idle
+                oneClickStopRequested = false
+                await refreshPendingCount()
+                return
+            }
+
             stage = .embeddings
             _ = await EmbeddingBackfillService.shared.backfillAll()
+
+            // stop check 2:embedding 阶段结束后停止 → 不再起 suggestions。
+            if oneClickStopRequested {
+                stage = .idle
+                oneClickStopRequested = false
+                await refreshPendingCount()
+                return
+            }
 
             stage = .suggestions
             // forceRefresh 现在返回 Bool：true 表示真的生成了新 bundle；false 表示失败或信号不够。
             // 旧的 `current != nil` 判定在 AI 失败时会被旧 cache 误判成成功。
             let suggestionGenerated = await PromptSuggestionEngine.shared.forceRefresh()
+
+            // stop check 3:suggestions 完成后若用户曾按停止,跳过 done 翻 .idle。
+            if oneClickStopRequested {
+                stage = .idle
+                oneClickStopRequested = false
+                await refreshPendingCount()
+                return
+            }
             // 信号不足（<3 条日记）走的也是 false，但这是预期行为不算失败——拿 writingStats 兜底判定一次。
             let stats = await InsightsEngine.shared.writingStats()
             let suggestionOk = suggestionGenerated || stats.totalEntries < 3
@@ -354,7 +430,22 @@ struct EmbeddingBackfillRow: View {
             Spacer()
             if service.progress.isRunning {
                 VStack(alignment: .trailing, spacing: 4) {
-                    ProgressView()
+                    // (2026-05-19 P2-05 audit)per-service 入口同样加 "停止" 按钮,跟主入口对齐。
+                    Button {
+                        #if canImport(UIKit)
+                        HapticManager.shared.impact(.light)
+                        #endif
+                        service.cancel()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "stop.fill")
+                                .font(.caption2)
+                            Text(NSLocalizedString("停止", comment: "Stop backfill"))
+                                .font(.caption.weight(.semibold))
+                        }
+                    }
+                    .buttonStyle(.glass)
+                    .accessibilityLabel(NSLocalizedString("停止重建", comment: "Stop rebuild a11y"))
                     Text("\(service.progress.processed)/\(service.progress.total)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -432,7 +523,22 @@ struct ThemeBackfillRow: View {
             Spacer()
             if service.progress.isRunning {
                 VStack(alignment: .trailing, spacing: 4) {
-                    ProgressView()
+                    // (2026-05-19 P2-05 audit)主题重建同样加 "停止" 按钮。
+                    Button {
+                        #if canImport(UIKit)
+                        HapticManager.shared.impact(.light)
+                        #endif
+                        service.cancel()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "stop.fill")
+                                .font(.caption2)
+                            Text(NSLocalizedString("停止", comment: "Stop backfill"))
+                                .font(.caption.weight(.semibold))
+                        }
+                    }
+                    .buttonStyle(.glass)
+                    .accessibilityLabel(NSLocalizedString("停止重建", comment: "Stop rebuild a11y"))
                     Text("\(service.progress.processed)/\(service.progress.total)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -465,7 +571,9 @@ struct ThemeBackfillRow: View {
         }
         .alert(NSLocalizedString("重抽所有日记的主题？", comment: "Backfill all confirm title"),
                isPresented: $showAllConfirm) {
-            Button(NSLocalizedString("确定", comment: "Confirm"), role: .destructive) {
+            // P0-Set destructive 按钮 label 必须重复动作动词(Apple HIG)
+            // — "确定"/"OK" 用户看到红字下意识犹豫但不知道按了到底是确定什么,改成 "全部重抽" 跟外层 Menu 选项对齐。
+            Button(NSLocalizedString("全部重抽", comment: "Backfill all"), role: .destructive) {
                 guard !isOtherBackfillActive else { return }
                 Task { await service.backfillAll() }
             }

@@ -84,7 +84,10 @@ struct ChronoteApp: App {
         Task.detached(priority: .userInitiated) {
             DataMigrationService.performMigrationIfNeeded()
         }
-        requestPermissions()
+        // 麦克风权限不再在 init 里抢跑 —— 新用户开 App 第一眼是设置 / 写作页,
+        // 不应该被"允许 Lumory 访问麦克风?"alert 拦着。AudioRecorder.startRecording()
+        // 内部已经支持 .undetermined → 弹 alert + token-guarded auto-restart,
+        // 所以首次点 mic 自然走授权链路。
 
         // Pre-warm animations for better performance
         preWarmAnimations()
@@ -168,31 +171,6 @@ struct ChronoteApp: App {
         // Pre-warm CADisplayLink if needed
         #if canImport(UIKit)
         _ = CAFrameRateRange.uiUpdates
-        #endif
-    }
-    
-    // 请求录音权限。语音识别走 OpenAI 后端转写,不再需要 Speech.framework 权限。
-    private func requestPermissions() {
-        // Screenshot 自动化模式:跳过弹窗,否则会盖在 Home 上把首屏截烂。
-        // 真实运行用户必须看到弹窗,所以只在显式 launchArg 时才跳。
-        #if DEBUG
-        if UITestSampleData.isActive { return }
-        #endif
-
-        #if canImport(UIKit) && !os(macOS)
-        if #available(iOS 17.0, *) {
-            AVAudioApplication.requestRecordPermission(completionHandler: { granted in
-                if !granted {
-                    Log.info("Microphone permission denied", category: .ui)
-                }
-            })
-        } else {
-            AVAudioSession.sharedInstance().requestRecordPermission { granted in
-                if !granted {
-                    Log.info("Microphone permission denied", category: .ui)
-                }
-            }
-        }
         #endif
     }
     

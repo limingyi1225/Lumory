@@ -162,7 +162,7 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertTrue(askPast.waitForExistence(timeout: 5), "AskPast preset chip 找不到")
         askPast.tap()
 
-        XCTAssertTrue(app.navigationBars["回顾"].waitForExistence(timeout: 5), "AskPast sheet 未打开")
+        XCTAssertTrue(app.otherElements["askPastRoot"].waitForExistence(timeout: 5), "AskPast sheet 未打开")
         usleep(6_000_000)
         snapshot(app, named: "05-AskPast")
     }

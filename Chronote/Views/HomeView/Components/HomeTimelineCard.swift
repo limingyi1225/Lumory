@@ -57,8 +57,8 @@ struct HomeTimelineCard: View {
                 }
                 .padding(.init(top: 12, leading: 18, bottom: 12, trailing: 14))
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .liquidGlassCard(cornerRadius: cornerRadius, interactive: true)
-                .moodAccentBar(entry.moodColor, cornerRadius: cornerRadius)
+                // §4.6 (2026-05-19) — `.liquidGlassCard + .moodAccentBar` 配对走共享 modifier。
+                .lumoryAccentCard(mood: entry.moodColor, cornerRadius: cornerRadius)
                 .accessibilityElement(children: .combine)
                 .onAppear {
                     if isSummaryLoading { startShimmerAnimation() }

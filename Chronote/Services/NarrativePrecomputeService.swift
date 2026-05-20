@@ -149,6 +149,7 @@ actor NarrativePrecomputeService {
         let stale: Bool = await bg.perform {
             let latest = NarrativeCacheService.latest(for: range, in: bg)
             return NarrativeCacheService.isStale(
+                range: range,
                 payload: latest?.payload,
                 createdAt: latest?.createdAt,
                 mostRecentEntryDate: mostRecent,

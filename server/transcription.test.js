@@ -4,6 +4,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { randomUUID } = require('node:crypto');
 const axios = require('axios');
 
 process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-openai-key';
@@ -12,11 +13,6 @@ process.env.GLOBAL_IP_LIMIT_MAX = process.env.GLOBAL_IP_LIMIT_MAX || '50';
 process.env.NODE_ENV = 'test';
 
 const { app } = require('./index');
-
-// 合法 install id(/^[A-F0-9-]{36}$/i)。所有转写测试共用一个 id 也行——
-// per-install rate limiter 是 10/min,4 个测试远不到上限;但每测试用独立
-// X-Forwarded-For 段,确保 globalIPLimiter (per-IP) 互相隔离。
-const INSTALL_ID = 'a7d9673d-eba6-4cf8-a209-cc87f4f7cbba';
 
 function listen(app) {
   return new Promise((resolve, reject) => {
@@ -48,7 +44,7 @@ async function postMultipart(server, fields, headers = {}) {
     body: form,
     headers: {
       'X-App-Secret': process.env.APP_SHARED_SECRET,
-      'X-Install-Id': INSTALL_ID,
+      'X-Install-Id': randomUUID(),
       ...headers,
     },
   });
@@ -210,6 +206,67 @@ test('transcription drops non-ISO-639-1 language values and forwards valid ones'
   assert.equal(capturedLanguages[0], null, 'zh-Hans must be dropped (no language field upstream)');
   assert.equal(capturedLanguages[1], 'en', 'en must be forwarded as-is');
   assert.equal(capturedLanguages[2], null, 'uppercase ZH must be dropped');
+});
+
+test('transcription forwards trimmed prompt and caps overly long prompt', async (t) => {
+  const originalAdapter = axios.defaults.adapter;
+  const capturedPrompts = [];
+
+  axios.defaults.adapter = async (config) => {
+    capturedPrompts.push(config.data.get('prompt'));
+    return {
+      status: 200,
+      statusText: 'OK',
+      headers: { 'content-type': 'application/json' },
+      config,
+      data: { text: 'ok' },
+      request: {},
+    };
+  };
+
+  t.after(() => {
+    axios.defaults.adapter = originalAdapter;
+  });
+
+  const server = await listen(app);
+  t.after(() => close(server));
+
+  const prompt = 'Audio language: 中文或 English only.';
+  const aRes = await postMultipart(
+    server,
+    [
+      ['prompt', `  ${prompt}  `],
+      ['file', audioBlob('audio/mp4'), 'prompt.m4a'],
+    ],
+    { 'X-Forwarded-For': '10.50.35.1' }
+  );
+  assert.equal(aRes.status, 200);
+
+  const longPrompt = 'x'.repeat(1200);
+  const bRes = await postMultipart(
+    server,
+    [
+      ['prompt', longPrompt],
+      ['file', audioBlob('audio/mp4'), 'long-prompt.m4a'],
+    ],
+    { 'X-Forwarded-For': '10.50.35.2' }
+  );
+  assert.equal(bRes.status, 200);
+
+  const cRes = await postMultipart(
+    server,
+    [
+      ['prompt', '   '],
+      ['file', audioBlob('audio/mp4'), 'blank-prompt.m4a'],
+    ],
+    { 'X-Forwarded-For': '10.50.35.3' }
+  );
+  assert.equal(cRes.status, 200);
+
+  assert.equal(capturedPrompts.length, 3, 'three upstream calls made');
+  assert.equal(capturedPrompts[0], prompt, 'prompt should be trimmed before forwarding');
+  assert.equal(capturedPrompts[1].length, 1000, 'prompt should be capped to 1000 chars');
+  assert.equal(capturedPrompts[2], null, 'blank prompt should not be forwarded');
 });
 
 test('transcription rejects oversize file with 413 and code file_too_large', async (t) => {

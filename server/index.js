@@ -31,6 +31,7 @@ const log = pino({
       'req.headers["x-install-id"]',
       'req.body.messages[*].content',
       'req.body.input',
+      'req.body.prompt',
       'err.response.data',
       'err.config.headers.authorization',
       'err.config.headers.Authorization',
@@ -105,6 +106,7 @@ const MAX_TRANSCRIPTION_FILE_BYTES = positiveNumberEnv(
   'MAX_TRANSCRIPTION_FILE_BYTES',
   25 * 1024 * 1024
 );
+const MAX_TRANSCRIPTION_PROMPT_CHARS = positiveNumberEnv('MAX_TRANSCRIPTION_PROMPT_CHARS', 1_000);
 // 客户端录音是 audio/mp4(AAC m4a),其他常见格式留余量。Content-Type 白名单挡掉
 // 任意上传(被加 X-App-Secret 后,白名单是另一道防线)。
 const TRANSCRIPTION_MIME_ALLOWLIST = new Set([
@@ -630,6 +632,7 @@ app.post('/api/openai/embeddings', async (req, res) => {
 //   - Content-Type 白名单 (TRANSCRIPTION_MIME_ALLOWLIST) — 防任意文件冒充音频
 //   - model 在服务端 hardcode TRANSCRIPTION_MODEL — **不读** client 字段,避免被改成更贵模型
 //   - language 字段从 client 透传,但只接受 ISO-639-1 两字母 lowercase(否则丢弃,让模型自动检测)
+//   - prompt 字段可透传,但服务端 trim + cap,防篡改客户端塞超长提示
 //   - 失败用 res.json({ error: { code } }) 一致风格,前端 banner 据此分类
 const transcriptionUpload = multer({
   storage: multer.memoryStorage(),
@@ -676,6 +679,11 @@ app.post('/api/openai/audio/transcriptions', (req, res) => {
     // 想传时不踩规则不一致的坑(OpenAI 严格按 ISO-639-1 校验)。
     const rawLang = typeof req.body?.language === 'string' ? req.body.language : '';
     const language = /^[a-z]{2}$/.test(rawLang) ? rawLang : undefined;
+    // prompt 允许客户端提供受控提示(例如限制中英自动检测),但仍按信任边界裁剪,
+    // 防止被篡改客户端拿 shared secret 后塞超长 prompt 烧 token。
+    const rawPrompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+    const prompt =
+      rawPrompt.length > 0 ? rawPrompt.slice(0, MAX_TRANSCRIPTION_PROMPT_CHARS) : undefined;
 
     // OpenAI 的 SDK 接受 multipart/form-data。我们手工拼,避免引第三方 form-data lib —— 一个
     // boundary + 几行 Content-Disposition 没必要装包。Node 18+ 自带 FormData/Blob。
@@ -683,6 +691,7 @@ app.post('/api/openai/audio/transcriptions', (req, res) => {
     form.append('model', TRANSCRIPTION_MODEL);
     form.append('response_format', 'json');
     if (language) form.append('language', language);
+    if (prompt) form.append('prompt', prompt);
     // 客户端可控字符串 sanitize — 即使 Node 18 FormData 自身会 escape `\r\n`(防 multipart header
     // injection),trust boundary 上仍不该让任意客户端字符串原样出现在传给 OpenAI 的 filename。
     // 收紧到 `[A-Za-z0-9._-]` 100 字节内,iOS native 客户端发的 `recording.m4a` 类正常文件名不受影响。

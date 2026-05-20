@@ -79,7 +79,7 @@ struct NarrativeSummaryCard: View {
         // `reload()` 回填的 prop;range 切换瞬间它们仍是**上一个 range** 的值(SWR 命中时
         // InsightsView 故意不 reset 成 nil 以免闪 skeleton,见 InsightsView.reload 注释)。
         // 只靠 `.task(id: range)` hydrate → 会拿上个 range 的 entryCount 跑 staleness 判定,
-        // `isOutdatedForCurrentEntries` 里 `payload.entryCount != currentEntryCount` 命中 →
+        // `isOutdatedForCurrentEntries` 里 entryCount delta / mostRecent 判定命中 →
         // 把本 range 的真 cache 误判 outdated 抹成 nil;range 没再变就不会重 hydrate,
         // summary 永久消失。(用户现象:月→无 summary 的"年"→回月,summary 没了;
         // 月→entryCount 恰好相等的"季"→回月却正常 —— 同一个 bug 的两面。)
@@ -191,6 +191,7 @@ struct NarrativeSummaryCard: View {
         let payload: AIConversation.NarrativePayload?
         if let latest,
            !NarrativeCacheService.isOutdatedForCurrentEntries(
+               range: range,
                payload: latest.payload,
                createdAt: latest.createdAt,
                mostRecentEntryDate: mostRecentEntryDate,
@@ -268,6 +269,29 @@ struct NarrativeSummaryCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // (B-04 / B-03 superreview 2026-05-19, **二次修复** —— 这个 overlay 之前被某次编辑丢了,
+        //  只剩 headlineView 里那条"已挪到 overlay"的注释在说谎)stop button 挂卡片顶层 overlay,
+        //  这样 streaming 时不管 displayHeadline 是不是空,用户都能看到停止按钮。老实现把它放在
+        //  headlineView 内,第一次生成(无 cache → displayHeadline 空)走 skeleton 分支 headlineView
+        //  不渲染,停止按钮跟着不显,用户 30-60 秒被锁住没法中断。overlay 永远可见 + hit-test 高于
+        //  整卡 onTapGesture(Button 默认优先级高于 sibling onTapGesture)。
+        .overlay(alignment: .topTrailing) {
+            if blocksUserTap {
+                Button {
+                    HapticManager.shared.impact(.medium)
+                    Task { await coordinator.cancel(range) }
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(LumoryFonts.narrativeMeta)
+                        .foregroundStyle(Color.accentColor)
+                        .padding(6)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(10)
+                .accessibilityLabel(NSLocalizedString("停止生成", comment: "Stop narrative generation"))
+            }
+        }
         // wave16 (2026-05-13):去 accent tint + accent shadow 改 `.insightsCard()` —— 用户反馈
         // "浅蓝色突兀,跟下面 heatmap 不一组"。中性玻璃 + primary shadow 0.05 跟 WritingHeatmap
         // 同一 dashboard token,色系统一。hero 感靠字号 + padding + 第一位排序,不靠 tint。
@@ -346,6 +370,9 @@ struct NarrativeSummaryCard: View {
                 .textSelection(.enabled)
                 .animation(.smooth(duration: 0.4), value: displayHeadline)
 
+            // §2.1 (2026-05-19) — `arrow.up.right` 只在"有 headline 可点开沉浸阅读"时显;
+            // streaming + stop button 已挪到 `contentCard` 的 overlay 层(见 B-04 fix),
+            // 这里只剩 idle 状态下的箭头 affordance。
             if !isStreaming {
                 Image(systemName: "arrow.up.right")
                     .font(LumoryFonts.narrativeMeta)

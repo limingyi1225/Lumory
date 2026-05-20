@@ -38,6 +38,15 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 Screenshots/**/*.png
+# codex 终审 2026-05-19: screenshot 跑还会落 .mp4 录屏 / `Debug description ...txt` / `App UI hierarchy ...` byproducts。
+# 老 ignore 只挡 png,这些 byproduct 很容易被 git add . 误带上。统一不入库。
+# **第二轮**(codex 再审):`Synthesized Event ...` / `UI Snapshot ...` 这两个文件**没有扩展名**,
+# 上面的 *.mp4 / *.txt 接不住;补两条以名字开头的 glob。
+Screenshots/**/*.mp4
+Screenshots/**/*.txt
+Screenshots/**/App\ UI\ hierarchy*
+Screenshots/**/Synthesized\ Event*
+Screenshots/**/UI\ Snapshot*
 fastlane/test_output
 
 # Node / backend
@@ -73,6 +82,9 @@ lumory-backend.tar.gz
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+# oh-my-claudecode local state (sessions / notepad / project-memory / plans / logs)
+.omc/
 
 # Build / tool caches that don't belong in source
 .swift-module-cache/

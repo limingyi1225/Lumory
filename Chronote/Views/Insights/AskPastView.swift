@@ -73,7 +73,9 @@ struct AskPastView: View {
                             welcomeHeader
                             presetGrid
                         }
-                        .padding(20)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 20)
+                        .padding(.top, -12)
                         .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.chatContentMaxWidth)
                     }
                     .scrollDismissesKeyboard(.interactively)
@@ -82,16 +84,16 @@ struct AskPastView: View {
                 }
                 inputBar
             }
-            .navigationTitle(NSLocalizedString("回顾", comment: "Ask Your Past title"))
+            .accessibilityIdentifier("askPastRoot")
             #if canImport(UIKit)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
             #endif
             .toolbar {
-                // iPad regular 走 fullScreenCover,没有下拉关闭手势;保留显式 close 兜底。
+                // iPad / regular size class 走 fullScreenCover 没有下拉手势,留小关闭按钮兜底。
                 if hSizeClass == .regular {
                     ToolbarItem(placement: .cancellationAction) {
                         Button {
-                            activeTask?.cancel()
                             dismiss()
                         } label: {
                             Image(systemName: "xmark.circle.fill")
@@ -101,29 +103,39 @@ struct AskPastView: View {
                         .accessibilityLabel(NSLocalizedString("关闭", comment: "Close"))
                     }
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showHistory = true
-                    } label: {
-                        Image(systemName: "clock.arrow.circlepath")
-                    }
-                    .accessibilityLabel(NSLocalizedString("历史回顾", comment: "Conversation history"))
-                }
-                // 清空按钮 — wave14 改成直接执行 reset(),不再走 confirmationDialog。
                 if !messages.isEmpty {
-                    ToolbarItem(placement: .primaryAction) {
+                    ToolbarItem(placement: .navigationBarTrailing) {
                         Button {
                             HapticManager.shared.impact(.medium)
                             reset()
                         } label: {
-                            Image(systemName: "trash.slash")
+                            Image(systemName: "trash")
+                                .foregroundStyle(Color.accentColor)
                         }
+                        .buttonStyle(.plain)
                         .accessibilityLabel(NSLocalizedString("清空", comment: "Reset chat"))
                     }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        #if canImport(UIKit)
+                        HapticManager.shared.impact(.light)
+                        #endif
+                        showHistory = true
+                    } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(NSLocalizedString("提问历史", comment: "Ask Past history"))
+                    .accessibilityIdentifier("askPastHistoryButton")
+                }
             }
             .lumoryAdaptiveModal(isPresented: $showHistory) {
-                ConversationHistoryView()
+                // §2.3 (2026-05-19) — askPast 历史只显提问记录;narrative 回顾历史从
+                // NarrativeDetailSheet 自己的 toolbar 入口,两条不再混在同一列表。
+                ConversationHistoryView(filterKind: .askPast)
                     .environment(\.managedObjectContext, viewContext)
             }
             .task {
@@ -206,8 +218,8 @@ struct AskPastView: View {
                                 }
                                 .padding(12)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                                .liquidGlassCard(cornerRadius: 14, interactive: true)
+                                .contentShape(RoundedRectangle(cornerRadius: LumoryCornerRadius.nestedRow, style: .continuous))
+                                .liquidGlassCard(cornerRadius: LumoryCornerRadius.nestedRow, interactive: true)
                             }
                             .buttonStyle(PressableScaleButtonStyle())
                         }
@@ -300,7 +312,7 @@ struct AskPastView: View {
 
                 Button {
                     if isStreaming {
-                        activeTask?.cancel()
+                        cancelActiveAnswer()
                     } else {
                         submit(inputText)
                     }
@@ -325,6 +337,7 @@ struct AskPastView: View {
             .padding(.vertical, 10)
         }
         .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.chatContentMaxWidth)
+        .padding(.bottom, 8)
     }
 
     private var canSubmit: Bool {
@@ -477,6 +490,29 @@ struct AskPastView: View {
         var msg = messages[idx]
         mutate(&msg)
         messages[idx] = msg
+    }
+
+    private func cancelActiveAnswer() {
+        activeTask?.cancel()
+        activeTask = nil
+        activeTaskID = nil
+
+        // 只在"第一 chunk 还没到 + 没失败"才清,有内容的回答留着让用户看到自己取消了多少。
+        guard let last = messages.last,
+              last.role == .ai,
+              last.isStreaming,
+              last.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (last.errorText ?? "").isEmpty else { return }
+        messages.removeLast()
+
+        // (codex 终审 2026-05-19) 在 first-chunk 之前秒停时,刚 append 的 user message 也要一起拿掉。
+        // submit 顺序是"user.append → ai.placeholder.append",所以现在的 last 应该是配对的 user。
+        // 不一起删,用户看到的是"自己问了一个问题但 AI 没回答" 的悬挂 turn,而且 user.text 不会
+        // 进 ConversationHistory(persistConversationIfNeeded 跳过空回答),用户重开 sheet 也看不见 —
+        // 等同于 ghost question。整对一起删等同于"这次提问从未发生",符合用户意图。
+        if let pairedUser = messages.last, pairedUser.role == .user {
+            messages.removeLast()
+        }
     }
 
     private func reset() {
@@ -728,20 +764,12 @@ private struct AskPastMessageRow: View, Equatable {
     }
 
     /// 对话气泡里的"内容不完整"提示条，避免把系统状态当作 AI 正文 append。
+    /// §4.3 (2026-05-19) — 走共享 `InlineWarningBanner`(tintOpacity 0.12 跟 HomeComposer 三胞胎
+    /// 的 0.08 略不同,用 init 参数传)。
     private var incompleteBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .font(.caption)
-            Text(NSLocalizedString("stream.incomplete.banner", comment: "Stream truncated hint"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: LumoryCornerRadius.inline, style: .continuous)
-                .fill(Color.orange.opacity(0.12))
+        InlineWarningBanner(
+            message: NSLocalizedString("stream.incomplete.banner", comment: "Stream truncated hint"),
+            tintOpacity: 0.12
         )
     }
 

@@ -75,7 +75,7 @@ extension HomeView {
         Task.detached(priority: .utility) {
             await PromptSuggestionEngine.shared.refreshIfNeeded()
         }
-        try? await Task.sleep(nanoseconds: 800_000_000)
+        await Task.yield()
     }
 
     // MARK: - 照片压缩
@@ -147,9 +147,26 @@ extension HomeView {
     /// 输入框占位文字。**stable**：一旦选定就不变，避免 SwiftUI body 重评时反复换。
     /// 重新选只发生在几个明确时刻：进入首页、发送后清空、AI 池更新完成、本地模板加载完成。
     var inputPlaceholder: String {
-        inputVM.stablePlaceholder.isEmpty
+        let raw = inputVM.stablePlaceholder.isEmpty
             ? NSLocalizedString("今天是怎样的一天呢？", comment: "Daily prompt fallback")
             : inputVM.stablePlaceholder
+        return Self.normalizePlaceholderPunctuation(raw)
+    }
+
+    /// 用户决定 (2026-05-19) — 输入框 prompt 只在**问句**时保留问号 (?/?),其他时候不要句末
+    /// 终结标点。AI 生成池里很多 "今天有什么有趣的事。" 这种陈述句配句号读起来生硬;改成
+    /// "今天有什么有趣的事" 更像 placeholder。问句保留 ?/? 因为它本身是邀请用户回答的语义。
+    static func normalizePlaceholderPunctuation(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = trimmed.unicodeScalars.last else { return trimmed }
+        // 句末问号一律保留(中英都是邀请回答的语义)。
+        if last == "?" || last == "？" { return trimmed }
+        // 句末终结标点(中英句号 / 感叹号 / 中文省略号)一律剥掉。
+        let strip: Set<Unicode.Scalar> = [".", "。", "!", "！", "…"]
+        if strip.contains(last) {
+            return String(trimmed.unicodeScalars.dropLast())
+        }
+        return trimmed
     }
 
     /// 在三级 fallback 里挑一条写入 `stablePlaceholder`：

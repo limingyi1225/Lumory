@@ -8,10 +8,30 @@ enum SpectrumDisplayState {
 }
 
 /// iOS 26 Liquid Glass 心情光谱条。完整光谱压在玻璃胶囊下，揭示态聚光+色晕。
+///
+/// 两条手势 callback:
+/// - `onMoodChanged`: DragGesture.onChanged,连续值。HomeView 写回 VM 用,UI 同步刷新。
+/// - `onInteractionEnded`: DragGesture.onEnded,松手时机。HomeView+Send 的可编辑窗口
+///   watchdog 用来从"松手"开始算 idle 落库延迟。两条都在 `.revealed` 状态下才活;
+///   `.idle` / `.analyzing` 状态下手势整段静默,光谱只展示不可编辑。
 struct MoodSpectrumBar: View {
     @Environment(\.colorScheme) var colorScheme
     let moodValue: Double
     let displayState: SpectrumDisplayState
+    let onMoodChanged: ((Double) -> Void)?
+    let onInteractionEnded: (() -> Void)?
+
+    init(
+        moodValue: Double,
+        displayState: SpectrumDisplayState,
+        onMoodChanged: ((Double) -> Void)? = nil,
+        onInteractionEnded: (() -> Void)? = nil
+    ) {
+        self.moodValue = moodValue
+        self.displayState = displayState
+        self.onMoodChanged = onMoodChanged
+        self.onInteractionEnded = onInteractionEnded
+    }
 
     // 动画状态
     @State private var breathPhase: CGFloat = 0
@@ -51,6 +71,28 @@ struct MoodSpectrumBar: View {
                 Capsule()
                     .strokeBorder(Color.white.opacity(0.55), lineWidth: 0.5)
             }
+            .contentShape(Capsule())
+            // gesture 只在可编辑态(.revealed)激活。`DragGesture(minimumDistance: 0)` 哪怕 body 被
+            // guard 成 no-op,recognizer 仍会在 touch-down 瞬间争抢触点,挂在可滚动容器里会让该区域
+            // 的滚动起手不灵。`including: .subviews` 在非编辑态把本 view 的手势让给祖先 ScrollView,
+            // 只放行 subview 手势(这里没有),等价于"非 .revealed 不挂 drag"。
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard displayState == .revealed, let onMoodChanged else { return }
+                        let newValue = Double(value.location.x / max(width, 1))
+                        onMoodChanged(min(max(0, newValue), 1))
+                    }
+                    .onEnded { _ in
+                        // 松手是落库窗口 watchdog 的关键信号 —— `.onChanged` 不会在
+                        // 用户按住不动时持续 fire,光靠 onChanged tick 没法区分"还在按"
+                        // 和"已松手"。HomeView+Send 看到 `releasedAt != nil` 即落库
+                        //(实际 ~100ms poll;A-07 superreview:旧注释写的 1.5s idle 是过时值)。
+                        guard displayState == .revealed else { return }
+                        onInteractionEnded?()
+                    },
+                including: displayState == .revealed ? .all : .subviews
+            )
         }
         .frame(height: barHeight)
         .onAppear {
@@ -84,17 +126,20 @@ struct MoodSpectrumBar: View {
 
     // MARK: - 共用渲染片段
 
+    /// 沿光谱 0...1 均匀采样的 stops。老实现只取 5 点 ([0, 0.25, 0.5, 0.75, 1.0]),
+    /// LinearGradient 在两点间走线性插值,完全错过了 `Color.moodSpectrum(value:)` 在
+    /// 0.45-0.55 中性平台、0.25 粉色拐点、0.75 蓝色拐点的非线性段——拖动时肉眼看得到
+    /// 色带分段。改成 21 stops(每 0.05 一格)让 LinearGradient 的分段插值贴合曲线,
+    /// 跨节段过渡丝滑。21 个 stop 在 iOS GPU 上一次画就完,对帧率没影响。
+    private static let spectrumStops: [Color] = (0...20).map { idx in
+        Color.moodSpectrum(value: Double(idx) / 20.0)
+    }
+
     private var spectrumFill: some View {
         Capsule()
             .fill(
                 LinearGradient(
-                    colors: [
-                        Color.moodSpectrum(value: 0.0),
-                        Color.moodSpectrum(value: 0.25),
-                        Color.moodSpectrum(value: 0.5),
-                        Color.moodSpectrum(value: 0.75),
-                        Color.moodSpectrum(value: 1.0)
-                    ],
+                    colors: Self.spectrumStops,
                     startPoint: .leading,
                     endPoint: .trailing
                 )

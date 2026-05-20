@@ -556,6 +556,34 @@ final class ThemeAliasResolver: ObservableObject {
         NotificationCenter.default.post(name: .themeAliasMapDidChange, object: nil)
     }
 
+    /// (D-01 / codex 终审 2026-05-19) **merge** 模式:如果撤销窗口里用户已经重新建过同 canonical
+    /// 的 group(banner 二次合并 / 手动 confirm / CloudKit pull),不要盲覆盖。union 现有 aliases
+    /// 跟 snapshot aliases,保留任何在窗口内被加进来的别名;只 sorted-dedupe 一次。
+    func restoreGroup(canonical: String, aliases: [String]) {
+        let canonicalTrim = canonical.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !canonicalTrim.isEmpty else { return }
+        let snapshotAliases = aliases
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.lowercased() != canonicalTrim.lowercased() }
+        objectWillChange.send()
+        store.update { state in
+            // 找现有同 canonical 的 group(大小写不敏感),merge 进 snapshotAliases。
+            let existingKey = state.groups.keys.first { $0.lowercased() == canonicalTrim.lowercased() }
+            let existingAliases = existingKey.flatMap { state.groups[$0] } ?? []
+            let merged = (existingAliases + snapshotAliases)
+                .filter { !$0.isEmpty && $0.lowercased() != canonicalTrim.lowercased() }
+                .uniqued(byKey: { $0.lowercased() })
+                .sorted()
+            // 用 snapshot 的 canonicalTrim 作为最终 key(大小写跟用户最初建组时一致);
+            // 如果存在另一种大小写的旧 key,先删再写避免双 key。
+            if let existingKey, existingKey != canonicalTrim {
+                state.groups.removeValue(forKey: existingKey)
+            }
+            state.groups[canonicalTrim] = merged
+        }
+        NotificationCenter.default.post(name: .themeAliasMapDidChange, object: nil)
+    }
+
     /// 公开版:供 ThemeManagementService.deleteTheme 在删除 entry.themes CSV 中的标签后,
     /// 同步清理任何提到这些标签的 pending 建议。labels 应是 lowercased。
     func purgePending(matchingLowercasedLabels labels: Set<String>) {

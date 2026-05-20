@@ -96,9 +96,9 @@ enum NarrativeCacheService {
 
     /// stale 判定 — 任意一条满足即 stale:
     /// - cache 不存在
-    /// - cache.createdAt 早于该 range 内最新一篇日记的 date(用户后又写了日记)
-    /// - payload.entryCount != currentEntryCount(用户删了一篇日记后 mostRecent 可能不变,
-    ///   但 entryCount 变 → 仍要重生)
+    /// - cache.createdAt 早于该 range 内最新一篇日记的 date(用户后又编辑/替换了日记)
+    /// - payload.entryCount 变少(删除要立刻重生)
+    /// - payload.entryCount 增加到 range 对应阈值(月 1 / 季 3 / 年和全部 5)
     ///
     /// **2026-05-10 删 age-based freshness window 判定**:原本 .month 设 24h、其他
     /// range 设 3-7 day,期望"超过窗口即便没新日记也重生(防止 narrative 自身陈旧)"。
@@ -108,45 +108,97 @@ enum NarrativeCacheService {
     /// 没新日记的场景里没意义 — 滑动只是丢一些旧日记,内容信号没变化,值得重生的是
     /// **真有新内容**的时刻,那两条已经覆盖。
     static func isStale(
+        range: TimeRange,
         payload: AIConversation.NarrativePayload?,
         createdAt: Date?,
         mostRecentEntryDate: Date?,
         currentEntryCount: Int
     ) -> Bool {
         guard let payload, let createdAt else { return true }
+        // 老 cache(v2 之前没 headline / 半路 stream failed)需要重生 narrative,
+        // 但展示侧 `isOutdatedForCurrentEntries` 故意不挡这条 —— 见那边注释。
         if payload.headline == nil || payload.isIncomplete {
             return true
         }
-        // 严格 `<` — `createdAt == mostRecent` 视为 cache 仍覆盖最后那篇 entry(narrative 是
-        // entry 写入之后才生成,实践中 createdAt 严格晚于 mostRecent;同秒是测试 / 时钟漂移
-        // 边界,语义为"cache 是 fresh 的")。`isStale_cacheOlderThanWindow_returnsFalse` 测试
-        // 锁死此行为。
-        if let mostRecent = mostRecentEntryDate, createdAt < mostRecent {
-            return true
-        }
-        if let cachedCount = payload.entryCount, cachedCount != currentEntryCount {
-            return true
-        }
-        return false
+        return entrySetChanged(
+            range: range,
+            payload: payload,
+            createdAt: createdAt,
+            mostRecentEntryDate: mostRecentEntryDate,
+            currentEntryCount: currentEntryCount
+        )
     }
 
     /// 只判断 entry 集合是否已经让缓存内容过期。它和 `isStale` 刻意不同:
     /// v2 老 cache 没 headline、incomplete cache 有 warning,前台仍可以展示;但新写/删/改
     /// entry 后的旧 body 必须隐藏,避免 ghost 内容。
     static func isOutdatedForCurrentEntries(
+        range: TimeRange,
         payload: AIConversation.NarrativePayload?,
         createdAt: Date?,
         mostRecentEntryDate: Date?,
         currentEntryCount: Int
     ) -> Bool {
         guard let payload, let createdAt else { return true }
+        return entrySetChanged(
+            range: range,
+            payload: payload,
+            createdAt: createdAt,
+            mostRecentEntryDate: mostRecentEntryDate,
+            currentEntryCount: currentEntryCount
+        )
+    }
+
+    // MARK: - 共享的"entry 集合变化"判定
+    //
+    // **H-2 superreview 2026-05-19** — 原来 `isStale` 和 `isOutdatedForCurrentEntries`
+    // 各自手写了"delta < 0 / delta >= threshold / createdAt < mostRecent" 同一套规则,
+    // 两份 copy 一旦漂移就出现"后台决定生成新 narrative + 前台决定继续显示旧 body" 的
+    // silent inconsistency,而且没有任何告警机制。统一到这个 private helper,两个 public
+    // API 都 thin-wrap 它,差异只在 headline/incomplete 触发的 regenerate 语义。
+    //
+    // **关于 B-05 superreview finding 的处置**(2026-05-19 codex 终审反驳后回归):
+    // Slice B 主张"把 mostRecent 检查抬到 delta 检查之前"是 over-correction —— 任何
+    // 用户新写一篇日记都会推进 mostRecent 超过 cache.createdAt(by construction),那等于
+    // 废除 entry-delta threshold 机制("加 1 篇立即重生",项目本意是"加少于阈值不重生")。
+    // 真正的 B-05 场景"用户编辑日记 mostRecent 推进"是 delta == 0 情况,旧实现本来就
+    // fall through 到 mostRecent 检查,**没有 bug**。所以这里保持旧顺序:
+    //   delta < 0 → stale
+    //   delta > 0 → 看是否到阈值
+    //   delta == 0 → 看 mostRecent 是否推进过 createdAt
+    //
+    // 严格 `<` — `createdAt == mostRecent` 视为 cache 仍覆盖最后那篇 entry(narrative 是
+    // entry 写入之后才生成,实践中 createdAt 严格晚于 mostRecent;同秒是测试 / 时钟漂移
+    // 边界,语义为"cache 是 fresh 的")。
+    private static func entrySetChanged(
+        range: TimeRange,
+        payload: AIConversation.NarrativePayload,
+        createdAt: Date,
+        mostRecentEntryDate: Date?,
+        currentEntryCount: Int
+    ) -> Bool {
+        if let cachedCount = payload.entryCount {
+            let delta = currentEntryCount - cachedCount
+            if delta < 0 { return true }
+            if delta > 0 {
+                return delta >= range.narrativeRefreshEntryDeltaThreshold
+            }
+            // delta == 0:落到下方 mostRecent 检查(用户编辑日记的场景)
+        }
         if let mostRecent = mostRecentEntryDate, createdAt < mostRecent {
             return true
         }
-        if let cachedCount = payload.entryCount, cachedCount != currentEntryCount {
-            return true
-        }
         return false
+    }
+}
+
+extension TimeRange {
+    var narrativeRefreshEntryDeltaThreshold: Int {
+        switch self {
+        case .month: return 1
+        case .quarter: return 3
+        case .year, .all: return 5
+        }
     }
 }
 

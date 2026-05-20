@@ -62,8 +62,7 @@ struct HomeTimelineRow: View {
             }
             .tint(.blue)
         }
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+        // §4.4 (2026-05-19) — 三件套(hidden separator + clear bg + 16/16 inset)走共享 modifier。
+        .lumoryGlassListRow()
     }
 }

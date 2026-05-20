@@ -90,8 +90,8 @@ private struct OnThisDayCard: View {
             .padding(.vertical, 12)
             .frame(width: 260, alignment: .leading)
             .frame(minHeight: 104, alignment: .top)
-            .liquidGlassCard(cornerRadius: LumoryCornerRadius.inline, interactive: true)
-            .moodAccentBar(entry.moodColor, cornerRadius: LumoryCornerRadius.inline)
+            // §4.6 (2026-05-19) — `.liquidGlassCard + .moodAccentBar` 配对走共享 modifier。
+            .lumoryAccentCard(mood: entry.moodColor, cornerRadius: LumoryCornerRadius.inline)
         }
         .buttonStyle(PressableScaleButtonStyle())
         .accessibilityLabel("\(title), \(LumoryDateFormatters.monthDay(language: appLanguage).string(from: entry.wrappedDate))")

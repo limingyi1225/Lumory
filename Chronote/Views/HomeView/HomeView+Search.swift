@@ -178,22 +178,61 @@ extension HomeView {
                 .contentShape(Rectangle())
         }
         .buttonStyle(PlainButtonStyle())
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+        // §4.4 (2026-05-19) — 三件套(hidden separator + clear bg + 16/16 inset)走共享 modifier。
+        .lumoryGlassListRow()
     }
 
     @MainActor
     func keywordHits(for text: String) async -> [DiaryEntry] {
         // 函数整体 @MainActor：跨 await 返回 [DiaryEntry] (NSManagedObject) 在 Swift 6
         // 严格并发下不 Sendable，把 receiver 锁定到 main 上避免跨 actor。
+
+        // (2026-05-19 superreview P1-defensive)caller 已 trim + guard 非空,但 internal API
+        // 不应假设 caller 永远正确 — 空串 `text CONTAINS[cd] ""` 等价 true 会拉 fetchLimit=50
+        // 全表回来,UX 灾难。这里加自防御 trim 再 guard 一次。
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        // (2026-05-19 P2-07 audit)接入主题别名 — 用户合并了 "Abby" / "宝贝" 之后,
+        // 搜 "Abby" 应该同时命中 themes 字段里写的 "宝贝"。alias map 在 InsightsEngine
+        // 聚合层有用,但 Home 搜索之前只查 raw fields,漏了别名命中。
+        // **前提**:用户必须先合并 "Abby"/"宝贝"(走 banner confirm 或 management page mergeThemes);
+        // 未合并的标签不在 aliasIndex 里 — 对它们 fix 不工作,仅靠 substring `CONTAINS[cd]` 命中。
+        //
+        // 策略:用 query 经 alias map 反推所有同 canonical 的标签 → 拼一条 OR 谓词。
+        // 走 themes CONTAINS[cd] 仍是 substring match,所以"宝"短查询能命中"宝贝",
+        // 但 alias 扩展确保即便用户搜 canonical 也能跨别名命中 — 这是 alias 真正价值。
+        let aliasIndex = ThemeAliasResolver.shared.snapshotIndex()
+        let canonicalForQuery = ThemeAliasResolver.shared.canonicalize(trimmed)
+        // 反查所有 alias → canonical 映射里 canonical 命中的 raw alias
+        // alias key 是 ThemeKey.make(...) 归一化后的小写,value 是 canonical 原文。
+        // 用户搜任一形态都能跨别名命中:把同组所有 alias 的归一化 key + 用户原查询塞进 set。
+        // canonical 一次性 insert 在 loop 外(同 group 多个 alias 反复 insert canonical 等价无害,
+        // 但提前出 loop 让代码意图更清晰)。`[cd]` 大小写不敏感所以原文 vs lowercased 行为一致,
+        // 重复 predicate 由 Set dedup 自然消除。
+        var expanded: Set<String> = [trimmed]
+        let canonicalLower = canonicalForQuery.lowercased()
+        var hitAliasGroup = false
+        for (aliasKey, canonical) in aliasIndex {
+            if canonical.lowercased() == canonicalLower {
+                expanded.insert(aliasKey)
+                hitAliasGroup = true
+            }
+        }
+        if hitAliasGroup { expanded.insert(canonicalForQuery) }
+
         let objectIDs: [NSManagedObjectID] = await PersistenceController.shared.container
             .performBackgroundTask { context in
                 let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
-                request.predicate = NSPredicate(
-                    format: "text CONTAINS[cd] %@ OR summary CONTAINS[cd] %@ OR themes CONTAINS[cd] %@",
-                    text, text, text
-                )
+                // text / summary 仍按原 query 走(用户搜的可能是日记正文里的词,不是 theme),
+                // themes 字段对 expanded 集合做 OR — 把别名映射到 raw themes CSV 命中。
+                var predicates: [NSPredicate] = []
+                predicates.append(NSPredicate(format: "text CONTAINS[cd] %@", trimmed))
+                predicates.append(NSPredicate(format: "summary CONTAINS[cd] %@", trimmed))
+                for term in expanded {
+                    predicates.append(NSPredicate(format: "themes CONTAINS[cd] %@", term))
+                }
+                request.predicate = NSCompoundPredicate(orPredicateWithSubpredicates: predicates)
                 request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
                 request.fetchLimit = 50
                 request.propertiesToFetch = ["id"]

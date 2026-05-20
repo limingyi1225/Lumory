@@ -29,11 +29,10 @@ final class iPadAdaptiveModalSmokeTests: XCTestCase {
             "Theme filtered entries did not open"
         )
 
-        app.buttons["更多操作"].tap()
         let merge = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH %@", "合并到其他主题")
         ).firstMatch
-        XCTAssertTrue(merge.waitForExistence(timeout: 3), "Merge menu action did not appear")
+        XCTAssertTrue(merge.waitForExistence(timeout: 5), "Merge button did not appear")
         merge.tap()
 
         XCTAssertTrue(

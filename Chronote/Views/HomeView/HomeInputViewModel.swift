@@ -25,7 +25,12 @@ enum SendButtonState {
 ///
 /// **线程安全**: iOS 26 的 `@Observable` 宏在 SwiftUI `@State`-owned 场景下默认主线程访问。
 /// 当前所有写点都已经在 `MainActor` 上(对应 HomeView 里的 `MainActor.run`),迁移后不变。
+///
+/// **G-06 superreview 2026-05-19** — 显式 `@MainActor`:`@Observable` 不蕴含 actor 隔离,
+/// 当前所有写点(`MoodSpectrumBar` gesture / `handleSendAction` MainActor.run / `processStoppedRecording`)
+/// 都已在 MainActor 上,加显式标记是 Swift 6 strict-concurrency 时的契约锁定,callsite 行为不变。
 @available(iOS 17.0, *)
+@MainActor
 @Observable
 final class HomeInputViewModel {
     // MARK: 文本 / 情绪
@@ -36,12 +41,28 @@ final class HomeInputViewModel {
     var isSending: Bool = false
     var sendButtonState: SendButtonState = .idle
 
-    /// AI 回来的最终 mood,发送完成动画展开 2s 期间用
+    /// AI 回来的最终 mood,发送完成动画展开期间用(用户在窗口内拖动会改写这个值)。
     var revealedMood: Double?
     /// 历史遗留标记,保留给未来 UI(搜了一圈当前没有读点,但和原 `@State` 一起搬过来保证平移)。
     var showMoodReveal: Bool = false
     /// 光谱条的显示状态:idle / analyzing / revealed。原先在 HomeView 里。
     var spectrumDisplayState: SpectrumDisplayState = .idle
+
+    // MARK: AI 揭晓后的心情可编辑窗口
+    //
+    // 老实现:`Task.sleep(2_000_000_000)` 一刀切,用户来不及拖。新实现走交互驱动:
+    //   - 没碰过:2.5s 后落库
+    //   - 拖动中:不落库
+    //   - 松手:立刻落库(松手即 commit,scrubber 语义)
+    //   - 硬上限 12s 防压住不放
+    // 两个信号在 `MoodSpectrumBar.onMoodChanged / onInteractionEnded` 里写入,
+    // `HomeView+Send` 的 `waitForMoodEditWindowToClose` 轮询消费。具体参数 token
+    // 见 `HomeView+Send.waitForMoodEditWindowToClose` 的 let 块,这里只描述行为。
+
+    /// 用户每次 onChanged(包括 tap-to-set)bump 这个值。0 = 从未交互过。
+    var moodEditTouchTick: Int = 0
+    /// 用户最近一次手指离开光谱条的时刻。nil = 从未交互过 OR 仍在按住。
+    var moodEditReleasedAt: Date? = nil
 
     // MARK: 占位语 / 起手语
     /// 稳定的占位语——只在明确时刻更新（进入页面 / 发送完成 / AI 池刷新完成），

@@ -20,6 +20,9 @@ struct ThemeAliasManagementView: View {
     @State private var groupPendingUnmerge: String?
     @State private var showResetNegativeAlert = false
     @State private var deleteFailureMessage: String?
+    /// (2026-05-19 P1-10 audit)"全部忽略"确认 — 之前一点直接 clearAllPending 写负对,
+    /// 用户经常误以为是"暂时跳过",其实是永久否决。加确认。
+    @State private var showClearAllPendingConfirm: Bool = false
 
     /// 引文 entry 的预取缓存。@State 在 view-local 生命周期内保留,避开了
     /// "每次 render 都同步 fetchSamples → 主线程 jank"(codex P2 fix)。
@@ -85,11 +88,14 @@ struct ThemeAliasManagementView: View {
                             format: NSLocalizedString("删除「%@」失败,可能是磁盘空间不足或同步冲突。请稍后重试。", comment: "Delete theme failed"),
                             canonical
                         )
+                    } else {
+                        InsightsResultCache.shared.clear()
+                        showThemeDeletedToast(name: canonical, undoPayload: outcome.undoPayload)
                     }
                 }
             }
         } message: {
-            Text(NSLocalizedString("将从所有日记里抹掉这个主题(包括它的所有别名)。原日记内容不变。此操作不可撤销。", comment: "Delete theme message"))
+            Text(NSLocalizedString("将从所有日记里抹掉这个主题(包括它的所有别名)。原日记内容不变。删除后可短暂撤销。", comment: "Delete theme message"))
         }
         // P1-Theme-5 拆开 group 加确认 — 跟"删除"等 destructive 操作对齐,防误触。
         .confirmationDialog(
@@ -125,6 +131,30 @@ struct ThemeAliasManagementView: View {
             }
         } message: {
             Text(deleteFailureMessage ?? "")
+        }
+        // (D-06 superreview 2026-05-19)"全部忽略"确认 — `resolver.clearAllPending()` 实际只
+        // 软清空 pending 数组,**不写 negativePair**,下次 AI 扫描这些对子会重新出现。原文案
+        // "标为不是"承诺永久否决,跟代码行为相反 → 改成"忽略 / 下次会重现"的诚实文案。
+        // 如果未来产品决定真做永久否决,要么改 clearAllPending 调 reject 循环,要么再加一个
+        // "全部标为不是"按钮真写 negativePair,跟"忽略"区分开。
+        .confirmationDialog(
+            String(
+                format: NSLocalizedString("忽略全部 %d 条待审建议?", comment: "Confirm ignore all pending"),
+                resolver.pending.count
+            ),
+            isPresented: $showClearAllPendingConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(NSLocalizedString("全部忽略", comment: "Confirm ignore all"), role: .destructive) {
+                #if canImport(UIKit)
+                HapticManager.shared.notification(.warning)
+                #endif
+                resolver.clearAllPending()
+            }
+            Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }
+        } message: {
+            Text(NSLocalizedString("它们会在下次 AI 扫描时重新出现。",
+                                   comment: "Confirm ignore all body"))
         }
         .alert(
             NSLocalizedString("清空所有否决记录?", comment: "Reset rejections alert"),
@@ -285,8 +315,10 @@ struct ThemeAliasManagementView: View {
                     if resolver.pending.count >= 3 {
                         // P1-Theme-1 显式 "全部忽略" 文字按钮 — 替原 ellipsis.circle Menu(触发区小、
                         // 字号 caption 灰色,用户找不到批量操作)。.glass small button 跟周围 row 节奏一致。
+                        // (2026-05-19 P1-10 audit)加确认 — 一次性写一堆负对,用户后悔会发现无法
+                        // 通过"重新扫描"恢复(下次 AI 不会再提议这些对),只能去"清空否决记录"。
                         Button(role: .destructive) {
-                            resolver.clearAllPending()
+                            showClearAllPendingConfirm = true
                         } label: {
                             Text(NSLocalizedString("全部忽略", comment: "Dismiss all pending alias suggestions"))
                                 .font(.caption.weight(.semibold))
@@ -352,7 +384,10 @@ struct ThemeAliasManagementView: View {
                         customEditorTarget = suggestion
                     }
                     chip(
-                        title: NSLocalizedString("忽略", comment: "Reject (ignore) merge"),
+                        // (2026-05-19 P1-10 audit)文案改 "不是" — "忽略" 让人以为是临时跳过,
+                        // 实际是永久否决(写 negativePair,下次 AI 也不会再提议同对)。"不是" 更
+                        // 贴近 "不,这不是同一个主题"的语义,跟 negative pair 行为对齐。
+                        title: NSLocalizedString("不是", comment: "Reject (not same theme)"),
                         style: .ghost
                     ) { reject(suggestion) }
                 }
@@ -475,7 +510,7 @@ struct ThemeAliasManagementView: View {
             }
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .liquidGlassCard(cornerRadius: 14, interactive: false)
+            .liquidGlassCard(cornerRadius: LumoryCornerRadius.nestedRow, interactive: false)
         }
     }
 
@@ -549,6 +584,43 @@ struct ThemeAliasManagementView: View {
         LumoryToastCenter.shared.show(
             String(format: NSLocalizedString("已合并到「%@」", comment: "Toast after merging theme alias"), canonical),
             severity: .success
+        )
+    }
+
+    private func showThemeDeletedToast(
+        name: String,
+        undoPayload: ThemeManagementService.ThemeDeletionUndoPayload?
+    ) {
+        let message = String(format: NSLocalizedString("已删除主题「%@」", comment: "Delete toast"), name)
+        guard let undoPayload else {
+            LumoryToastCenter.shared.show(message, severity: .success)
+            return
+        }
+        LumoryToastCenter.shared.show(
+            message,
+            severity: .success,
+            duration: EntryDeletionUndoService.undoWindow,
+            action: LumoryToastCenter.Action(
+                label: NSLocalizedString("撤销", comment: "Undo delete action")
+            ) {
+                Task { @MainActor in
+                    let outcome = await ThemeManagementService.shared.restoreDeletedTheme(undoPayload)
+                    if outcome.succeeded {
+                        #if canImport(UIKit)
+                        HapticManager.shared.notification(.success)
+                        #endif
+                        InsightsResultCache.shared.clear()
+                    } else {
+                        #if canImport(UIKit)
+                        HapticManager.shared.notification(.error)
+                        #endif
+                        LumoryToastCenter.shared.show(
+                            NSLocalizedString("撤销失败,请稍后再试。", comment: "Undo theme delete failed"),
+                            severity: .warning
+                        )
+                    }
+                }
+            }
         )
     }
 

@@ -89,9 +89,11 @@ final class EmbeddingBackfillService: ObservableObject {
 
     @MainActor
     func cancel() {
+        // (2026-05-19 superreview P1)cancel() **不能**清 runningRunID,否则 publish 内的
+        // `guard runningRunID == runID` 会把 run(runID:) 走完 cancel 后的最后一次
+        // `publish(...isRunning: false...)` 吞掉,造成 progress.isRunning 永远 true,UI 锁死直到
+        // App 重启。只 cancel task — runningTask 句柄等 task.value 自然 nil 化 in backfillAll。
         runningTask?.cancel()
-        runningTask = nil
-        runningRunID = nil
     }
 
     // MARK: Core loop

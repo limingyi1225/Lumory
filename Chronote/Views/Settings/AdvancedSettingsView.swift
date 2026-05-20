@@ -20,6 +20,9 @@ struct AdvancedSettingsView: View {
 
     @State private var showDatabaseRecoveryAlert = false
     @State private var isRecoveringDatabase = false
+    /// (2026-05-19 P1-09 audit)数据库修复失败时弹这条 alert。原先只 Log.error,用户看不到任何
+    /// 反馈,以为按钮没响应或者修复完了。失败 = 严重,必须把"为什么失败 + 下一步"明确告知。
+    @State private var databaseRecoveryFailureMessage: String?
 
     // 立即同步:从主 Settings 搬来,跟"同步诊断"语义连贯,放在"诊断与修复"段顶部 ——
     // 用户察觉同步异常时通常先点这个("再同步一次试试"),再升级到诊断 / 修复。
@@ -52,11 +55,34 @@ struct AdvancedSettingsView: View {
         .lumoryAdaptiveModal(isPresented: $showDiagnosticSheet) {
             SyncDiagnosticView(result: diagnosticResult)
         }
+        // (E-06 superreview 2026-05-19) 旧文案"会从 iCloud 恢复"承诺得太满。`DatabaseRecoveryService`
+        // 走的是"重建本地 store + 等 CloudKit 重新下载",**离线 / 同步未完成时本地写过的日记会丢**。
+        // destructive operation 必须明示这条 data-loss 风险。按钮 label 也改成"重建并恢复"让动作意图
+        // 跟实现一致。
         .alert(NSLocalizedString("数据库修复", comment: "Database repair alert title"), isPresented: $showDatabaseRecoveryAlert) {
             Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) { }
-            Button(NSLocalizedString("修复", comment: "Repair"), role: .destructive) { performDatabaseRecovery() }
+            Button(NSLocalizedString("重建并从 iCloud 恢复", comment: "Database repair confirm button"),
+                   role: .destructive) { performDatabaseRecovery() }
         } message: {
-            Text(NSLocalizedString("如果你遇到了数据库错误，此操作将尝试修复。数据会从 iCloud 恢复。", comment: "Database repair alert body"))
+            Text(NSLocalizedString(
+                "如果你遇到了数据库错误,此操作将重建本地数据库并从 iCloud 重新下载所有日记。\n\n⚠️ 任何尚未同步到 iCloud 的本地修改会丢失。建议先在「立即同步」确认状态正常后再操作。",
+                comment: "Database repair alert body with unsynced-loss disclosure"
+            ))
+        }
+        // (2026-05-19 P1-09 audit)修复失败 alert — DatabaseRecoveryService 返 .failure 时弹出来,
+        // 把错误描述 + 下一步告诉用户,而不是 silent Log.error 让用户摸不到头脑。
+        .alert(
+            NSLocalizedString("数据库修复失败", comment: "Database recovery failed alert title"),
+            isPresented: Binding(
+                get: { databaseRecoveryFailureMessage != nil },
+                set: { if !$0 { databaseRecoveryFailureMessage = nil } }
+            )
+        ) {
+            Button(NSLocalizedString("好", comment: "OK"), role: .cancel) {
+                databaseRecoveryFailureMessage = nil
+            }
+        } message: {
+            Text(databaseRecoveryFailureMessage ?? "")
         }
     }
 
@@ -285,9 +311,24 @@ struct AdvancedSettingsView: View {
                 self.isRecoveringDatabase = false
                 switch result {
                 case .success:
+                    #if canImport(UIKit)
+                    HapticManager.shared.notification(.success)
+                    #endif
                     self.isSettingsOpen = false   // 修复成功关整个 settings，让 App 重载
                 case .failure(let error):
+                    // (2026-05-19 P1-09 audit)失败必须告知用户。文案合"为什么 + 下一步":
+                    // 重启 App 通常能让 PersistenceController 重新走启动检测路径自愈;不行再联系开发者。
                     Log.error("[AdvancedSettings] Database recovery failed: \(error)", category: .ui)
+                    #if canImport(UIKit)
+                    HapticManager.shared.notification(.error)
+                    #endif
+                    self.databaseRecoveryFailureMessage = String(
+                        format: NSLocalizedString(
+                            "数据库修复未能完成。错误:%@\n\n请退出 App 重新打开。如果问题持续,可在『关于 → 联系开发者』反馈。",
+                            comment: "Database recovery failed body with error"
+                        ),
+                        error.localizedDescription
+                    )
                 }
             }
         }
@@ -330,9 +371,15 @@ struct AdvancedSettingsView: View {
                 }
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
-            // 超时:不强报错,用户可以再试一次
+            // (E-05 superreview 2026-05-19) 6s 超时分支不再静默 —— 旧实现 spinner 消失之后没有任何
+            // 反馈,跟"已同步"成功路径肉眼无法区分,用户不知道按了"立即同步"到底成没成。
+            // 改成显式 syncMessage,让"超时 / 后台仍在跑"这件事被看见。
             if isSyncing {
                 isSyncing = false
+                syncMessage = NSLocalizedString(
+                    "同步未在 6 秒内完成,可能还在后台进行,请稍后再试。",
+                    comment: "Sync now 6s timeout message"
+                )
             }
             // 3 秒后清掉提示
             try? await Task.sleep(nanoseconds: 3_000_000_000)

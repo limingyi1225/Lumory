@@ -20,10 +20,13 @@
 //
 
 import SwiftUI
+#if !os(macOS)
+import AVFoundation
+#endif
 
 extension HomeView {
 
-    /// Mic 按钮 tap:isRecording → 走 stop 路径(转写跟进);否则启录,真起录才发 success haptic。
+    /// Mic 按钮 tap:isRecording → 走 stop 路径(转写跟进);否则启录,真起录才发 start haptic。
     /// 权限未定时 startRecording 触发授权 alert 后 return false,这种"假启动"不该 haptic 暗示已开始。
     func handleMicTap() {
         if recorder.isRecording {
@@ -42,7 +45,29 @@ extension HomeView {
             if didStart {
                 #if canImport(UIKit)
                 HapticManager.shared.impact(.light)
-                HapticManager.shared.notification(.success)
+                #endif
+            } else {
+                // (2026-05-19 superreview P1)startRecording 返 false 三种 case:
+                // (1) .undetermined → 系统弹 alert 等用户选(无需 toast,alert 已是反馈);
+                // (2) .denied → 用户拒过 / Settings 里关了 — UI 必须出口,否则点 mic 无反应;
+                // (3) audio session config 失败 — 罕见,通用错误反馈。
+                // 只对 .denied 弹 toast,带跳转 Settings action;.undetermined / 配置失败静默(系统 alert / 罕见)。
+                #if canImport(UIKit) && !os(macOS)
+                if AVAudioApplication.shared.recordPermission == .denied {
+                    HapticManager.shared.notification(.warning)
+                    LumoryToastCenter.shared.show(
+                        NSLocalizedString("麦克风权限已关闭,无法录音", comment: "Mic permission denied toast"),
+                        severity: .warning,
+                        action: LumoryToastCenter.Action(
+                            label: NSLocalizedString("设置", comment: "Open Settings"),
+                            perform: {
+                                if let url = URL(string: UIApplication.openSettingsURLString) {
+                                    UIApplication.shared.open(url)
+                                }
+                            }
+                        )
+                    )
+                }
                 #endif
             }
         }
@@ -52,7 +77,17 @@ extension HomeView {
     func handleStopRecording() async {
         Log.info("[HomeView handleStopRecording START] Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
         guard let fileName = recorder.stopRecording() else {
-            Log.info("[HomeView handleStopRecording: stopRecording returned nil] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+            // (2026-05-19 P1-02 audit + superreview P2)nil = AudioRecorder 删了 < 0.5s 的文件。
+            // severity=.warning 而非 .info — 用户按 stop 期待录音被保存,得到相反结果是"操作失败"
+            // 反馈,要让用户体感到"出问题了"。haptic .warning 跟 severity 对齐。
+            Log.info("[HomeView handleStopRecording: stopRecording returned nil — too short] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+            #if canImport(UIKit)
+            HapticManager.shared.notification(.warning)
+            #endif
+            LumoryToastCenter.shared.show(
+                NSLocalizedString("录音太短,未保存", comment: "Recording shorter than 0.5s discarded"),
+                severity: .warning
+            )
             return
         }
         #if canImport(UIKit)

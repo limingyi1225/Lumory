@@ -29,6 +29,7 @@ struct ThemeMergeIntoSheet: View {
     let onComplete: (ThemeMergeSheetOutcome) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var searchText: String = ""
     // P1-Ins-16 改全局 toast 后,650ms 庆祝 overlay 整段被删 — 三个相关 @State(confirmingTarget /
     // confirmationTitle / confirmationSucceeded)以及配套 confirmingOverlay 方法 + 6 处条件 modifier
@@ -90,9 +91,19 @@ struct ThemeMergeIntoSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(NSLocalizedString("取消", comment: "Cancel")) { dismiss() }
+                // iPad / regular size class 走 fullScreenCover 没下拉手势,留小关闭按钮兜底
+                // (候选为空时尤其会卡死 —— emptyState 没有任何 dismiss 入口)。
+                // 跟 AskPastView / PointDetailSheet 同 pattern,只在 regular 显;iPhone 靠下拉关闭。
+                if hSizeClass == .regular {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.secondary)
+                        }
                         .disabled(isConfirming)
+                        .accessibilityLabel(NSLocalizedString("关闭", comment: "Close"))
+                    }
                 }
             }
             .alert(

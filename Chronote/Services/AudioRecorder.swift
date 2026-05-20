@@ -4,7 +4,26 @@ import SwiftUI
 
 @MainActor
 final class AudioRecorder: NSObject, ObservableObject {
+    nonisolated static let maximumDuration: TimeInterval = 10 * 60
+
+    struct CompletedRecording: Equatable {
+        let fileName: String
+        let duration: TimeInterval
+    }
+
     @Published var isRecording = false
+    /// (A-05 / G-03 superreview 2026-05-19, 防御性硬化)
+    ///
+    /// `handleMeterUpdate` 每 50ms fire 一次,内部走"if elapsed >= 600 && isRecording → stopRecording"。
+    /// 静态分析下当前实现安全(`startRecording()` 同步覆写 `startTime = Date()` + `isRecording = true`
+    /// 在同一帧;新一轮录音 elapsed ≈ 0,guard 不会重新触发),**但**:
+    /// - level-trigger guard 比 edge-trigger 容易在未来 refactor 上回归(只要 someone 把 startTime
+    ///   不复位 / isRecording 复位顺序改了,就立刻 stale-fire 新录音)。
+    /// - 多个 tick 已 enqueue 到 main actor 时,本帧停录之后下一帧的 stale tick 仍会跑;edge-trigger
+    ///   让"本轮已自动停止过"明确不再重复触发。
+    /// 边沿信号:仅在 `startRecording()` 入口重置为 false,自动停止触发后置 true,在 tick guard 里
+    /// 一并 check。
+    private var didFireMaxDurationStop: Bool = false
     // 高频电平/时长不走 @Published：录音时 20Hz 广播会让整个 HomeView 跟着重绘，
     // 视觉上反而卡。录音状态条用自己的轻量刷新循环读取这两个值。
     private(set) var amplitude: Float = 0 // 0.0 ~ 1.0 之间，代表当前音量大小
@@ -12,6 +31,7 @@ final class AudioRecorder: NSObject, ObservableObject {
     /// HomeView observe 这个 @Published,把文件名接进 audioRecordings 让用户看到录到的段落,
     /// 避免中断把已录的内容默默丢掉。HomeView 消费后置 nil。
     @Published var interruptedRecordingFileName: String?
+    @Published var maxDurationRecording: CompletedRecording?
     /// 标记当前是否在等待权限授权回调。**用 token 防 stale grant 误启**:用户点 mic → 弹 alert
     /// → 在用户做选择之前 navigate 走 / 切 view → 老 grant 回调到 .granted 时,startRecording
     /// 已经不该跑了。token 不一致就 abort。
@@ -63,6 +83,15 @@ final class AudioRecorder: NSObject, ObservableObject {
         // 部署目标 iOS 26.0,直接用 iOS 17+ AVAudioApplication API。
         switch AVAudioApplication.shared.recordPermission {
         case .undetermined:
+            // (2026-05-19 superreview P1-2)Screenshot 自动化模式:跳过权限弹窗,否则
+            // iOS 系统 alert 会盖到 Home 上把首屏截烂。原先 ChronoteApp.requestPermissions
+            // 启动时跳的 guard 已删,要在这里补 — startRecording 是新的唯一权限请求入口。
+            #if DEBUG
+            if UITestSampleData.isActive {
+                Log.info("[AudioRecorder] startRecording: skipping permission prompt in screenshot mode", category: .audio)
+                return false
+            }
+            #endif
             pendingPermissionToken &+= 1
             let myToken = pendingPermissionToken
             AVAudioApplication.requestRecordPermission { granted in
@@ -130,6 +159,7 @@ final class AudioRecorder: NSObject, ObservableObject {
                 return false
             }
             startTime = Date()
+            didFireMaxDurationStop = false   // A-05 / G-03 edge-trigger reset 必须跟 startTime 一组
             duration = 0
 
             // 启动计时器，定期更新音量数据（使用闭包避免内存泄漏）。
@@ -276,6 +306,12 @@ final class AudioRecorder: NSObject, ObservableObject {
         }
         amplitude = level
         duration = elapsed
+        if elapsed >= Self.maximumDuration, isRecording, !didFireMaxDurationStop {
+            didFireMaxDurationStop = true   // edge-trigger,防止 stale tick 在新一轮录音 re-fire
+            if let fileName = stopRecording() {
+                maxDurationRecording = CompletedRecording(fileName: fileName, duration: duration)
+            }
+        }
     }
 
     deinit {

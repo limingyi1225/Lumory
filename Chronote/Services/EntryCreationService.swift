@@ -33,7 +33,7 @@ enum EntryCreationService {
 
     enum Result {
         case saved(UUID)
-        case failed
+        case failed(Error?)
     }
 
     /// 落库 + 派生副作用。AI writeback 是 fire-and-forget(单测要 await 走 `performAIWriteback`)。
@@ -42,6 +42,7 @@ enum EntryCreationService {
         in persistence: PersistenceController,
         viewContext: NSManagedObjectContext,
         ai: AIServiceProtocol,
+        saveAction: @MainActor @Sendable (NSManagedObjectContext) throws -> Void = { try $0.save() },
         aliasJudge: @MainActor @Sendable @escaping (UUID, [String]) async -> Void = { id, tags in
             await ThemeAliasJudgeService.shared.judgeAfterWrite(entryID: id, newTags: tags)
         },
@@ -81,10 +82,19 @@ enum EntryCreationService {
         }
 
         do {
-            try viewContext.save()
+            try saveAction(viewContext)
             Log.info("[EntryCreationService] 日记已保存,标题稍后生成", category: .ui)
         } catch {
             Log.error("[EntryCreationService] 保存日记失败: \(error)", category: .ui)
+            // (codex 终审 2026-05-19, P1) 显式 rollback `newEntry`。`save()` 抛错后这个对象还在
+            // context 里 pending —— 如果 caller(或下游 fire-and-forget AI writeback)在下一次
+            // unrelated `viewContext.save()` 之前不主动清,**这条失败 entry 会被悄悄持久化**,
+            // 而下方 deleteImage / deleteAudio 又把它指向的附件删了 → entry 指向已不存在的
+            // 文件 → 用户看到一条没法 render 的 ghost entry。`viewContext.delete()` 对 unsaved
+            // insert 等同于从 context 移除,`processPendingChanges()` 让 Core Data 立刻把它从
+            // insertedObjects 里摘掉,不会触发额外 save。
+            viewContext.delete(newEntry)
+            viewContext.processPendingChanges()
             // 已落盘的 image / audio 文件孤儿清理 — entry save 失败时这些附件已经被 persist*OffMain
             // 写到 Documents/LumoryImages / iCloud LumoryAudio,无人引用就是 storage leak。
             // `deleteAudioFromDocuments` 走三层 fallback(iCloud → 本地 LumoryAudio → legacy 扁平),
@@ -95,7 +105,7 @@ enum EntryCreationService {
             if let audioName, !audioName.isEmpty {
                 DiaryEntry.deleteAudioFromDocuments(audioName)
             }
-            return .failed
+            return .failed(error)
         }
 
         // 智能 reminder reschedule:任何成功 save(含纯录音 / 纯图片 entry)都可能 fulfill
@@ -160,6 +170,24 @@ enum EntryCreationService {
         }
 
         return .saved(entryID)
+    }
+
+    static func updateMood(
+        entryID: UUID,
+        moodValue: Double,
+        viewContext: NSManagedObjectContext
+    ) {
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+        request.fetchLimit = 1
+        do {
+            guard let entry = try viewContext.fetch(request).first else { return }
+            guard entry.moodValue != moodValue else { return }
+            entry.moodValue = moodValue
+            try viewContext.save()
+        } catch {
+            Log.error("[EntryCreationService] mood 更新失败: \(error)", category: .ui)
+        }
     }
 
     /// 把 `addEntry` 末尾的 AI writeback Task 拆成可 await 的方法。返回 `didCommitThemes`:
@@ -290,6 +318,11 @@ extension EntryCreationService.Result {
     var didSave: Bool {
         if case .saved = self { return true }
         return false
+    }
+
+    var failureError: Error? {
+        if case .failed(let error) = self { return error }
+        return nil
     }
 }
 

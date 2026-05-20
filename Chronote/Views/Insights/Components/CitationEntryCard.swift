@@ -95,7 +95,7 @@ struct CitationEntryCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         // 与项目里其他列表卡(ThemeMergeIntoSheet / SuggestionTargetPickerSheet / ThemeAliasManagement
         // pendingCard)统一 liquidGlass + 14pt 圆角,不再用 flat fill 显得 AI 引用比真日记 row "次级"。
-        .liquidGlassCard(cornerRadius: 14, interactive: true)
+        .liquidGlassCard(cornerRadius: LumoryCornerRadius.nestedRow, interactive: true)
     }
 
     private func dateLabel(_ date: Date) -> String {
@@ -113,14 +113,14 @@ private struct MissingCitationCard: View {
                 .foregroundColor(.secondary)
         }
         .padding(8)
-        .liquidGlassCard(cornerRadius: 14, interactive: false)
+        .liquidGlassCard(cornerRadius: LumoryCornerRadius.nestedRow, interactive: false)
     }
 }
 
 private struct CitationSkeletonCard: View {
     var body: some View {
         // skeleton 也走 liquidGlass(无 tint)—— 加载完成后切换到带内容的同尺寸卡,过渡更自然。
-        RoundedRectangle(cornerRadius: 14, style: .continuous)
+        RoundedRectangle(cornerRadius: LumoryCornerRadius.nestedRow, style: .continuous)
             .fill(Color.secondary.opacity(0.06))
             .frame(height: 46)
     }

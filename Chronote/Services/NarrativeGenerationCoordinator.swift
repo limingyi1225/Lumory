@@ -121,6 +121,20 @@ final class NarrativeGenerationCoordinator {
         precomputing.remove(range)
     }
 
+    /// §2.1 (2026-05-19) — 用户主动 stop 按钮入口。只 cancel 当前 range 的 user-initiated
+    /// 生成(不动其他 range / 不动 precomputing,跟 cancelAll 区分语义)。Card 的 stop button
+    /// 调这条,await task.value 让 runStream 体内 `Task.checkCancellation` / `URLSession` cancel
+    /// 抛出后清干净再返回 —— 防止 user 按完 stop 立刻又 startGeneration 时 race。幂等。
+    func cancel(_ range: TimeRange) async {
+        guard let task = tasks[range] else { return }
+        streamGeneration[range, default: 0] &+= 1
+        task.cancel()
+        tasks[range] = nil
+        generating.remove(range)
+        streamFailure[range] = nil
+        await task.value
+    }
+
     /// 清 AI 回顾缓存 / 删日记入口调:cancel + bump 所有在飞生成,**await 它们完整退出**后
     /// 返回 —— 跟 `NarrativePrecomputeService.cancelPendingAndBumpGeneration` 同语义,确保
     /// 调用方接着删 record 时没有在飞 task 会在删后写回。幂等(无在飞 task 直接返回)。

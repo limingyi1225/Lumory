@@ -123,7 +123,16 @@ extension OpenAIService {
     /// 情绪 / 心情 / 感受这类元描述是另一条线单独捕获的（见 analyzeMood），
     /// 不应混进来——否则所有 entry 都会被贴"情绪"，导致聚合时出现一大堆同名噪音。
     func extractThemes(text: String) async -> [String] {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        switch await extractThemesOutcome(text: text) {
+        case .success(let themes):
+            return themes
+        case .failed:
+            return []
+        }
+    }
+
+    func extractThemesOutcome(text: String) async -> ThemeExtractionOutcome {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .success([]) }
         let diaryEscaped = text.replacingOccurrences(of: "\"", with: "\\\"")
         let isZh = text.containsChinese
         let prompt: String
@@ -184,13 +193,13 @@ extension OpenAIService {
               let data = raw.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let arr = json["themes"] as? [String] else {
-            return []
+            return .failed
         }
         let cleaned = arr
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .filter { !Self.bannedThemes.contains($0.lowercased()) }
-        return Array(cleaned.prefix(4))
+        return .success(Array(cleaned.prefix(4)))
     }
 
     /// 后处理兜底：即使 prompt 已经明说不要，模型偶尔仍会回吐元描述词。

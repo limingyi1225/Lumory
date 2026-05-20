@@ -77,9 +77,11 @@ final class ThemeBackfillService: ObservableObject {
 
     @MainActor
     func cancel() {
+        // (2026-05-19 superreview P1)cancel() **不能**清 runningRunID,否则 publish 内的
+        // `guard runningRunID == runID` 会把 execute() 走完 cancel 后的最后一次
+        // `publish(...isRunning: false...)` 吞掉,造成 progress.isRunning 永远 true,UI 锁死直到
+        // App 重启。只 cancel task — runningTask 句柄等 task.value 自然 nil 化 in run(mode:)。
         runningTask?.cancel()
-        runningTask = nil
-        runningRunID = nil
     }
 
     // MARK: Core loop
@@ -215,10 +217,20 @@ final class ThemeBackfillService: ObservableObject {
         }
         guard let text else { return false }
 
-        let themes = await ai.extractThemes(text: text)
-        // 空数组是合法结果（纯抒情文字），视为成功写入。
+        let outcome = await ai.extractThemesOutcome(text: text)
+        guard !Task.isCancelled else { return false }
+        let themes: [String]
+        switch outcome {
+        case .success(let extracted):
+            themes = extracted
+            // 空数组是合法结果（纯抒情文字），视为成功写入。
+        case .failed:
+            Log.warning("[ThemeBackfill] 主题抽取失败，跳过写回以保留现有 themes", category: .migration)
+            return false
+        }
 
         return await persistence.container.performBackgroundTask { context in
+            guard !Task.isCancelled else { return false }
             guard let entry = try? context.existingObject(with: objectID) as? DiaryEntry else { return false }
             // Stale guard：如果 entry.text 已变，当前 themes 结果是基于旧文本，丢弃
             if (entry.text ?? "") != text {

@@ -90,6 +90,7 @@ struct HomeView: View {
     }
 
     @AppStorage("appLanguage", store: AppGroup.userDefaults) var appLanguage: String = HomeView.defaultAppLanguage
+    @AppStorage("home.showOnThisDay", store: AppGroup.userDefaults) var showOnThisDay: Bool = true
 
     // MARK: - View-level 路由 / 搜索 / 生命周期 state
     // 这些**留在 HomeView**:和 NavigationStack / sheet / .searchable 生命周期耦合,
@@ -206,6 +207,15 @@ struct HomeView: View {
                     processStoppedRecording(fileName: fileName, duration: recorder.duration)
                     recorder.interruptedRecordingFileName = nil
                 }
+            }
+            .onChange(of: recorder.maxDurationRecording) { _, completed in
+                guard let completed else { return }
+                processStoppedRecording(fileName: completed.fileName, duration: completed.duration)
+                recorder.maxDurationRecording = nil
+                LumoryToastCenter.shared.show(
+                    NSLocalizedString("录音已到 10 分钟上限,已自动停止。", comment: "Recording auto-stopped after max duration"),
+                    severity: .info
+                )
             }
             .onReceive(NotificationCenter.default.publisher(for: .databaseRecreated)) { _ in
                 Log.info("[HomeView] Database recreated notification received", category: .ui)
@@ -385,24 +395,9 @@ struct HomeView: View {
                 moodSliderSection
                     .id(topAnchorID)
 
-                let highlights = cachedOnThisDayHighlights
-                if !highlights.isEmpty {
-                    OnThisDaySection(
-                        highlights: highlights,
-                        appLanguage: appLanguage,
-                        onTap: { entry in
-                            shouldStartEditing = false
-                            selectedEntry = entry
-                        }
-                    )
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 14, trailing: 0))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                }
-
-                // 输入框和录音功能容器。视觉/交互拆到 `HomeComposerCard`(`Components/`),
-                // parent 这里负责 wire callbacks(send / 录音生命周期 / 草稿 debounce / 图片压缩任务)
-                // 把 composer 拉回到 List row 上下文 — listRow* 修饰器留外侧,内部不感知 list 结构。
+                // (2026-05-19 P1-03 audit)Composer 紧贴 mood slider 下方,主写作动作 = 首屏
+                // 第一个 affordance。OnThisDay 是被动回忆触发器,挪到 composer 之后、日记
+                // 时间线之前作"历史区域第一项",写日记主路径不被打断。
                 HomeComposerCard(
                     inputVM: inputVM,
                     recordingVM: recordingVM,
@@ -428,6 +423,21 @@ struct HomeView: View {
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
 
+                let highlights = cachedOnThisDayHighlights
+                if showOnThisDay, !highlights.isEmpty {
+                    OnThisDaySection(
+                        highlights: highlights,
+                        appLanguage: appLanguage,
+                        onTap: { entry in
+                            shouldStartEditing = false
+                            selectedEntry = entry
+                        }
+                    )
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 14, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+
                 // 日记条目内容 Sections
                 diaryContentSections
             }
@@ -435,9 +445,6 @@ struct HomeView: View {
             // iOS 26 顶部边缘软渐隐 — 内容滚到顶下时贴玻璃感更自然,不再硬切到 navigation chrome。
             .scrollEdgeEffectStyle(.soft, for: .top)
             .scrollDismissesKeyboard(.interactively)
-            .refreshable {
-                await triggerManualSync()
-            }
             .onChange(of: scenePhase) { _, newPhase in
                 // 进 background 时 cancel debounce + 同步 flush 草稿。
                 // 否则用户输入完立刻锁屏 / 切走,iOS 5s background grace 内 task 可能没跑完,丢草稿。
@@ -458,10 +465,7 @@ struct HomeView: View {
                 withAnimation(.smooth(duration: 0.35)) {
                     proxy.scrollTo(topAnchorID, anchor: .top)
                 }
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(260))
-                    isInputFocused = true
-                }
+                isInputFocused = true
             }
             // 跟踪滚动 offset:超过 480pt 才弹 FAB,小幅滚动不打扰。
             .onScrollGeometryChange(for: CGFloat.self) { geo in
@@ -504,10 +508,24 @@ struct HomeView: View {
 
     @ViewBuilder
     private var moodSliderSection: some View {
+        // mood reveal 窗口期(`.moodRevealing`)光谱条可拖。watchdog 在 HomeView+Send
+        // 里跑:从未碰 → 2.5s 落库;松手 → 立即落库(~100ms poll)。没有显式"完成"按钮 ——
+        // 用户松手就是 commit 信号。(A-07 superreview:此处旧注释写的 4s/1.5s 是过时的常量值。)
+        let isMoodEditable = inputVM.sendButtonState == .moodRevealing
         VStack(alignment: .center, spacing: 4) {
             MoodSpectrumBar(
                 moodValue: inputVM.revealedMood ?? inputVM.moodValue,
-                displayState: inputVM.spectrumDisplayState
+                displayState: inputVM.spectrumDisplayState,
+                onMoodChanged: isMoodEditable ? { value in
+                    inputVM.revealedMood = value
+                    inputVM.moodValue = value
+                    // 任何 onChanged 都 bump tick + 清掉旧的 releasedAt(用户重新按住了)。
+                    inputVM.moodEditTouchTick &+= 1
+                    inputVM.moodEditReleasedAt = nil
+                } : nil,
+                onInteractionEnded: isMoodEditable ? {
+                    inputVM.moodEditReleasedAt = Date()
+                } : nil
             )
             .frame(maxWidth: .infinity)
             .frame(height: 32)

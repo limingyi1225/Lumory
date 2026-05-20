@@ -363,7 +363,7 @@ final class InsightsEngine {
     // MARK: - 5. Ask Your Past (RAG)
 
     /// **实现迁到 [InsightsSearchEngine](InsightsSearchEngine.swift),本方法是 facade forwarder**。
-    func ask(_ question: String, topK: Int = 8) -> AsyncStream<AnswerChunk> {
+    func ask(_ question: String, topK: Int = 11) -> AsyncStream<AnswerChunk> {
         searchEngine.ask(question, topK: topK)
     }
 

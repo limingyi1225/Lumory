@@ -8,13 +8,14 @@ import CoreData
 struct ThemeFilteredEntriesView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var hSizeClass
     let theme: InsightsEngine.Theme
     /// 父视图传入的全部 themes(用来给 merge sheet 列候选,排除自己)
     let allThemes: [InsightsEngine.Theme]
     /// 父视图回调,处理合并成功后的 toast / reload。
     let onMerged: ((_ message: String) -> Void)?
     /// 父视图回调,处理删除主题后的 toast / 关 sheet。
-    let onDeleted: ((_ name: String) -> Void)?
+    let onDeleted: ((_ name: String, _ undoPayload: ThemeManagementService.ThemeDeletionUndoPayload?) -> Void)?
     /// 父视图回调,处理 sheet 内单删 entry 后的聚合刷新。
     let onEntryDeleted: (() -> Void)?
 
@@ -105,31 +106,43 @@ struct ThemeFilteredEntriesView: View {
             .navigationTitle(theme.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(NSLocalizedString("关闭", comment: "Close")) { dismiss() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button {
-                            mergeSubject = theme
-                        } label: {
-                            Label(
-                                NSLocalizedString("合并到其他主题…", comment: "Merge into another theme"),
-                                systemImage: "arrow.triangle.merge"
-                            )
+                // iPad / regular size class 走 fullScreenCover 没下拉手势,留小关闭按钮兜底。
+                // 跟 AskPastView / PointDetailSheet 同 pattern,只在 regular 显;iPhone (compact) 靠下拉关闭。
+                if hSizeClass == .regular {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.secondary)
                         }
-                        Button(role: .destructive) {
-                            showDeleteAlert = true
-                        } label: {
-                            Label(
-                                NSLocalizedString("删除主题", comment: "Delete theme"),
-                                systemImage: "trash"
-                            )
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
+                        .accessibilityLabel(NSLocalizedString("关闭", comment: "Close"))
                     }
-                    .accessibilityLabel(NSLocalizedString("更多操作", comment: "More actions"))
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        #if canImport(UIKit)
+                        HapticManager.shared.impact(.light)
+                        #endif
+                        mergeSubject = theme
+                    } label: {
+                        Image(systemName: "arrow.triangle.merge")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(NSLocalizedString("合并到其他主题…", comment: "Merge into another theme"))
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        #if canImport(UIKit)
+                        HapticManager.shared.impact(.light)
+                        #endif
+                        showDeleteAlert = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(NSLocalizedString("删除主题", comment: "Delete theme"))
                 }
             }
             .task { await fetch() }
@@ -178,7 +191,7 @@ struct ThemeFilteredEntriesView: View {
                     Task { await performDelete() }
                 }
             } message: {
-                Text(NSLocalizedString("将从所有日记里抹掉这个主题(包括它的所有别名)。原日记内容不变。此操作不可撤销。", comment: "Delete theme message"))
+                Text(NSLocalizedString("将从所有日记里抹掉这个主题(包括它的所有别名)。原日记内容不变。删除后可短暂撤销。", comment: "Delete theme message"))
             }
             .alert(
                 NSLocalizedString("删除失败", comment: "Delete failed"),
@@ -202,7 +215,7 @@ struct ThemeFilteredEntriesView: View {
             dismiss()
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(160))
-                onDeleted?(theme.name)
+                onDeleted?(theme.name, outcome.undoPayload)
             }
         } else {
             deleteFailureMessage = String(

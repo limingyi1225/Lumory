@@ -322,6 +322,10 @@ struct ReminderServiceImperativeTests {
     @Test func requestReschedule_currentCycleAlreadyWritten_skipsTodayAndSchedulesFallbacks() async {
         let center = MockReminderNotificationCenter()
         center.authorizationStatusToReturn = .authorized
+        center.deliveredIDs = [
+            "lumory.reminder.today.old",
+            "some.other.app.notification"
+        ]
         let now = makeDate(year: 2026, month: 4, day: 7, hour: 10)
         let anchor = makeDate(year: 2026, month: 4, day: 1)
         let wroteToday = makeDate(year: 2026, month: 4, day: 7, hour: 9)
@@ -341,6 +345,11 @@ struct ReminderServiceImperativeTests {
 
         #expect(center.addedRequests.count == 8, "fulfilled current cycle should not schedule today's reminder")
         #expect(!center.addedRequests.contains { $0.identifier.contains("lumory.reminder.today") })
+        let removedDelivered = center.removedDeliveredIDs.flatMap { $0 }
+        #expect(removedDelivered.contains("lumory.reminder.today.old"),
+                "本周期已写时应清掉已经送达的旧 reminder,避免通知中心继续催用户")
+        #expect(!removedDelivered.contains("some.other.app.notification"),
+                "非 Lumory reminder delivered 通知不能被误清")
     }
 
     @Test func requestReschedule_staleGenerationRemovesOldPendingRequests() async {

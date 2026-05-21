@@ -13,6 +13,17 @@ enum LumoryAttachmentPaths {
         }
     }
 
+    enum PathError: LocalizedError {
+        case unsafeFileName(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unsafeFileName:
+                return "Unsafe attachment file name"
+            }
+        }
+    }
+
     private static let iCloudContainerIdentifier = "iCloud.com.Mingyi.Lumory"
 
     static var documentsDirectory: URL {
@@ -38,7 +49,33 @@ enum LumoryAttachmentPaths {
         directory.appendingPathComponent(fileName)
     }
 
+    static func normalizedFileName(_ fileName: String?) -> String? {
+        guard let fileName else { return nil }
+        return try? validateFileName(fileName)
+    }
+
+    static func validateFileName(_ fileName: String) throws -> String {
+        let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw PathError.unsafeFileName(fileName)
+        }
+        guard trimmed != "." && trimmed != ".." else {
+            throw PathError.unsafeFileName(fileName)
+        }
+        guard !trimmed.unicodeScalars.contains(where: { $0.value == 0 }) else {
+            throw PathError.unsafeFileName(fileName)
+        }
+        guard trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\")) == nil else {
+            throw PathError.unsafeFileName(fileName)
+        }
+        guard (trimmed as NSString).lastPathComponent == trimmed else {
+            throw PathError.unsafeFileName(fileName)
+        }
+        return trimmed
+    }
+
     static func candidateURLs(fileName: String, kind: Kind, iCloudDirectoryOverride: URL? = nil) -> [URL] {
+        guard let fileName = normalizedFileName(fileName) else { return [] }
         var urls: [URL] = []
         if let iCloudDirectory = iCloudDirectoryOverride ?? iCloudDirectory(for: kind) {
             urls.append(url(fileName: fileName, in: iCloudDirectory))
@@ -73,6 +110,7 @@ enum LumoryAttachmentPaths {
 
     @discardableResult
     static func deleteAllCopies(fileName: String, kind: Kind) throws -> Int {
+        let fileName = try validateFileName(fileName)
         let fm = FileManager.default
         var firstError: Error?
         var removedCount = 0

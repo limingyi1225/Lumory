@@ -140,7 +140,7 @@ extension DiaryDetailView {
             // 短路会让 widget streak 不更新。改 mood 也类似(若改的是非最新 entry 的 mood,fingerprint 也不变,
             // 但实际 widget 头像色不受影响 — 只 latest mood 决定;留个保险)。invalidate 让下次 refresh
             // 强制 full path 重抓。NSManagedObjectContextDidSave observer 会 schedule 下一次 refresh。
-            if dateChanged || moodChanged {
+            if textChanged || dateChanged || moodChanged || summaryChanged {
                 Task { await WidgetSnapshotService.shared.invalidateCaches() }
             }
 
@@ -186,12 +186,13 @@ extension DiaryDetailView {
             if narrativeInputChanged {
                 // Narrative 输入包含日期 / 心情 / 摘要 / 正文。任一项变化都要让旧回顾退出
                 // 浓缩卡 cache,否则会继续显示旧日期、旧心情或旧摘要语义。
-                // (2026-05-15 superreview-3 P1)`invalidateNarrativeCacheOnEntryChange()`
-                // 名义只管 narrative,**编辑路径**的 InsightsResultCache 失效在这里 sync 调,
+                // (2026-05-15 superreview-3 P1)Narrative marker/cancel 只管 narrative,
+                // **编辑路径**的 InsightsResultCache 失效在这里 sync 调,
                 // 跟删除路径(performSingleDeleteCleanup)对齐。否则 SWR hit 在编辑后
                 // 300-600ms 内显示编辑前 themes/dailyCells/entryCount(megareview P1-7 fix)。
                 InsightsResultCache.shared.clear()
-                Task { await EntryWipeOrchestrator.invalidateNarrativeCacheOnEntryChange() }
+                EntryWipeOrchestrator.markNarrativeChangedNow()
+                Task { await EntryWipeOrchestrator.finishNarrativeInvalidationAfterEntryChange() }
             }
         } catch {
             Log.error("[DiaryDetailView] 保存更改失败: \(error)", category: .ui)
@@ -285,6 +286,7 @@ extension DiaryDetailView {
                 return (true, entry.id, committedThemes)
             } catch {
                 Log.error("[DiaryDetailView] refreshAIIndex save 失败: \(error)", category: .ai)
+                context.refresh(entry, mergeChanges: false)
                 return (false, entry.id, [])
             }
         }

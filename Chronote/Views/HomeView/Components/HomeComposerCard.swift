@@ -284,6 +284,7 @@ struct HomeComposerCard: View {
                                     if let idx = photoVM.selectedImageItems.firstIndex(where: { $0.id == item.id }) {
                                         photoVM.selectedImageItems.remove(at: idx)
                                         if idx < photoVM.selectedPhotos.count {
+                                            photoVM.suppressNextPhotoSelectionReload = true
                                             photoVM.selectedPhotos.remove(at: idx)
                                         }
                                     }
@@ -467,6 +468,7 @@ struct HomeComposerCard: View {
             || !recordingVM.audioRecordings.isEmpty
             || !photoVM.selectedImageItems.isEmpty)
             && !recordingVM.isTranscribing
+            && !photoVM.isProcessingSelection
             && !inputVM.isSending
     }
 }

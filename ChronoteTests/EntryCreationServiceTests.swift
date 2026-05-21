@@ -37,6 +37,26 @@ final class AliasJudgeSpy {
     }
 }
 
+private struct ThemeFailingAIService: AIServiceProtocol {
+    private let base = MockAIService()
+
+    func summarize(text: String) async -> String? { await base.summarize(text: text) }
+    func analyzeMood(text: String) async -> Double { await base.analyzeMood(text: text) }
+    func extractThemes(text: String) async -> [String] { [] }
+    func extractThemesOutcome(text: String) async -> ThemeExtractionOutcome { .failed }
+    func embed(text: String) async -> [Float]? { await base.embed(text: text) }
+    func judgeThemeAliases(newTags: [String], inventory: [ThemeAliasJudgeCandidate]) async -> [ThemeAliasJudgeMatch] { [] }
+    func scanThemeAliasGroups(candidates: [ThemeAliasJudgeCandidate]) async throws -> [ThemeAliasJudgeGroup] { [] }
+    func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        AsyncStream { $0.finish() }
+    }
+    func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        AsyncStream { $0.finish() }
+    }
+    func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? { nil }
+    func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] { [] }
+}
+
 // MARK: - Tests
 
 @MainActor
@@ -117,9 +137,8 @@ struct EntryCreationServiceTests {
         try #require(entries.count == 1)
         let entry = entries[0]
 
-        // audio:本地文件不存在,iCloud 移动没发生,但 service 仍把 fileName 落到 entry 上(给 audioURL 三层
-        // fallback 后续解析)。这是原 addEntry 同样的行为。
-        #expect(entry.audioFileName == audioFileName)
+        // audio:本地文件不存在时不应把 fileName 落库,否则日记会指向一个永远无法播放的音频。
+        #expect(entry.audioFileName == nil)
 
         // images:imageFileNames 应有 2 个 CSV 项(`img_<entryID>_0.jpg`, `_1.jpg`),imagesData
         // NSKeyedArchiver blob 非空。
@@ -170,7 +189,7 @@ struct EntryCreationServiceTests {
         let audioURL = LumoryAttachmentPaths.legacyURL(fileName: audioName)
         try Data(repeating: 0xA1, count: 16).write(to: audioURL)
         defer {
-            try? fm.removeItem(at: audioURL)
+            try? LumoryAttachmentPaths.deleteAllCopies(fileName: audioName, kind: .audio)
             if let files = try? fm.contentsOfDirectory(atPath: imageDir.path) {
                 for file in files where !imageFilesBefore.contains(file) {
                     try? fm.removeItem(at: imageDir.appendingPathComponent(file))
@@ -192,7 +211,10 @@ struct EntryCreationServiceTests {
             Issue.record("expected .failed, got \(result)")
             return
         }
-        #expect(!fm.fileExists(atPath: audioURL.path), "save 失败后 audio 文件应被清理,避免孤儿附件")
+        #expect(
+            LumoryAttachmentPaths.existingAudioURL(fileName: audioName) != nil,
+            "save 失败后 audio 要保留给 HomeView 回滚恢复,不能删掉用户刚录好的内容"
+        )
         let imageFilesAfter = Set((try? fm.contentsOfDirectory(atPath: imageDir.path)) ?? [])
         #expect(imageFilesAfter == imageFilesBefore, "save 失败后新写入的 image 文件应被清理")
     }
@@ -403,5 +425,35 @@ struct EntryCreationServiceTests {
         // `performAIWriteback` 又调一次)。**最少**一次的契约是:fresh + non-empty themes 必须触发。
         #expect(!spy.calls.isEmpty, "fresh 路径 + non-empty themes 必须触发 aliasJudge")
         #expect(spy.calls.allSatisfy { $0.0 == entryID })
+    }
+
+    @Test func performAIWriteback_themeFailurePreservesExistingThemes() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let ai = ThemeFailingAIService()
+        let spy = AliasJudgeSpy()
+
+        let entry = DiaryEntry(context: context)
+        let entryID = UUID()
+        entry.id = entryID
+        entry.date = Date()
+        entry.text = "今天工作很多,但主题抽取会失败"
+        entry.moodValue = 0.5
+        entry.setThemes(["旧主题"])
+        try context.save()
+
+        let didCommit = await EntryCreationService.performAIWriteback(
+            entryID: entryID,
+            textSnapshot: entry.wrappedText,
+            in: context,
+            ai: ai,
+            aliasJudge: { id, tags in spy.record(id: id, tags: tags) }
+        )
+
+        #expect(didCommit == true, "summary / embedding 成功时仍应写回,不能因 theme 失败整条放弃")
+        #expect(entry.themeArray == ["旧主题"], "theme 抽取失败时必须保留旧 themes,不能清空")
+        #expect(entry.summary != nil)
+        #expect(entry.embeddingVector != nil)
+        #expect(spy.calls.isEmpty, "theme 未实际写入时不应触发 aliasJudge")
     }
 }

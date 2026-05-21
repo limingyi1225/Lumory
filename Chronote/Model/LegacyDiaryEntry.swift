@@ -27,7 +27,19 @@ struct LegacyDiaryEntry: Decodable, Identifiable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        date = try container.decode(Date.self, forKey: .date)
+        if let decodedDate = try? container.decode(Date.self, forKey: .date) {
+            date = decodedDate
+        } else {
+            let rawDate = try container.decode(String.self, forKey: .date)
+            guard let decodedDate = ISO8601DateFormatter().date(from: rawDate) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .date,
+                    in: container,
+                    debugDescription: "Unsupported legacy date format"
+                )
+            }
+            date = decodedDate
+        }
         text = try container.decode(String.self, forKey: .text)
         summary = try container.decodeIfPresent(String.self, forKey: .summary)
         audioFileName = try container.decodeIfPresent(String.self, forKey: .audioFileName)

@@ -81,9 +81,19 @@ extension HomeView {
     // MARK: - 照片压缩
 
     func loadPhotosWithCompression(_ items: [PhotosPickerItem]) async {
-        // 新一轮 pick 开始就清掉旧的失败 banner,不让用户再选时还看到"上次失败 3 张"。
-        // 真正的 failed count 在末尾根据本轮结果重新写入。
+        photoVM.photoSelectionGeneration &+= 1
+        let generation = photoVM.photoSelectionGeneration
+        photoVM.isProcessingSelection = true
         photoVM.compressionFailureCount = 0
+        photoVM.selectedImageItems.removeAll()
+
+        guard !items.isEmpty else {
+            photoVM.isProcessingSelection = false
+            return
+        }
+
+        // 新一轮 pick 开始就清掉旧缩略图/失败 banner,不让旧照片在压缩期间还能被发送。
+        // 真正的 failed count 在末尾根据本轮结果重新写入。
         // 关键改动 1:每个 item 走 Task.detached 跳到后台 actor —— 之前 addTask 继承父
         // MainActor,compressImage 里的 UIImage 解码 + JPEG 重编码全卡在主线程上,选 9 张图
         // 直接掉帧到底。detached 之后 UI 不再被压死,选完照片到出现缩略图之间也没有阻塞。
@@ -128,9 +138,10 @@ extension HomeView {
         // **失败提示** —— 9 张选 7 张成功 → 之前 silently drop 2 张,用户以为都加了。把失败数推进 VM
         // 让 banner 显示;0 时不显示。
         let failedCount = items.count - successful.count
-        photoVM.compressionFailureCount = failedCount
 
         await MainActor.run {
+            guard photoVM.photoSelectionGeneration == generation else { return }
+            photoVM.compressionFailureCount = failedCount
             photoVM.selectedImageItems = imageItems
             // F2:把 selectedPhotos 也剪枝到只剩压缩成功的 items,保证两边长度严格对齐。
             // 等值检查避免触发自身的 .onChange 死循环 —— PhotosPickerItem 是 Equatable。
@@ -138,6 +149,7 @@ extension HomeView {
                 photoVM.suppressNextPhotoSelectionReload = true
                 photoVM.selectedPhotos = prunedItems
             }
+            photoVM.isProcessingSelection = false
             Log.info("[HomeView] Total compressed images: \(photoVM.selectedImageItems.count)", category: .ui)
         }
     }

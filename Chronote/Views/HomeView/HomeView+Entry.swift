@@ -88,8 +88,16 @@ extension HomeView {
         inputVM.inputText = ""
         recordingVM.currentAudioFileName = nil
         recordingVM.audioRecordings.removeAll()
+        photoVM.photoLoadTask?.cancel()
+        photoVM.photoLoadTask = nil
+        photoVM.photoSelectionGeneration &+= 1
+        photoVM.isProcessingSelection = false
         photoVM.selectedImageItems.removeAll()
-        photoVM.selectedPhotos.removeAll()
+        if !photoVM.selectedPhotos.isEmpty {
+            photoVM.suppressNextPhotoSelectionReload = true
+            photoVM.selectedPhotos.removeAll()
+        }
+        photoVM.compressionFailureCount = 0
         inputVM.moodValue = 0.5
 
         // Cancel any ongoing tasks

@@ -121,6 +121,9 @@ final class AudioRecorder: NSObject, ObservableObject {
             return false
         }
         #endif
+        #if !os(macOS)
+        var didActivateAudioSession = false
+        #endif
         do {
             #if !os(macOS)
             let audioSession = AVAudioSession.sharedInstance()
@@ -130,6 +133,7 @@ final class AudioRecorder: NSObject, ObservableObject {
                 options: [.defaultToSpeaker, .allowBluetoothHFP, .mixWithOthers]
             )
             try audioSession.setActive(true)
+            didActivateAudioSession = true
             Log.info("[AudioRecorder] Audio session configured successfully", category: .audio)
             #endif
 
@@ -188,14 +192,22 @@ final class AudioRecorder: NSObject, ObservableObject {
             return true
         } catch {
             Log.error("[AudioRecorder] Could not start recording: \(error)", category: .audio)
+            #if !os(macOS)
+            if didActivateAudioSession {
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
+            #endif
             return false
         }
     }
 
     func stopRecording() -> String? {
-        // 先截取出 recorder 引用，让锁的作用域尽量短——后续 File I/O / Log 都不用持锁。
+        // 单次消费 recorder,让连续 stop / 中断回调 / max-duration tick 只能拿到一次有效结果。
         recorderLock.lock()
         let captured: AVAudioRecorder? = self.recorder
+        self.recorder = nil
+        let capturedStartTime = self.startTime
+        self.startTime = nil
         recorderLock.unlock()
 
         guard let recorder = captured else { return nil }
@@ -208,7 +220,7 @@ final class AudioRecorder: NSObject, ObservableObject {
         recorder.stop()
 
         var recordedDuration: TimeInterval = 0
-        if let start = startTime {
+        if let start = capturedStartTime {
             recordedDuration = Date().timeIntervalSince(start)
             duration = recordedDuration
         }

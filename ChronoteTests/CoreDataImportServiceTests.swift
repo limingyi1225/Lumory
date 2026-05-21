@@ -59,6 +59,26 @@ private final class ImportTestDouble: AIServiceProtocol, @unchecked Sendable {
     }
 }
 
+private struct ImportThemeFailureAI: AIServiceProtocol {
+    let parseResult: [ParsedDiaryEntry]
+
+    func summarize(text: String) async -> String? { String(text.prefix(50)) }
+    func analyzeMood(text: String) async -> Double { 0.5 }
+    func extractThemes(text: String) async -> [String] { [] }
+    func extractThemesOutcome(text: String) async -> ThemeExtractionOutcome { .failed }
+    func embed(text: String) async -> [Float]? { Array(repeating: 0.1, count: 16) }
+    func judgeThemeAliases(newTags: [String], inventory: [ThemeAliasJudgeCandidate]) async -> [ThemeAliasJudgeMatch] { [] }
+    func scanThemeAliasGroups(candidates: [ThemeAliasJudgeCandidate]) async throws -> [ThemeAliasJudgeGroup] { [] }
+    func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        AsyncStream { $0.finish() }
+    }
+    func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        AsyncStream { $0.finish() }
+    }
+    func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? { nil }
+    func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] { parseResult }
+}
+
 @MainActor
 final class CoreDataImportServiceTests: XCTestCase {
 
@@ -134,6 +154,27 @@ final class CoreDataImportServiceTests: XCTestCase {
         let entries = try ctx.fetch(request)
         XCTAssertEqual(entries.count, 3, "3 unique entries must land in CoreData")
         XCTAssertEqual(Set(entries.map { $0.text ?? "" }), ["first day", "second day", "third day"])
+    }
+
+    func testImportEntries_themeExtractionFailureStillImportsWithoutThemes() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        let day = makeDate(year: 2025, month: 1, day: 4)
+        let ai = ImportThemeFailureAI(parseResult: [
+            ParsedDiaryEntry(date: day, text: "theme service fails but entry should import")
+        ])
+        let service = CoreDataImportService(aiService: ai)
+
+        let result = try await service.importEntries(from: "raw", context: ctx)
+
+        XCTAssertEqual(result.succeeded, 1)
+        XCTAssertEqual(result.failed, 0)
+        XCTAssertEqual(result.skipped, 0)
+        let entries = try ctx.fetch(NSFetchRequest<DiaryEntry>(entityName: "DiaryEntry"))
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertNil(entries[0].themes, "theme 抽取失败时导入应成功,但不能写入空结果覆盖成假主题状态")
+        XCTAssertNotNil(entries[0].summary)
+        XCTAssertNotNil(entries[0].embedding)
     }
 
     // MARK: - Fingerprint dedup

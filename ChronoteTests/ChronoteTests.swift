@@ -344,12 +344,12 @@ struct RankRetrievalTests {
         #expect(InsightsEngine.rankRetrieval(all: entries, queryVector: [1, 0], topK: 0).isEmpty)
     }
 
-    @Test func noQueryVector_fallsBackToRecency() {
+    @Test func noQueryVector_returnsEmpty() {
         let e1 = makeEntry(date: makeDate(year: 2024, month: 6, day: 1), embedding: [1, 0])
         let e2 = makeEntry(date: makeDate(year: 2024, month: 6, day: 10), embedding: [0, 1])
         let e3 = makeEntry(date: makeDate(year: 2024, month: 6, day: 20), embedding: nil)
         let result = InsightsEngine.rankRetrieval(all: [e1, e2, e3], queryVector: nil, topK: 3)
-        #expect(result.map(\.id) == [e3.id, e2.id, e1.id])
+        #expect(result.isEmpty, "query 向量生成失败时不能回退到最近日记,否则 Ask Past 会产生假引用")
     }
 
     @Test func allNonEmbedded_fallsBackToRecency() {
@@ -451,6 +451,26 @@ struct RankRetrievalTests {
         let result = InsightsEngine.rankRetrieval(all: [e3, e1, e2, ne], queryVector: [1, 0], topK: 4)
         // 期望：[e1, e2, e3, ne]（前 3 个按 cosine 降序，最后填最近的非索引）
         #expect(result.map(\.id) == [e1.id, e2.id, e3.id, ne.id])
+    }
+
+    @Test func dimensionMismatch_returnsEmpty() {
+        let e1 = makeEntry(date: makeDate(year: 2024, month: 6, day: 1), embedding: [1, 0, 0])
+        let e2 = makeEntry(date: makeDate(year: 2024, month: 6, day: 2), embedding: [0, 1, 0])
+        let result = InsightsEngine.rankRetrieval(all: [e1, e2], queryVector: [1, 0], topK: 2)
+        #expect(result.isEmpty, "embedding 维度不匹配时不能把 0 分结果当成相关日记")
+    }
+
+    @Test func dimensionMismatchWithUnindexed_fallsBackToRecency() {
+        let mismatched = makeEntry(date: makeDate(year: 2024, month: 6, day: 1), embedding: [1, 0, 0])
+        let freshUnindexed = makeEntry(date: makeDate(year: 2024, month: 6, day: 3), embedding: nil)
+        let olderUnindexed = makeEntry(date: makeDate(year: 2024, month: 6, day: 2), embedding: nil)
+        let result = InsightsEngine.rankRetrieval(
+            all: [mismatched, olderUnindexed, freshUnindexed],
+            queryVector: [1, 0],
+            topK: 3
+        )
+
+        #expect(result.map(\.id) == [freshUnindexed.id, olderUnindexed.id, mismatched.id])
     }
 }
 
@@ -3734,6 +3754,111 @@ struct DataMigrationServiceTests {
             return (try? context.count(for: req)) ?? -1
         }
         #expect(fetchCount == 2, "race window 触发的重跑不能让 CoreData 翻倍 ghost entry")
+    }
+
+    @Test func migration_lossyDecode_skipsMalformedRowsAndAcceptsISODate() async throws {
+        let defaults = isolatedDefaults()
+        let jsonURL = tempJSONURL()
+        let context = makeBgContext()
+        let numericID = UUID()
+        let isoID = UUID()
+        let numericDate = Date(timeIntervalSinceReferenceDate: 123_456)
+        let isoDate = ISO8601DateFormatter().date(from: "2025-06-01T12:34:56Z")!
+        let rows: [[String: Any]] = [
+            [
+                "id": numericID.uuidString,
+                "date": numericDate.timeIntervalSinceReferenceDate,
+                "text": "numeric legacy date",
+                "moodValue": 0.4
+            ],
+            [
+                "id": isoID.uuidString,
+                "date": ISO8601DateFormatter().string(from: isoDate),
+                "text": "iso legacy date",
+                "moodValue": 0.8,
+                "audioFileName": "../unsafe.m4a"
+            ],
+            [
+                "id": UUID().uuidString,
+                "date": "not-a-date",
+                "text": "bad row",
+                "moodValue": 0.5
+            ]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: rows)
+        try data.write(to: jsonURL)
+        defer {
+            try? FileManager.default.removeItem(at: jsonURL)
+            try? FileManager.default.removeItem(at: jsonURL.appendingPathExtension("backup"))
+        }
+
+        let outcome = DataMigrationService.performMigration(
+            defaults: defaults,
+            standardDefaults: nil,
+            jsonURL: jsonURL,
+            context: context
+        )
+
+        #expect(outcome.inserted == 2, "单行坏数据不应拖垮整批迁移")
+        #expect(outcome.skipped == 1)
+        #expect(outcome.didMark == true)
+        #expect(outcome.saveError == nil)
+
+        let entries: [(id: UUID?, text: String, date: Date?, audioFileName: String?)] = await context.perform {
+            let req: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+            req.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.text, ascending: true)]
+            return ((try? context.fetch(req)) ?? []).map {
+                ($0.id, $0.wrappedText, $0.date, $0.audioFileName)
+            }
+        }
+        #expect(entries.count == 2)
+        #expect(entries.contains { $0.id == numericID && $0.text == "numeric legacy date" })
+        let isoEntry = entries.first { $0.id == isoID }
+        #expect(isoEntry?.text == "iso legacy date")
+        #expect(isoEntry?.date == isoDate)
+        #expect(isoEntry?.audioFileName == nil, "不安全 legacy audioFileName 不能被迁移落库")
+    }
+
+    @Test func migration_allMalformedRows_keepsOriginalFileAndDoesNotMarkMigrated() throws {
+        let defaults = isolatedDefaults()
+        let jsonURL = tempJSONURL()
+        let context = makeBgContext()
+        let rows: [[String: Any]] = [
+            [
+                "id": UUID().uuidString,
+                "date": "not-a-date",
+                "text": "bad row one",
+                "moodValue": 0.5
+            ],
+            [
+                "id": UUID().uuidString,
+                "date": "also-not-a-date",
+                "text": "bad row two",
+                "moodValue": 0.4
+            ]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: rows)
+        try data.write(to: jsonURL)
+        defer {
+            try? FileManager.default.removeItem(at: jsonURL)
+            try? FileManager.default.removeItem(at: jsonURL.appendingPathExtension("backup"))
+        }
+
+        let outcome = DataMigrationService.performMigration(
+            defaults: defaults,
+            standardDefaults: nil,
+            jsonURL: jsonURL,
+            context: context
+        )
+
+        #expect(outcome.inserted == 0)
+        #expect(outcome.skipped == 2)
+        #expect(outcome.didMark == false, "所有行都坏时不能标记迁移完成,否则用户老数据永远不会重试")
+        #expect(outcome.didMoveBackup == false, "所有行都坏时必须保留原 JSON,不能移走成 backup")
+        #expect(outcome.saveError != nil)
+        #expect(defaults.bool(forKey: DataMigrationService.migrationKey) == false)
+        #expect(FileManager.default.fileExists(atPath: jsonURL.path))
+        #expect(!FileManager.default.fileExists(atPath: jsonURL.appendingPathExtension("backup").path))
     }
 
     @Test func migration_alreadyMarked_isNoop() throws {

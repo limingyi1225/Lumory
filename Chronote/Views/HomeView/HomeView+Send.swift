@@ -40,6 +40,10 @@ extension HomeView {
             Log.info("[HomeView SendButton] 已有发送在跑，忽略重复 tap", category: .ui)
             return
         }
+        guard !photoVM.isProcessingSelection else {
+            Log.info("[HomeView SendButton] 照片仍在处理中，忽略发送", category: .ui)
+            return
+        }
         // **必须**同步置位。以前 `isSending = true` 写在下面 `Task { MainActor.run { ... } }`
         // 里，两次极速 tap 之间的 SwiftUI dispatch 窗口（第一次 Task 尚未跑进 MainActor.run）
         // 内，第二次 tap 照样能过上面的 guard —— 两条日记双发落库。
@@ -70,6 +74,11 @@ extension HomeView {
                 recordingVM.transcriptionTask?.cancel()
                 recordingVM.transcriptionTask = nil
                 recordingVM.isTranscribing = false
+                photoVM.photoLoadTask?.cancel()
+                photoVM.photoLoadTask = nil
+                photoVM.photoSelectionGeneration &+= 1
+                photoVM.isProcessingSelection = false
+                photoVM.compressionFailureCount = 0
                 withAnimation(AnimationConfig.standardResponse) {
                     inputVM.sendButtonState = .sending
                     // isSending 已在 Task 外同步置 true，这里不重复写。
@@ -80,7 +89,10 @@ extension HomeView {
                     recordingVM.currentAudioFileName = nil
                     recordingVM.audioRecordings.removeAll()
                     photoVM.selectedImageItems.removeAll()
-                    photoVM.selectedPhotos.removeAll()
+                    if !photoVM.selectedPhotos.isEmpty {
+                        photoVM.suppressNextPhotoSelectionReload = true
+                        photoVM.selectedPhotos.removeAll()
+                    }
                 }
                 hideKeyboard()
                 // 发送完成：换一条占位语给用户新的灵感
@@ -206,7 +218,13 @@ extension HomeView {
                             [Recording(id: $0, fileName: $0, duration: audioDurationToRestore)]
                         } ?? []
                         photoVM.selectedImageItems = imagesToSend.map { HomePhotoViewModel.SelectedImage(data: $0) }
-                        photoVM.selectedPhotos = photosToSend
+                        photoVM.photoSelectionGeneration &+= 1
+                        photoVM.isProcessingSelection = false
+                        photoVM.compressionFailureCount = 0
+                        if photoVM.selectedPhotos != photosToSend {
+                            photoVM.suppressNextPhotoSelectionReload = true
+                            photoVM.selectedPhotos = photosToSend
+                        }
                     }
                     // (megareview P1 #5)发送失败彻底静默 → user 只看到内容神秘出现,不知何故。
                     // 加 error haptic + warning toast(Toast.Severity 只有 success/info/warning),

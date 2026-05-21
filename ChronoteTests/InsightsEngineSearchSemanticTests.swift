@@ -106,6 +106,29 @@ struct InsightsEngineSearchSemanticTests {
         #expect(result.ids.count == 5)
     }
 
+    @Test func mediaOnlyEntriesAreExcludedFromSemanticCoverage() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let now = Date()
+        let textEntry = makeEntry(in: context, text: "entry with words", date: now, withEmbedding: true)
+        let mediaOnly = DiaryEntry(context: context)
+        mediaOnly.id = UUID()
+        mediaOnly.date = now.addingTimeInterval(-3600)
+        mediaOnly.text = ""
+        mediaOnly.summary = nil
+        mediaOnly.imageFileNames = "img_media_only.jpg"
+        mediaOnly.moodValue = 0.5
+        mediaOnly.wordCount = 0
+        try context.save()
+        let engine = InsightsEngine(persistence: persistence, ai: MockAIService())
+
+        let result = await engine.searchSemantic(query: "entry", topK: 20)
+
+        #expect(result.totalCount == 1, "纯图片/纯录音 entry 不应算进语义搜索 coverage 分母")
+        #expect(result.indexCoverage == 1.0)
+        #expect(result.ids == [textEntry.objectID])
+    }
+
     @Test func partialCoverage_isReportedAccurately() async throws {
         let persistence = PersistenceController(inMemory: true)
         let context = persistence.container.viewContext

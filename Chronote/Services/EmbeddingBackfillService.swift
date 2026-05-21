@@ -185,9 +185,17 @@ final class EmbeddingBackfillService: ObservableObject {
             Log.error("[EmbeddingBackfill] embed 失败: \(objectID)", category: .migration)
             return false
         }
+        guard !Task.isCancelled else {
+            Log.info("[EmbeddingBackfill] 已取消,跳过写回 \(objectID)", category: .migration)
+            return false
+        }
 
         // 写回前对比当前文本是否还和请求 embedding 时的快照相同，防止覆盖用户新写
         return await persistence.container.performBackgroundTask { context in
+            guard !Task.isCancelled else {
+                Log.info("[EmbeddingBackfill] 已取消,跳过写回 \(objectID)", category: .migration)
+                return false
+            }
             guard let entry = try? context.existingObject(with: objectID) as? DiaryEntry else { return false }
             if (entry.text ?? "") != text {
                 Log.info("[EmbeddingBackfill] 文本已在网络调用期间变化，丢弃 stale embedding", category: .migration)

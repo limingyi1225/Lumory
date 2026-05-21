@@ -79,11 +79,18 @@ class CoreDataImportService: ObservableObject {
             // 并行发 AI 请求，避免一条日记串行等 4 轮。wordCount 本地算，免费。
             async let summaryTask = aiService.summarize(text: text)
             async let moodTask = aiService.analyzeMood(text: text)
-            async let themesTask = aiService.extractThemes(text: text)
+            async let themesTask = aiService.extractThemesOutcome(text: text)
             async let embeddingTask = aiService.embed(text: text)
 
-            let (summary, moodValue, themes, embedding) =
+            let (summary, moodValue, themeOutcome, embedding) =
                 await (summaryTask, moodTask, themesTask, embeddingTask)
+            let themes: [String]? = {
+                guard case .success(let tags) = themeOutcome else {
+                    Log.info("[CoreDataImportService] theme 抽取失败,本条导入不写 themes: \(date)", category: .migration)
+                    return nil
+                }
+                return tags
+            }()
 
             // 创建 Core Data 实体
             let preparedEntry = PreparedImportEntry(
@@ -145,7 +152,7 @@ class CoreDataImportService: ObservableObject {
         let text: String
         let summary: String?
         let moodValue: Double
-        let themes: [String]
+        let themes: [String]?
         let embedding: [Float]?
     }
 
@@ -162,7 +169,9 @@ class CoreDataImportService: ObservableObject {
         newEntry.text = entry.text
         newEntry.moodValue = entry.moodValue
         newEntry.summary = entry.summary
-        newEntry.setThemes(entry.themes)
+        if let themes = entry.themes {
+            newEntry.setThemes(themes)
+        }
         if let vector = entry.embedding {
             newEntry.setEmbedding(vector)
         }

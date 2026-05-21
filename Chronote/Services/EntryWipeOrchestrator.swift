@@ -87,30 +87,19 @@ enum EntryWipeOrchestrator {
         Task { await WidgetSnapshotService.shared.invalidateCaches() }
         // 单删一篇日记后,现有 narrative body 可能引用 ghost entry 内容。这里让旧
         // narrative 退出"浓缩卡 cache"资格 + 清 InsightsResultCache(同一处)。
-        Task { await Self.invalidateNarrativeCacheOnEntryChange() }
+        markNarrativeChangedNow()
+        Task { await Self.finishNarrativeInvalidationAfterEntryChange() }
     }
 
-    /// **entry 内容变化(单删 / 编辑文字 / 日期 / 心情 / 摘要)时**调:cancel 在飞 precompute
-    /// 防 ghost 写盘 + 标记旧 narrative 不再当浓缩卡 cache 使用。
-    ///
-    /// 单条 entry 内容变(文字改写 / mood 改 / themes 改)足以让现存 narrative 的 body
-    /// 引用过期。旧 AIConversation 仍保留在历史回顾里,但 `NarrativeCacheService.latest`
-    /// 会跳过 invalidation marker 之前的记录。
-    static func invalidateNarrativeCacheOnEntryChange() async {
-        // **P2 fix (2026-05-14 codex review)**:marker + 通知必须在 await cancel **之前**写。
-        // `cancelPendingAndBumpGeneration` 内 `await task?.value` 会等在飞的 precompute stream
-        // 退出 —— 这期间若 invalidation marker 还没写,用户编辑/删除后立刻打开 Insights,
-        // `NarrativeCacheService.latest()` 仍会命中编辑前的旧 narrative(ghost content window)。
-        // marker 是同步写 UserDefaults,提前即可关掉这个窗口;cancel + 世代号仍负责挡住在飞
-        // task 写盘(它还有 `invalidatedBefore >= streamStartTime` guard 兜底)。
-        //
-        // (2026-05-15 superreview-3 P1)**InsightsResultCache.clear() 不在这里调** —— 函数
-        // 名义是"narrative 失效"。caller 路径各自负责调 clear:
-        //   - 单删/批删路径走 `performSingleDeleteCleanup` / `performBulkWipeCleanup`(已 sync clear)
-        //   - 编辑路径走 `DiaryDetailView.saveChanges`(显式 sync clear,见该处注释)
-        // 之前在这里 clear 让单删路径双触发 InsightsView 观察者两次 reload。
+    /// Entry 内容变化后先同步写 invalidation marker + 发通知,再异步取消在飞 precompute。
+    /// 这个顺序会关掉用户编辑/删除后立刻打开 Insights 时命中旧 narrative 的窗口。
+    static func markNarrativeChangedNow() {
         NarrativeCacheService.markInvalidatedForEntryChange()
         NotificationCenter.default.post(name: .lumoryNarrativeCacheInvalidated, object: nil)
+    }
+
+    /// 搭配 `markNarrativeChangedNow()` 调用;caller 自己负责是否同步清 InsightsResultCache。
+    static func finishNarrativeInvalidationAfterEntryChange() async {
         await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
     }
 }

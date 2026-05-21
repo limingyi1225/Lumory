@@ -77,8 +77,12 @@ final class OpenAITranscriber: TranscriberProtocol {
         let prepared: PreparedUpload
         do {
             prepared = try await Task.detached(priority: .userInitiated) {
-                try Self.prepareUpload(fileURL: fileURL)
+                try Task.checkCancellation()
+                return try Self.prepareUpload(fileURL: fileURL)
             }.value
+        } catch is CancellationError {
+            Log.info("[OpenAITranscriber] 准备上传已取消", category: .ai)
+            return nil
         } catch let failure as TranscriptionFailure {
             Log.error("[OpenAITranscriber] 准备上传失败: \(failure)", category: .ai)
             lastFailure = failure
@@ -152,6 +156,7 @@ final class OpenAITranscriber: TranscriberProtocol {
     /// 抛 `TranscriptionFailure`(自定义 case)让上层 catch 直接映射到 lastFailure。
     /// `nonisolated`:从 `Task.detached` 调用,不能继承类的 MainActor 隔离。
     nonisolated private static func prepareUpload(fileURL: URL) throws -> PreparedUpload {
+        try Task.checkCancellation()
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             throw TranscriptionFailure.audioReadFailed
         }
@@ -163,6 +168,9 @@ final class OpenAITranscriber: TranscriberProtocol {
         let audioData: Data
         do {
             audioData = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+            try Task.checkCancellation()
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             Log.error("[OpenAITranscriber] 读音频文件失败: \(error)", category: .ai)
             throw TranscriptionFailure.audioReadFailed
@@ -180,6 +188,7 @@ final class OpenAITranscriber: TranscriberProtocol {
             mimeType: mimeType,
             content: audioData
         )
+        try Task.checkCancellation()
         // **故意不附 `model` 字段** — 后端 hardcode `gpt-4o-mini-transcribe`,任何 client 传的
         // model 值都会被服务端忽略(防客户端篡改改更贵模型,trust boundary 在服务端)。这里只附
         // `response_format` 让后端透传给 OpenAI;backend-server.md "转写路由 model hardcode" 段。

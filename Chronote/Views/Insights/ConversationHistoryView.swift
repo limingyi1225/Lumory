@@ -233,6 +233,7 @@ struct ConversationHistoryView: View {
             try viewContext.save()
         } catch {
             Log.error("[ConversationHistory] delete 失败: \(error)", category: .persistence)
+            viewContext.rollback()
         }
     }
 }

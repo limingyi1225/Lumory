@@ -136,6 +136,8 @@
 "stream.truncated.report" = "⚠️ Report incomplete (connection interrupted). Please regenerate.";
 "stream.truncated.answer" = "Response incomplete (connection interrupted). Please retry.";
 "error.stream.answerGeneric" = "Error answering: %@";
+"askPast.error.indexUnavailable" = "Lumory couldn't read your diary index. Try again later, or rebuild indexes in Settings.";
+"askPast.error.noContext" = "There are no usable diary excerpts to reference yet. Try again later, or rebuild indexes in Settings.";
 /* Streaming banner shown above truncated AI output so users don't treat partial content as final */
 "stream.incomplete.banner" = "Content incomplete — you can regenerate.";
 "stream.incomplete.regenerate" = "Regenerate";

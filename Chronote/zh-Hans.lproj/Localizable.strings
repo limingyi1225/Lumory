@@ -138,6 +138,8 @@
 "stream.truncated.report" = "⚠️ 报告未完整（网络中断），请重新生成。";
 "stream.truncated.answer" = "回答未完整（网络中断），请重试。";
 "error.stream.answerGeneric" = "回答时出错：%@";
+"askPast.error.indexUnavailable" = "无法读取日记索引，请稍后再试，或在设置里重建索引。";
+"askPast.error.noContext" = "暂时没有可引用的日记内容，请稍后再试，或在设置里重建索引。";
 /* 流被中断时显示在 AI 输出上方的小横幅，避免用户把半截内容当完整结果 */
 "stream.incomplete.banner" = "内容不完整，可重新生成。";
 "stream.incomplete.regenerate" = "重新生成";

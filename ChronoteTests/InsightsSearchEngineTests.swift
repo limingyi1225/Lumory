@@ -58,6 +58,72 @@ struct InsightsSearchEngineTests {
         return entry
     }
 
+    private struct NilEmbedAI: AIServiceProtocol {
+        func summarize(text: String) async -> String? { nil }
+        func analyzeMood(text: String) async -> Double { 0.5 }
+        func extractThemes(text: String) async -> [String] { [] }
+        func embed(text: String) async -> [Float]? { nil }
+        func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+            AsyncStream { continuation in
+                continuation.yield(.chunk("should not be called"))
+                continuation.finish()
+            }
+        }
+        func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+            AsyncStream { $0.finish() }
+        }
+        func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] { [] }
+        func judgeThemeAliases(newTags: [String], inventory: [ThemeAliasJudgeCandidate]) async -> [ThemeAliasJudgeMatch] { [] }
+        func scanThemeAliasGroups(candidates: [ThemeAliasJudgeCandidate]) async throws -> [ThemeAliasJudgeGroup] { [] }
+        func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? { nil }
+    }
+
+    private struct DimMismatchAskAI: AIServiceProtocol {
+        func summarize(text: String) async -> String? { nil }
+        func analyzeMood(text: String) async -> Double { 0.5 }
+        func extractThemes(text: String) async -> [String] { [] }
+        func embed(text: String) async -> [Float]? { [Float](repeating: 0.5, count: 8) }
+        func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+            AsyncStream { continuation in
+                continuation.yield(.chunk(entries.map(\.text).joined(separator: " | ")))
+                continuation.yield(.done)
+                continuation.finish()
+            }
+        }
+        func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+            AsyncStream { $0.finish() }
+        }
+        func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] { [] }
+        func judgeThemeAliases(newTags: [String], inventory: [ThemeAliasJudgeCandidate]) async -> [ThemeAliasJudgeMatch] { [] }
+        func scanThemeAliasGroups(candidates: [ThemeAliasJudgeCandidate]) async throws -> [ThemeAliasJudgeGroup] { [] }
+        func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? { nil }
+    }
+
+    private struct ContextEchoAI: AIServiceProtocol {
+        func summarize(text: String) async -> String? { nil }
+        func analyzeMood(text: String) async -> Double { 0.5 }
+        func extractThemes(text: String) async -> [String] { [] }
+        func embed(text: String) async -> [Float]? {
+            var vector = [Float](repeating: 0, count: 16)
+            vector[0] = 1
+            return vector
+        }
+        func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+            AsyncStream { continuation in
+                continuation.yield(.chunk(entries.map(\.text).joined(separator: " | ")))
+                continuation.yield(.done)
+                continuation.finish()
+            }
+        }
+        func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+            AsyncStream { $0.finish() }
+        }
+        func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] { [] }
+        func judgeThemeAliases(newTags: [String], inventory: [ThemeAliasJudgeCandidate]) async -> [ThemeAliasJudgeMatch] { [] }
+        func scanThemeAliasGroups(candidates: [ThemeAliasJudgeCandidate]) async throws -> [ThemeAliasJudgeGroup] { [] }
+        func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? { nil }
+    }
+
     // MARK: - (A) facade `ask` 拆完仍能 stream citation + text
 
     /// `InsightsEngine.ask(_:)` 经 SearchEngine facade forward 后,**整链路必须连得上**:
@@ -98,6 +164,146 @@ struct InsightsSearchEngineTests {
         #expect(sawCitation, "seed 了 entry,应至少 1 条 .citation")
         #expect(sawText, "MockAIService.askEvents 至少 yield 1 条 .text chunk")
         #expect(chunkCount >= 2, "至少 1 个 citation + 1 个 text,共 ≥ 2 chunks(实际 = \(chunkCount))")
+    }
+
+    @Test func ask_facade_limitsCitationsToPromptContext() async {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        let now = Date()
+        for i in 0..<12 {
+            makeEntry(
+                in: ctx,
+                text: "entry \(i) 公园 散步",
+                date: now.addingTimeInterval(TimeInterval(-i * 60)),
+                withEmbedding: true
+            )
+        }
+        try? ctx.save()
+
+        let engine = InsightsEngine(persistence: persistence, ai: MockAIService())
+
+        var citationCount = 0
+        var answerText = ""
+        for await chunk in engine.ask("公园", topK: 11) {
+            switch chunk.kind {
+            case .citation:
+                citationCount = chunk.citedEntryIds.count
+            case .text:
+                answerText += chunk.text
+            case .truncated, .failed:
+                Issue.record("MockAIService 正常路径不该 yield \(chunk.kind)")
+            }
+        }
+
+        #expect(citationCount == 8, "引用数量必须和实际传给模型的 context 一致,不能暴露模型没看到的日记")
+        #expect(answerText.contains("基于 8 条日记"), "Mock 回答应证明 askEvents 只收到 8 条 context,实际: \(answerText)")
+    }
+
+    @Test func ask_facade_preservesRecentUnindexedInsideContextBudget() async {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        let now = Date()
+        for i in 0..<12 {
+            makeEntry(
+                in: ctx,
+                text: "semantic indexed \(i) 公园 散步",
+                date: now.addingTimeInterval(TimeInterval(-(i + 10) * 60)),
+                withEmbedding: true
+            )
+        }
+        makeEntry(in: ctx, text: "fresh unindexed one", date: now, withEmbedding: false)
+        makeEntry(in: ctx, text: "fresh unindexed two", date: now.addingTimeInterval(-30), withEmbedding: false)
+        try? ctx.save()
+
+        let engine = InsightsEngine(persistence: persistence, ai: ContextEchoAI())
+
+        var citationCount = 0
+        var answerText = ""
+        for await chunk in engine.ask("公园", topK: 11) {
+            switch chunk.kind {
+            case .citation:
+                citationCount = chunk.citedEntryIds.count
+            case .text:
+                answerText += chunk.text
+            case .truncated, .failed:
+                Issue.record("ContextEchoAI 正常路径不该 yield \(chunk.kind)")
+            }
+        }
+
+        #expect(citationCount == 8, "Ask Past context budget 仍应限制为 8 条")
+        #expect(answerText.contains("fresh unindexed one"))
+        #expect(answerText.contains("fresh unindexed two"))
+    }
+
+    @Test func ask_facade_embedFailureYieldsFailureOnly() async {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        makeEntry(in: ctx, text: "今天去公园散步", date: Date(), withEmbedding: true)
+        try? ctx.save()
+
+        let engine = InsightsEngine(persistence: persistence, ai: NilEmbedAI())
+
+        var chunks: [InsightsEngine.AnswerChunk] = []
+        for await chunk in engine.ask("公园", topK: 3) {
+            chunks.append(chunk)
+        }
+
+        #expect(chunks.count == 1)
+        #expect(chunks.first?.kind == .failed)
+        #expect(chunks.first?.citedEntryIds.isEmpty == true)
+        #expect(chunks.first?.text.isEmpty == false)
+    }
+
+    @Test func ask_facade_dimensionMismatchYieldsFailureWithoutCitations() async {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        makeEntry(in: ctx, text: "今天去公园散步", date: Date(), withEmbedding: true)
+        try? ctx.save()
+
+        let engine = InsightsEngine(persistence: persistence, ai: DimMismatchAskAI())
+
+        var chunks: [InsightsEngine.AnswerChunk] = []
+        for await chunk in engine.ask("公园", topK: 3) {
+            chunks.append(chunk)
+        }
+
+        #expect(chunks.count == 1)
+        #expect(chunks.first?.kind == .failed)
+        #expect(chunks.first?.citedEntryIds.isEmpty == true)
+    }
+
+    @Test func ask_facade_dimensionMismatchKeepsRecentUnindexedFallback() async {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        makeEntry(
+            in: ctx,
+            text: "old mismatched indexed entry",
+            date: Date().addingTimeInterval(-3600),
+            withEmbedding: true
+        )
+        makeEntry(in: ctx, text: "fresh unindexed fallback", date: Date(), withEmbedding: false)
+        try? ctx.save()
+
+        let engine = InsightsEngine(persistence: persistence, ai: DimMismatchAskAI())
+
+        var sawCitation = false
+        var answerText = ""
+        for await chunk in engine.ask("公园", topK: 3) {
+            switch chunk.kind {
+            case .citation:
+                sawCitation = true
+                #expect(!chunk.citedEntryIds.isEmpty)
+            case .text:
+                answerText += chunk.text
+            case .truncated:
+                Issue.record("DimMismatchAskAI 正常路径不该 yield truncated")
+            case .failed:
+                Issue.record("有 recent unindexed 条目时不应直接失败")
+            }
+        }
+
+        #expect(sawCitation)
+        #expect(answerText.contains("fresh unindexed fallback"))
     }
 
     /// query 空白 → ask 立刻 finish,不应 yield 任何 chunk。验证 facade 的 trim guard 没丢。

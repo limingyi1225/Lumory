@@ -485,6 +485,7 @@ struct AskPastView: View {
             try viewContext.save()
         } catch {
             Log.error("[AskPastView] 持久化 AskPast 历史失败: \(error)", category: .persistence)
+            viewContext.rollback()
         }
     }
 

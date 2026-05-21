@@ -21,6 +21,8 @@ import Accelerate
 // 本类不加 class-level `@MainActor` —— 跟 `InsightsEngine` 一致,实例方法可在任意 actor 调用,
 // `ask()` 返 AsyncStream 不引新边界。
 final class InsightsSearchEngine {
+    private static let maxAskContextEntries = 8
+
     // MARK: Dependencies
 
     private let persistence: PersistenceController
@@ -74,6 +76,7 @@ final class InsightsSearchEngine {
             let scanRequest = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
             scanRequest.resultType = .dictionaryResultType
             scanRequest.propertiesToFetch = [objectIDExpr, "embedding", "date"]
+            scanRequest.predicate = NSPredicate(format: "text != nil AND text != %@", "")
             scanRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
 
             guard let rows = try? context.fetch(scanRequest), !rows.isEmpty else {
@@ -154,23 +157,46 @@ final class InsightsSearchEngine {
     func ask(_ question: String, topK: Int = 11) -> AsyncStream<InsightsEngine.AnswerChunk> {
         AsyncStream { continuation in
             let task = Task {
-                guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                let trimmedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedQuestion.isEmpty else {
                     continuation.finish()
                     return
                 }
 
-                let qVec = await self.ai.embed(text: question)
-                let selected = await self.retrieve(query: question, queryVector: qVec, topK: topK)
-
-                if !selected.isEmpty {
-                    continuation.yield(InsightsEngine.AnswerChunk(citations: selected.map { $0.id }))
+                guard let qVec = await self.ai.embed(text: trimmedQuestion) else {
+                    continuation.yield(InsightsEngine.AnswerChunk(
+                        failureReason: NSLocalizedString(
+                            "askPast.error.indexUnavailable",
+                            value: "无法读取日记索引，请稍后再试，或在设置里重建索引。",
+                            comment: "Ask Past cannot embed the question"
+                        )
+                    ))
+                    continuation.finish()
+                    return
                 }
+
+                let contextLimit = min(Self.maxAskContextEntries, max(0, topK))
+                let context = await self.retrieve(query: trimmedQuestion, queryVector: qVec, topK: contextLimit)
+
+                guard !context.isEmpty else {
+                    continuation.yield(InsightsEngine.AnswerChunk(
+                        failureReason: NSLocalizedString(
+                            "askPast.error.noContext",
+                            value: "暂时没有可引用的日记内容，请稍后再试，或在设置里重建索引。",
+                            comment: "Ask Past retrieved no usable diary context"
+                        )
+                    ))
+                    continuation.finish()
+                    return
+                }
+
+                continuation.yield(InsightsEngine.AnswerChunk(citations: context.map { $0.id }))
                 // 升级消费:走 askEvents,把 .truncated 单独冒泡给 UI
                 // **streamLoop: label** — 裸 `break` 只跳 switch 不跳 for-await,
                 // sibling consumer(NarrativeGenerationCoordinator / NarrativePrecomputeService)
                 // 都用同款 label。当前 producer 自然 `continuation.finish()` 所以不暴露,
                 // 但契约破洞 — MockAIService / 测试 producer 只 yield `.done` 不 close 会永久挂住。
-                streamLoop: for await event in self.ai.askEvents(question: question, context: selected) {
+                streamLoop: for await event in self.ai.askEvents(question: trimmedQuestion, context: context) {
                     if Task.isCancelled { break streamLoop }
                     switch event {
                     case .chunk(let text):
@@ -183,6 +209,7 @@ final class InsightsSearchEngine {
                         // failed 是"一点内容都没产出"(离线 / 401 / 5xx)。合并成 truncated 会让
                         // AskPastView 只显示空 bubble + 通用 banner,用户看不到具体错误。
                         continuation.yield(InsightsEngine.AnswerChunk(failureReason: error.localizedDescription))
+                        break streamLoop
                     case .done:
                         break streamLoop
                     }
@@ -203,7 +230,8 @@ final class InsightsSearchEngine {
         //  Phase B —— 物化:拿 top-K objectIDs 回填完整 DiaryEntryData。每个 objectID 通过 fault 取数,
         //             成本和原方案的 mapping 一致,但只对 K 条。
         //
-        // 无 query 向量 / 全无 embedding 走时间倒序兜底(语义见 rankRetrieval 注释),这条路径在 Phase A 内完成。
+        // 无 query 向量 → 空结果。全无可比 embedding 但存在未索引语料时,走时间倒序兜底
+        // (语义见 rankRetrieval 注释),这条路径在 Phase A 内完成。
         return await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
             // (megareview P1 #6)Phase A 改 dict-fetch 真投影 —— 同 `searchSemantic` 改法,
             // 只读 objectID + embedding-blob + date,imagesData / text / summary 完全不进 RAM。
@@ -215,15 +243,15 @@ final class InsightsSearchEngine {
             let scanRequest = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
             scanRequest.resultType = .dictionaryResultType
             scanRequest.propertiesToFetch = [objectIDExpr, "embedding", "date"]
+            scanRequest.predicate = NSPredicate(format: "text != nil AND text != %@", "")
             scanRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
 
             guard let rows = try? context.fetch(scanRequest), !rows.isEmpty else { return [] }
             guard topK > 0 else { return [] }
 
-            // 兜底路径:无 query 向量 → 直接取最近 topK,Phase B 时材料化
+            // 无 query 向量时不能回退到最近日记,否则 Ask Past 会把"无法理解问题"伪装成有依据的回答。
             guard let qVec = queryVector else {
-                let ids = rows.prefix(topK).compactMap { $0["objectID"] as? NSManagedObjectID }
-                return Self.materialize(objectIDs: Array(ids), in: context)
+                return []
             }
 
             // 收集 (objectID, score),用 bounded min-heap 维护当前 top-K(K 通常 8-20):
@@ -234,6 +262,8 @@ final class InsightsSearchEngine {
             // 同步收集"无 embedding"的 objectID + date,以便最后做"未索引语料保留槽"逻辑(对齐 rankRetrieval 行为)。
             var withoutVecIDs: [(id: NSManagedObjectID, date: Date)] = []
             withoutVecIDs.reserveCapacity(rows.count)
+            var mismatchedEmbeddingCount = 0
+            var comparableVecCount = 0
 
             for row in rows {
                 guard let oid = row["objectID"] as? NSManagedObjectID else { continue }
@@ -243,6 +273,11 @@ final class InsightsSearchEngine {
                     withoutVecIDs.append((oid, date))
                     continue
                 }
+                guard vec.count == qVec.count, !vec.isEmpty else {
+                    mismatchedEmbeddingCount += 1
+                    continue
+                }
+                comparableVecCount += 1
                 let score = Self.cosineSimilarity(qVec, vec)
                 if topHeap.count < topK {
                     // 插入并保持降序
@@ -256,6 +291,11 @@ final class InsightsSearchEngine {
                 }
             }
 
+            if topHeap.isEmpty, mismatchedEmbeddingCount > 0, withoutVecIDs.isEmpty {
+                Log.warning("[InsightsSearchEngine] retrieve: all comparable embeddings failed dimension check; returning empty", category: .ai)
+                return []
+            }
+
             // 全语料无 embedding → 走时间兜底(rows 已按 date desc)
             guard !topHeap.isEmpty else {
                 let ids = rows.prefix(topK).compactMap { $0["objectID"] as? NSManagedObjectID }
@@ -265,7 +305,7 @@ final class InsightsSearchEngine {
             // 计算"未索引保留槽":覆盖率不到 95% 或有 5 分钟内新条目时,留 max(2, topK/3) 给最近未索引。
             // 与 rankRetrieval 的策略一致,只是这里直接对 objectID 操作,不必回填 DiaryEntryData。
             let totalCount = rows.count
-            let withVecCount = totalCount - withoutVecIDs.count
+            let withVecCount = comparableVecCount
             let indexCoverage = Double(withVecCount) / Double(max(1, totalCount))
             let now = Date()
             let hasFreshUnindexed = withoutVecIDs.contains { now.timeIntervalSince($0.date) < 300 }
@@ -315,8 +355,9 @@ final class InsightsSearchEngine {
     }
 
     /// 纯函数版检索排名（方便单测）：
-    ///  - 无 query 向量 → 按时间倒序返回 topK
-    ///  - 全语料都没 embedding → 同上
+    ///  - 无 query 向量 → 空结果,不能把最近日记伪装成相关结果
+    ///  - 全语料都没 embedding → 最近日记兜底
+    ///  - 有旧维度 embedding 但没有任何可比向量:若仍有未索引语料,按最近日记兜底;否则空结果
     ///  - 有部分 embedded、部分没 embedded：**不能只看 embedded 那一半**，
     ///    否则 backfill 没跑完时 Ask Past / 语义搜索只看到索引过的语料子集，
     ///    对剩下的历史日记装聋作哑。现在预留 `topK` 的 1/3（夹在 2-5 之间）
@@ -328,21 +369,27 @@ final class InsightsSearchEngine {
     ) -> [DiaryEntryData] {
         guard topK > 0, !all.isEmpty else { return [] }
 
-        // 无 query 向量：时间倒序兜底
+        // 无 query 向量：空结果,由调用方显示索引/网络错误
         guard let qVec = queryVector else {
-            return Array(all.sorted { $0.date > $1.date }.prefix(topK))
+            return []
         }
 
         let withVectors = all.filter { $0.embedding != nil }
         let withoutVectors = all.filter { $0.embedding == nil }
 
-        // 全语料没 embedding：等于无 query 向量走兜底
+        // 全语料没 embedding：按时间倒序兜底,让尚未 backfill 的语料仍可被引用。
         guard !withVectors.isEmpty else {
             return Array(all.sorted { $0.date > $1.date }.prefix(topK))
         }
 
         // 语义排名
-        let scoredEmbedded: [DiaryEntryData] = withVectors
+        let comparableVectors = withVectors.filter { ($0.embedding?.count ?? 0) == qVec.count && !($0.embedding?.isEmpty ?? true) }
+        guard !comparableVectors.isEmpty else {
+            guard !withoutVectors.isEmpty else { return [] }
+            return Array(all.sorted { $0.date > $1.date }.prefix(topK))
+        }
+
+        let scoredEmbedded: [DiaryEntryData] = comparableVectors
             .map { ($0, Self.cosineSimilarity(qVec, $0.embedding ?? [])) }
             .sorted { $0.1 > $1.1 }
             .map { $0.0 }
@@ -351,7 +398,7 @@ final class InsightsSearchEngine {
         //   (a) 索引覆盖率不到 95% —— backfill 还没跑完,尾部未索引日记仍占相当比例
         //   (b) 5 分钟内有新写但未索引的条目 —— 用户刚写完马上问"刚才那条"的窗口
         // 其它情况(覆盖率 ≥ 95% 且无新鲜未索引)完全交给语义排名,避免把不相关的老条目塞进 context。
-        let indexCoverage = Double(withVectors.count) / Double(max(1, all.count))
+        let indexCoverage = Double(comparableVectors.count) / Double(max(1, all.count))
         let now = Date()
         let hasFreshUnindexed = withoutVectors.contains { now.timeIntervalSince($0.date) < 300 }
         let minRecencyReserve: Int

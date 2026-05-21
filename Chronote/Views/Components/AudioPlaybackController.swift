@@ -85,7 +85,13 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
                 Log.warning("[AudioPlaybackController] resume: session reactivate failed: \(error)", category: .ui)
             }
             #endif
-            player.play()
+            guard player.play() else {
+                let error = Self.playbackStartError()
+                Log.error("[AudioPlaybackController] resume play() returned false for \(fileName)", category: .ui)
+                onPlayError?(error)
+                stopPlayback(clearCurrentFile: true)
+                return
+            }
             isPlaying = true
             startDisplayLink()
             return
@@ -105,7 +111,14 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
             duration = audioPlayer?.duration ?? 0.0
             currentTime = 0.0
             progress = 0.0
-            audioPlayer?.play()
+            guard audioPlayer?.play() == true else {
+                let error = Self.playbackStartError()
+                Log.error("[AudioPlaybackController] play() returned false for \(fileName)", category: .ui)
+                onPlayError?(error)
+                currentPlayingFileName = nil
+                stopPlaybackCleanup()
+                return
+            }
             isPlaying = true
             startDisplayLink()
         } catch {
@@ -156,6 +169,16 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
         } catch {
             Log.error("[AudioPlaybackController] Could not deactivate audio session on \(reason): \(error)", category: .ui)
         }
+    }
+
+    private static func playbackStartError() -> NSError {
+        NSError(
+            domain: "Lumory.AudioPlayback",
+            code: 1,
+            userInfo: [
+                NSLocalizedDescriptionKey: "Unable to start audio playback."
+            ]
+        )
     }
 
     @objc fileprivate func updateProgress() {

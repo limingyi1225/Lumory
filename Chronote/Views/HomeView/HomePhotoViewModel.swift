@@ -30,6 +30,12 @@ final class HomePhotoViewModel {
     /// 上一次的 photo 压缩任务,选择变化时取消,防止旧任务回来覆盖新结果(F1 race fix)。
     var photoLoadTask: Task<Void, Never>?
 
+    /// 当前选择批次。取消旧任务 / 发送清空时递增,旧压缩任务回来时不能再写 UI state。
+    var photoSelectionGeneration: UInt64 = 0
+
+    /// PhotosPicker 已经返回但 JPEG 压缩还没结束。发送按钮必须等这一轮完成,否则会发旧照片或漏照片。
+    var isProcessingSelection = false
+
     /// 压缩完成后会把 `selectedPhotos` 剪枝到成功项;这次程序性写回不应再次触发压缩。
     var suppressNextPhotoSelectionReload = false
 

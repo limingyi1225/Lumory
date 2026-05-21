@@ -15,7 +15,7 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,主 target
 
 ## 技术栈
 
-- **iOS 客户端**:SwiftUI + CoreData + `NSPersistentCloudKitContainer`(CloudKit 同步)。App 入口 [Chronote/ChronoteApp.swift:265](Chronote/ChronoteApp.swift:265) `var body: some Scene`,启动先走 `SplashView`(约 1s)再淡出到 `HomeView`(`SplashView()` 在 [:275](Chronote/ChronoteApp.swift:275))。iOS 部署目标 26.0。
+- **iOS 客户端**:SwiftUI + CoreData + `NSPersistentCloudKitContainer`(CloudKit 同步)。App 入口 [Chronote/ChronoteApp.swift](Chronote/ChronoteApp.swift) 的 `var body: some Scene`,启动先走 `SplashView`(约 1s)再淡出到 `HomeView`。iOS 部署目标 26.0。
 - **后端**:Node.js + Express 5,部署在 `https://lumory.isaabby.com`(Cloudflare → nginx:443 → node:3000),PM2 进程管理。
 - **AI**:走自建后端代理 OpenAI(`/api/openai/chat/completions` / `/api/openai/embeddings` / `/api/openai/audio/transcriptions`)。Chat 走 SSE 流,模型 `gpt-5.5` / `gpt-5.4-mini`(reasoning effort 分档);转写 `gpt-4o-mini-transcribe`。
 - **本地化**:中(`zh-Hans.lproj`)/ 英(`en.lproj`),由 `@AppStorage("appLanguage", store: AppGroup.userDefaults)` 切换 —— 主 App + widget extension 共用 App Group `group.Mingyi.Lumory` 这个 UserDefaults suite。
@@ -26,7 +26,7 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,主 target
 - `ChronoteTests/` · `ChronoteUITests/` — 单测 / UI 测试。详见 [`testing.md`](.claude/rules/testing.md)。
 - `LumoryWidgetShared/` — **双 target 共享 sources**(主 App + LumoryWidgets extension 同时编),**只 import Foundation**。
 - `LumoryWidgets/` — Widget extension target(QuickWriteWidget + LockStreakWidget)。
-- `server/` — Node 后端,代码主体集中在 [server/index.js](server/index.js)(约 840 行,2026-05-17 verified)。详见 [`backend-server.md`](.claude/rules/backend-server.md)。
+- `server/` — Node 后端,代码主体集中在 [server/index.js](server/index.js)(单文件,~970 行量级,会随功能增长漂)。详见 [`backend-server.md`](.claude/rules/backend-server.md)。
 - `Lumory.xcodeproj` · `Lumory-Info.plist` · `Lumory.entitlements` · `Lumory.icon` · `LumoryWidgets-Info.plist` · `LumoryWidgets.entitlements`(widget plist / entitlement **放项目根目录**,不放 `LumoryWidgets/` —— 那是 PBXFileSystemSynchronizedRootGroup,扔进去会被自动塞进 Resources copy phase)。
 - `ecosystem.config.js` — PM2 配置(`lumory-server`,fork 模式,`max_memory_restart: 512M`)。
 - `Scripts/` — `generate-screenshots.sh`、`reset-database.sh`;根目录 `clean-build.sh` / `deep-clean.sh` / `clean-corrupted-db.sh` 维护脚本。
@@ -63,7 +63,7 @@ iOS:
 ### 测试覆盖缺口
 
 - **`StreamEvent.truncated` view-side 端到端测试** — Service-side(`NarrativePrecomputeService` 消费 .truncated 写 `payload.isIncomplete=true / truncatedReason`)已补完单测(2026-05-13 superreview round 1);view-side(`NarrativeSummaryCard` / `AskPastView` 消费侧让 isIncomplete flag 翻 true + 渲染 incompleteFooter)仍需 ViewInspector 或自写 binding-tap helper 才能断言。`parseImportedDiaries` 错误路径已在 2026-05-16 通过 MockURLProtocol 基建 + `OpenAIServiceImportTests` 补完。
-- **`ReminderService.currentRescheduleGen` race stale 场景测试** — `ThemeAliasJudgeService.scanGen` 已覆盖(`scanGen_staleCompletionDoesNotClearNewerTaskHandle`,通过 `simulateConcurrentScanStartForTesting` 注入),但 `ReminderService` 没装 race test seam(强耦 UN center,要 mock UN 才能干净测)。下次拆 ReminderService 时一并解决。
+- ~~**`ReminderService.currentRescheduleGen` race stale 场景测试**~~ — 已覆盖:`ChronoteTests/ReminderServiceImperativeTests.swift` 通过 `MockReminderNotificationCenter` + `requestReschedule_staleGenerationRemovesOldPendingRequests` 锁住 stale generation 清旧 pending 的行为。
 
 ### 隐私 hardening
 
@@ -71,7 +71,7 @@ iOS:
 
 ### 重构 / 待续
 
-- **超长文件**(SwiftLint 阈值 600 行,2026-05-17 重测):ThemeAliasResolver 805(已拆 Store + 加 round 1-3 注释)/ AskPastView 783 / ReminderService 767 / ThemeAliasManagementView 709 / InsightsView 640。near-threshold(已挨阈值,留意但不算超长):SettingsView 590。重构机会但都不算 bug。**已拆完的**:OpenAIService 在 wave11 拆 7 文件;HomeView 在 wave12 抽 4 个 SwiftUI 子 view + EntryCreationService;2026-05-16 把 method logic 按功能区拆 6 个 HomeView+*.swift extension 文件(Search / Recording / Audio / Send / Entry / Helpers),1433 → 519 行;2026-05-16 `ThemeAliasResolver` 拆 `ThemeAliasStore`(read+disk+pure reads+persistence)+ `ThemeAliasResolver`(facade ObservableObject + mutation + queue/throttle/cool-down timer),883 → 788 + 293(callsite 零改动,Resolver 后续因 mutation 业务逻辑沉淀又长回 ~805,真要再降需把 mutation 切 `+Confirm.swift` / `+Merge.swift` extension);2026-05-16 `DiaryDetailView` 拆 3 个 `+Display.swift` / `+Edit.swift` / `+Audio.swift` extension + 抽 `AsyncPhotoThumbnail` 独立 Component,861 → 229 行;**2026-05-16 round 3** `InsightsEngine` 拆 facade + `InsightsSearchEngine`(Search/RAG 子系统),771 → 470 + 368(2026-05-17 重测 508 + 387,业务自然增长),Phase 3.1 完成(Phase 3.2 aggregator 拆 + 嵌套类型抽顶层留 backlog,见 `.claude/rules/ios-codebase.md` `InsightsSearchEngine.swift` 行的注释)。**
+- **超长文件**(SwiftLint 阈值 600 行;具体行数会随业务漂,故只记区间不写死):ThemeAliasResolver(已拆 Store + 加 round 1-3 注释)/ AskPastView / ReminderService / ThemeAliasManagementView / InsightsView / SettingsView —— 均 600+,其中 ThemeAliasResolver / AskPastView 最长(800+)。SettingsView 此前在阈值下,现已越过。重构机会但都不算 bug。**已拆完的**:OpenAIService 在 wave11 拆 7 文件;HomeView 在 wave12 抽 4 个 SwiftUI 子 view + EntryCreationService;2026-05-16 把 method logic 按功能区拆 6 个 HomeView+*.swift extension 文件(Search / Recording / Audio / Send / Entry / Helpers),1433 → 519 行;2026-05-16 `ThemeAliasResolver` 拆 `ThemeAliasStore`(read+disk+pure reads+persistence)+ `ThemeAliasResolver`(facade ObservableObject + mutation + queue/throttle/cool-down timer),883 → 788 + 293(callsite 零改动,Resolver 后续因 mutation 业务逻辑沉淀又长回 ~805,真要再降需把 mutation 切 `+Confirm.swift` / `+Merge.swift` extension);2026-05-16 `DiaryDetailView` 拆 3 个 `+Display.swift` / `+Edit.swift` / `+Audio.swift` extension + 抽 `AsyncPhotoThumbnail` 独立 Component,861 → 229 行;**2026-05-16 round 3** `InsightsEngine` 拆 facade + `InsightsSearchEngine`(Search/RAG 子系统),771 → 470 + 368(拆分时数字;后续业务自然增长略涨,具体行数会漂不再记),Phase 3.1 完成(Phase 3.2 aggregator 拆 + 嵌套类型抽顶层留 backlog,见 `.claude/rules/ios-codebase.md` `InsightsSearchEngine.swift` 行的注释)。**
 
 ## Claude Code 自动化(本地,非生产)
 

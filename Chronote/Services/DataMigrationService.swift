@@ -58,18 +58,29 @@ struct DataMigrationService {
             return Outcome(inserted: 0, skipped: 0, didMark: true, didMoveBackup: false, saveError: nil)
         }
 
-        let oldEntries: [LegacyDiaryEntry]
+        let decoded: (entries: [LegacyDiaryEntry], skipped: Int)
         do {
             let data = try Data(contentsOf: jsonURL)
-            oldEntries = try JSONDecoder().decode([LegacyDiaryEntry].self, from: data)
+            decoded = try decodeLegacyEntriesLossy(from: data)
         } catch {
             Log.error("[DataMigration] 迁移失败: \(error)", category: .migration)
             return Outcome(inserted: 0, skipped: 0, didMark: false, didMoveBackup: false, saveError: error)
         }
+        let oldEntries = decoded.entries
 
-        Log.info("[DataMigration] 找到 \(oldEntries.count) 条日记待迁移", category: .migration)
+        Log.info("[DataMigration] 找到 \(oldEntries.count) 条日记待迁移,跳过损坏行 \(decoded.skipped) 条", category: .migration)
+        guard !oldEntries.isEmpty || decoded.skipped == 0 else {
+            let error = DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: [],
+                    debugDescription: "All legacy diary rows failed to decode"
+                )
+            )
+            Log.error("[DataMigration] 所有旧日记行都无法解码,保留原文件等待后续处理", category: .migration)
+            return Outcome(inserted: 0, skipped: decoded.skipped, didMark: false, didMoveBackup: false, saveError: error)
+        }
 
-        var outcome = Outcome(inserted: 0, skipped: 0, didMark: false, didMoveBackup: false, saveError: nil)
+        var outcome = Outcome(inserted: 0, skipped: decoded.skipped, didMark: false, didMoveBackup: false, saveError: nil)
 
         context.performAndWait {
             // **去重守卫**:save 失败路径不会写 `migrationKey`,下次启动会重跑本函数。
@@ -88,7 +99,7 @@ struct DataMigrationService {
             }()
 
             var inserted = 0
-            var skipped = 0
+            var skipped = decoded.skipped
             for oldEntry in oldEntries {
                 if seenIDs.contains(oldEntry.id) {
                     skipped += 1
@@ -100,7 +111,7 @@ struct DataMigrationService {
                 newEntry.setValue(oldEntry.text, forKey: "text")
                 newEntry.setValue(oldEntry.moodValue, forKey: "moodValue")
                 newEntry.setValue(oldEntry.summary, forKey: "summary")
-                if let audioFileName = oldEntry.audioFileName {
+                if let audioFileName = LumoryAttachmentPaths.normalizedFileName(oldEntry.audioFileName) {
                     newEntry.setValue(audioFileName, forKey: "audioFileName")
                 }
                 // 回算 wordCount —— 老 v2 JSON 里没这个字段,不补的话 Insights 累计字数 = 0、
@@ -139,6 +150,33 @@ struct DataMigrationService {
         }
 
         return outcome
+    }
+
+    private static func decodeLegacyEntriesLossy(from data: Data) throws -> (entries: [LegacyDiaryEntry], skipped: Int) {
+        let json = try JSONSerialization.jsonObject(with: data)
+        guard let array = json as? [Any] else {
+            throw DecodingError.typeMismatch(
+                [Any].self,
+                DecodingError.Context(codingPath: [], debugDescription: "Legacy diary JSON root is not an array")
+            )
+        }
+
+        let decoder = JSONDecoder()
+        var entries: [LegacyDiaryEntry] = []
+        entries.reserveCapacity(array.count)
+        var skipped = 0
+
+        for item in array {
+            guard JSONSerialization.isValidJSONObject(item),
+                  let rowData = try? JSONSerialization.data(withJSONObject: item),
+                  let entry = try? decoder.decode(LegacyDiaryEntry.self, from: rowData) else {
+                skipped += 1
+                continue
+            }
+            entries.append(entry)
+        }
+
+        return (entries, skipped)
     }
 
     /// 迁移结果汇报。生产路径不读它(only `performMigrationIfNeeded` wrapper 调用并丢弃),

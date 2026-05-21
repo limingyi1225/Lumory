@@ -345,7 +345,7 @@ final class EntryWipeOrchestratorTests: XCTestCase {
         await EntryWipeOrchestrator.performBulkWipeCleanup()
     }
 
-    /// (round-5 D7)`invalidateNarrativeCacheOnEntryChange()` 三件事执行后,
+    /// (round-5 D7)entry-change narrative invalidation 三件事执行后,
     /// **两个可观察 invariant**:
     ///   1. `NarrativeCacheService.invalidatedBeforeDate()` 返回值 > 调用前(marker 已写)
     ///   2. `.lumoryNarrativeCacheInvalidated` notification 已发
@@ -353,7 +353,7 @@ final class EntryWipeOrchestratorTests: XCTestCase {
     /// 完整"marker 必须在 await cancel **之前**写"顺序契约需要在 NarrativePrecomputeService 加
     /// DEBUG probe hook 才能 mid-await observe(改 production code 较 invasive),留 backlog。
     /// 本测试至少锁住函数跑到了关键步骤;reorder 把 marker 删 / notification 不发的 regression 能挡。
-    func testInvalidateNarrativeCacheOnEntryChange_writesMarkerAndPostsNotification() async {
+    func testEntryChangeNarrativeInvalidation_writesMarkerAndPostsNotification() async {
         let beforeMarker = NarrativeCacheService.invalidatedBeforeDate() ?? .distantPast
 
         // NotificationCenter spy — 用 actor-isolated box 避免 Sendable 警告
@@ -371,7 +371,8 @@ final class EntryWipeOrchestratorTests: XCTestCase {
         }
         defer { NotificationCenter.default.removeObserver(token) }
 
-        await EntryWipeOrchestrator.invalidateNarrativeCacheOnEntryChange()
+        EntryWipeOrchestrator.markNarrativeChangedNow()
+        await EntryWipeOrchestrator.finishNarrativeInvalidationAfterEntryChange()
         // notification block schedule 一个 Task,await 让它跑完
         await Task.yield()
         await Task.yield()

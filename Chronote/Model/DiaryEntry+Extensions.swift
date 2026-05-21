@@ -229,7 +229,9 @@ extension DiaryEntry {
     /// Returns array of image file names
     var imageFileNameArray: [String] {
         guard let names = imageFileNames, !names.isEmpty else { return [] }
-        return names.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+        return names
+            .split(separator: ",")
+            .compactMap { LumoryAttachmentPaths.normalizedFileName(String($0)) }
     }
 
     /// Loads images from synced data
@@ -250,7 +252,7 @@ extension DiaryEntry {
 
     /// Saves image data to iCloud-synced documents directory and returns the file name
     static func saveImageToDocuments(_ imageData: Data, fileName: String? = nil) throws -> String {
-        let fileName = fileName ?? "\(UUID().uuidString).jpg"
+        let fileName = try LumoryAttachmentPaths.validateFileName(fileName ?? "\(UUID().uuidString).jpg")
 
         // Always save to local first
         let localImagesDir = try LumoryAttachmentPaths.ensureLocalDirectory(for: .image)
@@ -270,6 +272,7 @@ extension DiaryEntry {
 
     /// Deletes an image file from documents directory
     static func deleteImageFromDocuments(_ fileName: String) throws {
+        let fileName = try LumoryAttachmentPaths.validateFileName(fileName)
         DiaryEntry.imageCache.removeObject(forKey: fileName as NSString)
         try LumoryAttachmentPaths.deleteAllCopies(fileName: fileName, kind: .image)
     }

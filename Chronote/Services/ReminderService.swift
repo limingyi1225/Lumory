@@ -523,6 +523,17 @@ final class ReminderService: ObservableObject {
         guard gen == currentRescheduleGen else { return }
         await applyComputedInfo(info)
 
+        #if canImport(UserNotifications)
+        if info.wroteCurrentCycle {
+            let deliveredIDs = await notificationCenter.deliveredNotificationIdentifiers()
+            guard gen == currentRescheduleGen else { return }
+            let toRemoveDelivered = deliveredIDs.filter { $0.hasPrefix(identifierPrefix) }
+            if !toRemoveDelivered.isEmpty {
+                notificationCenter.removeDeliveredNotifications(withIdentifiers: toRemoveDelivered)
+            }
+        }
+        #endif
+
         await refreshAuthorizationStatus()
         guard gen == currentRescheduleGen else { return }
         guard authorizationStatus == .authorized || authorizationStatus == .provisional else { return }

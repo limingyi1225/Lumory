@@ -95,15 +95,10 @@ enum EntryCreationService {
             // insertedObjects 里摘掉,不会触发额外 save。
             viewContext.delete(newEntry)
             viewContext.processPendingChanges()
-            // 已落盘的 image / audio 文件孤儿清理 — entry save 失败时这些附件已经被 persist*OffMain
-            // 写到 Documents/LumoryImages / iCloud LumoryAudio,无人引用就是 storage leak。
-            // `deleteAudioFromDocuments` 走三层 fallback(iCloud → 本地 LumoryAudio → legacy 扁平),
-            // best-effort 删,失败静默。
+            // 已落盘的 image 文件孤儿清理。audio 刻意不删:保存失败时 HomeView 会把录音恢复回
+            // composer,如果这里提前删掉就是用户刚录好的内容直接消失。
             for fileName in imageFileNames {
                 try? DiaryEntry.deleteImageFromDocuments(fileName)
-            }
-            if let audioName, !audioName.isEmpty {
-                DiaryEntry.deleteAudioFromDocuments(audioName)
             }
             return .failed(error)
         }
@@ -180,17 +175,22 @@ enum EntryCreationService {
         let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
         request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
         request.fetchLimit = 1
+        var fetchedEntry: DiaryEntry?
         do {
             guard let entry = try viewContext.fetch(request).first else {
                 Log.warning("[EntryCreationService] mood 更新跳过: entry 已不存在", category: .ui)
                 return false
             }
+            fetchedEntry = entry
             guard entry.moodValue != moodValue else { return true }
             entry.moodValue = moodValue
             try viewContext.save()
             return true
         } catch {
             Log.error("[EntryCreationService] mood 更新失败: \(error)", category: .ui)
+            if let entry = fetchedEntry {
+                viewContext.refresh(entry, mergeChanges: false)
+            }
             return false
         }
     }
@@ -206,9 +206,9 @@ enum EntryCreationService {
         aliasJudge: @MainActor @Sendable @escaping (UUID, [String]) async -> Void
     ) async -> Bool {
         async let summaryTask = ai.summarize(text: textSnapshot)
-        async let themesTask = ai.extractThemes(text: textSnapshot)
+        async let themesTask = ai.extractThemesOutcome(text: textSnapshot)
         async let embeddingTask = ai.embed(text: textSnapshot)
-        let (summary, themes, embedding) = await (summaryTask, themesTask, embeddingTask)
+        let (summary, themeOutcome, embedding) = await (summaryTask, themesTask, embeddingTask)
 
         let fetchRequest: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
         fetchRequest.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
@@ -222,7 +222,14 @@ enum EntryCreationService {
         }
 
         entry.summary = summary
-        entry.setThemes(themes)
+        let committedThemes: [String]
+        if case .success(let themes) = themeOutcome {
+            entry.setThemes(themes)
+            committedThemes = themes
+        } else {
+            committedThemes = []
+            Log.info("[EntryCreationService] theme 抽取失败,保留现有 themes", category: .ai)
+        }
         if let vector = embedding {
             entry.setEmbedding(vector)
         }
@@ -231,19 +238,20 @@ enum EntryCreationService {
         do {
             try viewContext.save()
             Log.info(
-                "[EntryCreationService] 摘要+主题+索引已更新: themes=\(themes.count), hasEmbedding=\(embedding != nil)",
+                "[EntryCreationService] 摘要+主题+索引已更新: themes=\(committedThemes.count), hasEmbedding=\(embedding != nil)",
                 category: .ai
             )
             didCommit = true
         } catch {
             Log.error("[EntryCreationService] AI 写回保存失败: \(error)", category: .ai)
+            viewContext.refresh(entry, mergeChanges: false)
             didCommit = false
         }
 
         // Theme alias judge —— 仅在 themes 真的写到 entry 上时才跑。否则 alias 建议会基于
         // ghost 数据(参考 codex review)。
-        if didCommit, !themes.isEmpty {
-            await aliasJudge(entryID, themes)
+        if didCommit, !committedThemes.isEmpty {
+            await aliasJudge(entryID, committedThemes)
         }
         return didCommit
     }
@@ -253,11 +261,15 @@ enum EntryCreationService {
     /// 在后台线程把本地录音拷贝到 iCloud 容器,并删掉本地副本。返回最终落库用的文件名。
     /// 非 `@MainActor`:磁盘读写、FileManager、`Data(contentsOf:)` 都没必要卡主线程。
     nonisolated static func persistAudioOffMain(audioFileName: String?) async -> String? {
-        guard let audioFileName = audioFileName else { return nil }
+        guard let audioFileName = LumoryAttachmentPaths.normalizedFileName(audioFileName) else { return nil }
         return await Task.detached(priority: .userInitiated) { () -> String? in
+            guard let existingURL = LumoryAttachmentPaths.existingURL(fileName: audioFileName, kind: .audio) else {
+                Log.warning("[EntryCreationService] audio file missing before save: \(audioFileName)", category: .ui)
+                return nil
+            }
             let localURL = LumoryAttachmentPaths.legacyURL(fileName: audioFileName)
 
-            if FileManager.default.fileExists(atPath: localURL.path),
+            if existingURL.path == localURL.path,
                let audioData = try? Data(contentsOf: localURL),
                let audioDir = try? LumoryAttachmentPaths.ensureICloudDirectory(for: .audio) {
                 let iCloudAudioURL = audioDir.appendingPathComponent(audioFileName)

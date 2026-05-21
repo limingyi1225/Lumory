@@ -320,7 +320,7 @@ final class ThemeAliasJudgeService: ObservableObject {
                 let entryID = (entry["id"] as? UUID)
                     ?? (entry["id"] as? NSUUID).flatMap { UUID(uuidString: $0.uuidString) }
                 if let excludeID, entryID == excludeID { continue }
-                let tags = Self.parseThemesCSV(entry["themes"] as? String)
+                let tags = DiaryEntry.parseThemesCSV(entry["themes"] as? String)
                 // **隐私**:snippet 只取 `entry.summary`(已是 AI 总结后的短语,十几个字),
                 // **绝不**回退到 raw `entry.text`。之前的 `summary ?? text` fallback 会把
                 // 整篇日记的前 80 字符发上后端,与"alias 判别只需 tag"的设计意图相悖
@@ -339,14 +339,6 @@ final class ThemeAliasJudgeService: ObservableObject {
                 ThemeAliasJudgeCandidate(tag: tag, count: count, sampleSnippet: samples[tag])
             }.sorted { $0.count > $1.count }
         }
-    }
-
-    nonisolated private static func parseThemesCSV(_ csv: String?) -> [String] {
-        guard let csv, !csv.isEmpty else { return [] }
-        return csv
-            .split(separator: ",")
-            .map { String($0).trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
     }
 
     /// 给 PendingSuggestion 准备最多 N 条引文的 entry id —— management view 用 id 去 fetch 真 entry 显示卡片。
@@ -398,10 +390,7 @@ final class ThemeAliasJudgeService: ObservableObject {
                 if openBuckets.isEmpty { break }
                 guard let id = row["id"] as? UUID,
                       let csv = row["themes"] as? String, !csv.isEmpty else { continue }
-                // 内联 themes CSV 解析(等价 DiaryEntry.themeArray,避免实体化)
-                let entryTags = csv.split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-                    .filter { !$0.isEmpty }
+                let entryTags = DiaryEntry.parseThemesCSV(csv).map { $0.lowercased() }
                 for (idx, lowerTag) in lowercasedTags.enumerated() where entryTags.contains(lowerTag) {
                     let originalTag = tags[idx]
                     let currentCount = buckets[originalTag, default: []].count

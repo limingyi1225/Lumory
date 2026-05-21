@@ -975,15 +975,30 @@ struct SSEParserTests {
         }
     }
 
-    @Test func invalidJSONThrowsInvalidEvent() async {
+    @Test func unknownNonErrorFrameIsSkipped() async throws {
+        let events = try await collectSSEEvents([
+            #"data: {"type":"future.event","payload":{"value":1}}"#,
+            "",
+            #"data: {"value":"after"}"#,
+            "",
+            "data: [DONE]"
+        ])
+
+        #expect(events == [Chunk(value: "after")])
+    }
+
+    @Test func malformedJSONFrameThrowsInvalidEvent() async {
         do {
             _ = try await collectSSEEvents([
                 "data: {not-json}",
-                ""
+                "",
+                #"data: {"value":"after"}"#,
+                "",
+                "data: [DONE]"
             ])
-            #expect(Bool(false), "Expected invalid event")
+            #expect(Bool(false), "Expected invalidEvent")
         } catch let error as SSEParser.ParserError {
-            #expect(error.localizedDescription.contains("invalid event"))
+            #expect(error.localizedDescription == SSEParser.ParserError.invalidEvent(byteCount: 10).localizedDescription)
         } catch {
             #expect(Bool(false), "Unexpected error: \(error)")
         }
@@ -2012,6 +2027,37 @@ struct ThemeManagementServiceTests {
         #expect(themes == [["Person A"]], "撤销只应恢复本次删除的 Person A,不应复活窗口内移除的 Work")
     }
 
+    @Test func restoreDeletedTheme_restoresPendingSuggestionsRemovedByDelete() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let context = persistence.container.viewContext
+        insertDiaryEntry(
+            context: context,
+            date: makeDate(year: 2024, month: 6, day: 1),
+            themes: ["Person A"]
+        )
+        try context.save()
+
+        let pending = PendingSuggestion(
+            newTag: "Partner",
+            canonicalGuess: "Person A",
+            confidence: .medium,
+            source: .scan
+        )
+        #expect(resolver.enqueue(pending))
+
+        let service = ThemeManagementService(persistence: persistence, resolver: resolver)
+        let deleteOutcome = await service.deleteTheme(canonical: "Person A")
+        let payload = try #require(deleteOutcome.undoPayload)
+        #expect(resolver.pending.isEmpty, "删除主题会清掉指向该主题的待审建议")
+
+        let restoreOutcome = await service.restoreDeletedTheme(payload)
+
+        #expect(restoreOutcome.succeeded)
+        #expect(resolver.pending.map(\.id).contains(pending.id),
+                "撤销删除主题时,原先被清掉的待审建议也应回来")
+    }
+
     @Test func restoreDeletedTheme_saveFailureReportsFailure() async throws {
         let persistence = PersistenceController(inMemory: true)
         let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
@@ -2035,7 +2081,8 @@ struct ThemeManagementServiceTests {
             canonical: "Person A",
             originalThemesByEntryID: [entryID: ["Person A"]],
             aliasGroupCanonical: nil,
-            aliasGroupAliases: []
+            aliasGroupAliases: [],
+            removedPending: []
         )
 
         let outcome = await service.restoreDeletedTheme(payload)

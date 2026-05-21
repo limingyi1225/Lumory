@@ -515,6 +515,7 @@
 "删除失败,可能是磁盘空间不足或同步冲突。请稍后重试。" = "Delete failed. Disk may be full or there's a sync conflict. Please retry later.";
 "保存失败,可能是磁盘空间不足或同步冲突。请稍后重试。" = "Save failed. Disk may be full or there's a sync conflict. Please retry later.";
 "已记录" = "Saved to journal";
+"已记录,但心情调整保存失败。" = "Saved, but the mood adjustment could not be saved.";
 "发送失败，内容已恢复，请重试。" = "Send failed. Your content was restored, please try again.";
 "发送失败,内容已恢复。请稍后再试。" = "Send failed. Your content was restored. Try again shortly.";
 "发送失败: 存储空间不足。内容已恢复。" = "Send failed: storage is full. Your content was restored.";
@@ -581,15 +582,15 @@
 "含录音" = "Has audio";
 
 // wave17 — Settings reset narrative cache
-"清除 AI 回顾缓存" = "Reset AI Recap Cache";
-"清除 AI 回顾缓存？" = "Reset AI recap cache?";
+"清除 AI 回顾缓存" = "Reset AI Reflection Cache";
+"清除 AI 回顾缓存？" = "Reset AI reflection cache?";
 "AI 回顾" = "AI Reflection";
 "清除" = "Reset";
 "清除失败" = "Reset failed";
-"将清除全部已生成的 AI 回顾,Insights「历史回顾」里的「故事」记录会一并消失。下次进入 Insights 时可以重新生成。日记本身不受影响,此操作不可撤销。" = "All generated AI recaps will be erased, including every \"Story\" entry under Insights History. You can regenerate them next time you open Insights. Your diary entries are unaffected. This action cannot be undone.";
-"清除 AI 回顾缓存失败。请稍后重试。错误:%@" = "Failed to reset AI recap cache. Please try again later. Error: %@";
-"settings.resetNarrative.cleared" = "Cleared %d AI recaps";
-"settings.resetNarrative.empty" = "No AI recaps to clear";
+"将清除全部已生成的 AI 回顾,Insights「历史回顾」里的「故事」记录会一并消失。下次进入 Insights 时可以重新生成。日记本身不受影响,此操作不可撤销。" = "All generated AI reflections will be erased, including every \"Story\" entry under Insights History. You can regenerate them next time you open Insights. Your diary entries are unaffected. This action cannot be undone.";
+"清除 AI 回顾缓存失败。请稍后重试。错误:%@" = "Failed to reset AI reflection cache. Please try again later. Error: %@";
+"settings.resetNarrative.cleared" = "Cleared %d AI reflections";
+"settings.resetNarrative.empty" = "No AI reflections to clear";
 "音频播放失败" = "Audio playback failed";
 "正在生成中,稍后再点" = "Still generating. Try again soon.";
 "分享" = "Share";

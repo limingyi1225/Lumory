@@ -387,12 +387,7 @@ final class InsightsEngine {
                 let truncated = rawText.count > textCharCap
                     ? String(rawText.prefix(textCharCap))
                     : rawText
-                let themesCSV = (row["themes"] as? String) ?? ""
-                let themes: [String] = themesCSV.isEmpty
-                    ? []
-                    : themesCSV.split(separator: ",")
-                        .map { String($0).trimmingCharacters(in: .whitespaces) }
-                        .filter { !$0.isEmpty }
+                let themes = DiaryEntry.parseThemesCSV(row["themes"] as? String)
                 return DiaryEntryData(
                     id: (row["id"] as? UUID) ?? UUID(),
                     date: (row["date"] as? Date) ?? Date(),
@@ -419,8 +414,7 @@ final class InsightsEngine {
             // 改成 `NSDictionaryResultType` + 显式 `propertiesToFetch` 真投影:
             //   - 不实例化 `NSManagedObject`,不读 `imagesData` / 不读 `audioFileName` / 不读 `imageFileNames`
             //   - `embedding` Binary 走 dict-fetch 拿 `Data`,本地 `decodeEmbeddingVector` 解 [Float]
-            //   - `themes` CSV inline split(短期复刻 `DiaryEntry.themeArray` 逻辑,等 OPT-MID #M6
-            //     抽 `DiaryEntry.parseThemesCSV(_:)` 静态 helper 后所有 service caller 共用)
+            //   - `themes` CSV 走 `DiaryEntry.parseThemesCSV(_:)`,和 entity 读取路径保持一致。
             let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
             request.resultType = .dictionaryResultType
             var fields = ["id", "date", "text", "moodValue", "summary", "themes", "wordCount"]
@@ -437,12 +431,7 @@ final class InsightsEngine {
                 let text = (row["text"] as? String) ?? ""
                 let moodValue = (row["moodValue"] as? Double) ?? 0.5
                 let summary = (row["summary"] as? String) ?? ""
-                let themesCSV = (row["themes"] as? String) ?? ""
-                let themes: [String] = themesCSV.isEmpty
-                    ? []
-                    : themesCSV.split(separator: ",")
-                        .map { String($0).trimmingCharacters(in: .whitespaces) }
-                        .filter { !$0.isEmpty }
+                let themes = DiaryEntry.parseThemesCSV(row["themes"] as? String)
                 let wordCount = (row["wordCount"] as? Int) ?? 0
                 let embedding: [Float]? = includeEmbedding
                     ? (row["embedding"] as? Data).flatMap { DiaryEntry.decodeEmbeddingVector($0) }

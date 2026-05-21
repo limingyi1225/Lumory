@@ -76,12 +76,14 @@ final class ThemeBackfillService: ObservableObject {
     }
 
     @MainActor
-    func cancel() {
+    func cancel() async {
         // (2026-05-19 superreview P1)cancel() **不能**清 runningRunID,否则 publish 内的
         // `guard runningRunID == runID` 会把 execute() 走完 cancel 后的最后一次
         // `publish(...isRunning: false...)` 吞掉,造成 progress.isRunning 永远 true,UI 锁死直到
-        // App 重启。只 cancel task — runningTask 句柄等 task.value 自然 nil 化 in run(mode:)。
-        runningTask?.cancel()
+        // App 重启。先 cancel,再等旧任务完全退出;runningTask 句柄仍由 run(mode:) 收尾清理。
+        guard let runningTask else { return }
+        runningTask.cancel()
+        await runningTask.value
     }
 
     // MARK: Core loop
@@ -90,9 +92,20 @@ final class ThemeBackfillService: ObservableObject {
 
     @MainActor
     private func run(mode: Mode) async -> Progress {
-        if let runningTask, !runningTask.isCancelled {
-            Log.info("[ThemeBackfill] 已在运行，忽略重复调用", category: .migration)
-            return progress
+        if let runningTask {
+            if !runningTask.isCancelled {
+                Log.info("[ThemeBackfill] 已在运行，忽略重复调用", category: .migration)
+                return progress
+            }
+            let cancelledRunID = runningRunID
+            await runningTask.value
+            if runningRunID == cancelledRunID {
+                self.runningTask = nil
+                runningRunID = nil
+            } else {
+                Log.info("[ThemeBackfill] 已有新的回填任务接手，忽略重复重启", category: .migration)
+                return progress
+            }
         }
 
         let runID = UUID()
@@ -108,7 +121,7 @@ final class ThemeBackfillService: ObservableObject {
         if runningRunID == runID {
             runningTask = nil
             runningRunID = nil
-            }
+        }
         return progress
     }
 
@@ -159,11 +172,7 @@ final class ThemeBackfillService: ObservableObject {
             guard let rows = try? context.fetch(request) else { return 0 }
             var count = 0
             for row in rows {
-                let themesCSV = row["themes"] as? String ?? ""
-                let themes = themesCSV
-                    .split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
+                let themes = DiaryEntry.parseThemesCSV(row["themes"] as? String)
                 if themes.isEmpty || themes.contains(where: { InsightsEngine.isBannedTheme($0) }) {
                     count += 1
                 }
@@ -189,11 +198,7 @@ final class ThemeBackfillService: ObservableObject {
                 request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
                 guard let entries = try? context.fetch(request) else { return [] }
                 return entries.compactMap { entry -> NSManagedObjectID? in
-                    let themesCSV = entry.themes ?? ""
-                    let themes = themesCSV
-                        .split(separator: ",")
-                        .map { String($0).trimmingCharacters(in: .whitespaces) }
-                        .filter { !$0.isEmpty }
+                    let themes = DiaryEntry.parseThemesCSV(entry.themes)
                     let objectID = entry.objectID
                     if themes.isEmpty { return objectID }
                     // 任何一个命中 banned 词就视为需要清理

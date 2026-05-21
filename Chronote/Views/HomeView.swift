@@ -375,16 +375,28 @@ struct HomeView: View {
 
         for (targetDate, title) in targets {
             guard let targetDate,
-                  let entry = entries.first(where: { entry in
-                      guard !usedEntryIDs.contains(entry.objectID),
-                            let date = entry.date else { return false }
-                      return calendar.isDate(date, inSameDayAs: targetDate)
-                  }) else { continue }
+                  let dayInterval = calendar.dateInterval(of: .day, for: targetDate),
+                  let entry = fetchOnThisDayEntry(in: dayInterval),
+                  !usedEntryIDs.contains(entry.objectID) else { continue }
             usedEntryIDs.insert(entry.objectID)
             highlights.append(OnThisDayHighlight(id: entry.objectID, title: title, entry: entry))
         }
 
         cachedOnThisDayHighlights = highlights
+    }
+
+    private func fetchOnThisDayEntry(in dayInterval: DateInterval) -> DiaryEntry? {
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(
+            format: "date >= %@ AND date < %@",
+            dayInterval.start as NSDate,
+            dayInterval.end as NSDate
+        )
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+        request.fetchLimit = 1
+        request.fetchBatchSize = 1
+        request.returnsObjectsAsFaults = true
+        return try? viewContext.fetch(request).first
     }
     
     @ViewBuilder

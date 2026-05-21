@@ -66,9 +66,20 @@ final class EmbeddingBackfillService: ObservableObject {
     @MainActor
     @discardableResult
     func backfillAll() async -> Progress {
-        if let runningTask, !runningTask.isCancelled {
-            Log.info("[EmbeddingBackfill] 已在运行，忽略重复调用", category: .migration)
-            return progress
+        if let runningTask {
+            if !runningTask.isCancelled {
+                Log.info("[EmbeddingBackfill] 已在运行，忽略重复调用", category: .migration)
+                return progress
+            }
+            let cancelledRunID = runningRunID
+            await runningTask.value
+            if runningRunID == cancelledRunID {
+                self.runningTask = nil
+                runningRunID = nil
+            } else {
+                Log.info("[EmbeddingBackfill] 已有新的回填任务接手，忽略重复重启", category: .migration)
+                return progress
+            }
         }
 
         let runID = UUID()
@@ -83,17 +94,19 @@ final class EmbeddingBackfillService: ObservableObject {
         if runningRunID == runID {
             runningTask = nil
             runningRunID = nil
-            }
+        }
         return progress
     }
 
     @MainActor
-    func cancel() {
+    func cancel() async {
         // (2026-05-19 superreview P1)cancel() **不能**清 runningRunID,否则 publish 内的
         // `guard runningRunID == runID` 会把 run(runID:) 走完 cancel 后的最后一次
         // `publish(...isRunning: false...)` 吞掉,造成 progress.isRunning 永远 true,UI 锁死直到
-        // App 重启。只 cancel task — runningTask 句柄等 task.value 自然 nil 化 in backfillAll。
-        runningTask?.cancel()
+        // App 重启。先 cancel,再等旧任务完全退出;runningTask 句柄仍由 backfillAll 收尾清理。
+        guard let runningTask else { return }
+        runningTask.cancel()
+        await runningTask.value
     }
 
     // MARK: Core loop

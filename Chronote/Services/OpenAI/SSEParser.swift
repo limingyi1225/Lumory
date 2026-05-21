@@ -137,7 +137,14 @@ enum SSEParser {
                             if let upstreamError = try? decoder.decode(OpenAIStreamErrorEnvelope.self, from: data) {
                                 throw ParserError.upstreamError(upstreamError.error.message)
                             }
-                            throw ParserError.invalidEvent(byteCount: data.count)
+                            // Defensive parsing: tolerate unknown non-error frames. A proxy or future
+                            // upstream field can emit an event this client does not understand; dropping
+                            // just that frame preserves already streamed content and lets later valid
+                            // frames / [DONE] complete the response.
+                            if (try? JSONSerialization.jsonObject(with: data)) != nil {
+                                return false
+                            }
+                            throw ParserError.invalidEvent(byteCount: payload.utf8.count)
                         }
                         return false
                     }

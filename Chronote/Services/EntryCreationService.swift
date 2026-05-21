@@ -176,17 +176,22 @@ enum EntryCreationService {
         entryID: UUID,
         moodValue: Double,
         viewContext: NSManagedObjectContext
-    ) {
+    ) -> Bool {
         let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
         request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
         request.fetchLimit = 1
         do {
-            guard let entry = try viewContext.fetch(request).first else { return }
-            guard entry.moodValue != moodValue else { return }
+            guard let entry = try viewContext.fetch(request).first else {
+                Log.warning("[EntryCreationService] mood 更新跳过: entry 已不存在", category: .ui)
+                return false
+            }
+            guard entry.moodValue != moodValue else { return true }
             entry.moodValue = moodValue
             try viewContext.save()
+            return true
         } catch {
             Log.error("[EntryCreationService] mood 更新失败: \(error)", category: .ui)
+            return false
         }
     }
 

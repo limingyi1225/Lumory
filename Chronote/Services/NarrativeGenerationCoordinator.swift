@@ -81,8 +81,11 @@ final class NarrativeGenerationCoordinator {
         dateInterval: DateInterval,
         entryCount: Int,
         mostRecentEntryDate: Date?
-    ) {
-        tasks[range]?.cancel()
+    ) async {
+        let supersededTask = tasks[range]
+        if let supersededTask {
+            supersededTask.cancel()
+        }
         streamGeneration[range, default: 0] &+= 1
         let generation = streamGeneration[range]!
         let streamStartTime = Date()
@@ -91,6 +94,12 @@ final class NarrativeGenerationCoordinator {
         streamFailure[range] = nil
 
         let task = Task { @MainActor in
+            if let supersededTask {
+                // Wait for the old stream to observe cancellation before starting the replacement.
+                // Otherwise two streams for the same range can race to write the same cache slot.
+                await supersededTask.value
+                guard self.isCurrent(range, generation) else { return }
+            }
             await self.runStream(
                 range: range,
                 dateInterval: dateInterval,

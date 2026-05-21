@@ -19,10 +19,14 @@ import UIKit
 
 struct NarrativeDetailSheet: View {
     let payload: AIConversation.NarrativePayload
+    let onRegenerate: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @Environment(\.managedObjectContext) private var viewContext
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
+        Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"
+    }()
 
     /// §2.3 (2026-05-19) — narrative 回顾历史入口。从这里 present 的 ConversationHistoryView 只显
     /// `.narrative` kind,跟 AskPastView 的"提问历史"完全分开,不再用 mixed 列表。
@@ -155,14 +159,17 @@ struct NarrativeDetailSheet: View {
         if let generatedAt = payload.generatedAt {
             parts.append(String(
                 format: NSLocalizedString("生成于 %@", comment: "Narrative provenance generated time"),
-                LumoryDateFormatters.fullDateTime.string(from: generatedAt)
+                LumoryDateFormatters.fullDateTime(language: appLanguage).string(from: generatedAt)
             ))
         }
         return parts
     }
 
     private func rangeLabel(start: Date, end: Date) -> String {
-        let f = LumoryDateFormatters.monthDay
+        if payload.rangeKind == TimeRange.all.rawValue {
+            return NSLocalizedString("全部时间", comment: "Time range all")
+        }
+        let f = LumoryDateFormatters.monthDay(language: appLanguage)
         return "\(f.string(from: start)) – \(f.string(from: end))"
     }
 
@@ -194,6 +201,22 @@ struct NarrativeDetailSheet: View {
                 Text(reason)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+            }
+            if let onRegenerate {
+                Spacer(minLength: 8)
+                Button {
+                    #if canImport(UIKit)
+                    HapticManager.shared.impact(.light)
+                    #endif
+                    onRegenerate()
+                    dismiss()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(PressableScaleButtonStyle())
+                .accessibilityLabel(NSLocalizedString("narrative.summary.regenerate", comment: ""))
             }
         }
         .padding(.horizontal, 12)

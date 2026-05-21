@@ -381,7 +381,7 @@ struct AskPastView: View {
                 }
             }
 
-            for await chunk in engine.ask(question) {
+            streamLoop: for await chunk in engine.ask(question) {
                 if Task.isCancelled { break }
                 switch chunk.kind {
                 case .text:
@@ -408,6 +408,9 @@ struct AskPastView: View {
                                 break
                             }
                         }
+                    }
+                    if case .failed = chunk.kind {
+                        break streamLoop
                     }
                 }
             }

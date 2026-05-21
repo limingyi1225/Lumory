@@ -99,6 +99,8 @@ final class ReminderService: ObservableObject {
     /// 单测注入 mock。所有 imperative API(enable / disable / cancelAllPendingReminderNotifications /
     /// doReschedule / scheduleOneShot)通过 `self.notificationCenter` 调,不再 inline `UN.current()`。
     private let notificationCenter: ReminderNotificationCenter
+    private let dateProvider: @MainActor @Sendable () -> Date
+    private let lastEntryDateProvider: (@MainActor @Sendable () async -> Date?)?
     private let enabledKey = "lumory.reminder.enabled"
     private let hourKey = "lumory.reminder.hour"
     private let minuteKey = "lumory.reminder.minute"
@@ -130,9 +132,16 @@ final class ReminderService: ObservableObject {
     /// (megareview OPT-HIGH H4)`internal` 给单测用 — `@testable import` 范围内可见。
     /// 生产代码继续走 `private convenience init()` + `.shared` 单例,callsite 零改动。
     /// `defaults` 默认 `.standard`(老行为);test 注入 isolated suite 防污染。
-    internal init(notificationCenter: ReminderNotificationCenter, defaults: UserDefaults) {
+    internal init(
+        notificationCenter: ReminderNotificationCenter,
+        defaults: UserDefaults,
+        dateProvider: @escaping @MainActor @Sendable () -> Date = { Date() },
+        lastEntryDateProvider: (@MainActor @Sendable () async -> Date?)? = nil
+    ) {
         self.notificationCenter = notificationCenter
         self.defaults = defaults
+        self.dateProvider = dateProvider
+        self.lastEntryDateProvider = lastEntryDateProvider
         self.hour = (defaults.object(forKey: hourKey) as? Int) ?? 21
         self.minute = (defaults.object(forKey: minuteKey) as? Int) ?? 0
         self.isEnabled = defaults.bool(forKey: enabledKey)
@@ -145,7 +154,7 @@ final class ReminderService: ObservableObject {
             self.anchorDate = stored
             self.anchorIsPersisted = true
         } else {
-            self.anchorDate = Calendar.current.startOfDay(for: Date())
+            self.anchorDate = Calendar.current.startOfDay(for: dateProvider())
             self.anchorIsPersisted = false
         }
     }
@@ -329,7 +338,7 @@ final class ReminderService: ObservableObject {
         // **首次** enable:此刻才把 anchorDate 钉死(startOfDay)+ persist。
         // 后续 disable/enable 不重置(用户可能只是临时关掉)。
         if !anchorIsPersisted {
-            let today = Calendar.current.startOfDay(for: Date())
+            let today = Calendar.current.startOfDay(for: dateProvider())
             anchorDate = today
             defaults.set(today, forKey: anchorDateKey)
             anchorIsPersisted = true
@@ -432,7 +441,7 @@ final class ReminderService: ObservableObject {
             hour: hour,
             minute: minute,
             anchor: anchorDate,
-            referenceDate: Date(),
+            referenceDate: dateProvider(),
             calendar: Calendar.current
         )
     }
@@ -528,7 +537,7 @@ final class ReminderService: ObservableObject {
         //       - 当前 cycle 未写但 fireTime 已过(例:每天 21:00 提醒,用户 22:00 打开) →
         //         往后跳到下一个 cycle 末
         //       - 当 (1) 已覆盖今天 → 跳过当天,挂下一个 cycle 末(避免同 fireTime 两条通知)
-        let now = Date()
+        let now = dateProvider()
         let calendar = Calendar.current
         let startOfToday = calendar.startOfDay(for: now)
 
@@ -576,16 +585,12 @@ final class ReminderService: ObservableObject {
                fireTime > now,
                !(isCurrentCycle && currentCycleWritten),
                !coveredByToday {
-                // daysSilent 用 cached lastEntryDate 算,省一次 background fetch
-                let daysSilent: Int? = {
-                    guard let last = info.lastEntryDate else { return nil }
-                    let lastDayOfEntry = calendar.startOfDay(for: last)
-                    return calendar.dateComponents([.day], from: lastDayOfEntry, to: lastDay).day
-                }()
                 await scheduleOneShot(
                     at: fireTime,
                     identifier: "\(generationScopedIdentifier(identifierCycleEndPrefix, gen: gen)).\(scheduledCount)",
-                    daysSilent: daysSilent,
+                    // Future fallback requests may fire after the app has not opened for days.
+                    // A precomputed "already N days" count would drift, so keep these generic.
+                    daysSilent: nil,
                     gen: gen
                 )
                 scheduledCount += 1
@@ -682,7 +687,8 @@ final class ReminderService: ObservableObject {
     }
 
     /// 给定参考日期,算 cycle 边界 + 写状态。referenceDate 默认 = 今天。
-    private func computeCycleInfo(referenceDate: Date = Date()) async -> CycleInfo {
+    private func computeCycleInfo(referenceDate: Date? = nil) async -> CycleInfo {
+        let referenceDate = referenceDate ?? dateProvider()
         let bounds = cycleBounds(for: referenceDate)
         let lastEntry = await fetchLastEntryDate()  // 已 cap at now
         let calendar = Calendar.current
@@ -744,9 +750,12 @@ final class ReminderService: ObservableObject {
     /// 用户导入或手动编辑造成的未来日期会让 wroteCurrentCycle 误判)。
     /// nil = 没有任何 entry;fetch 失败会 log 后保守返回 nil。
     private func fetchLastEntryDate() async -> Date? {
-        await PersistenceController.shared.container.performBackgroundTask { context in
+        if let lastEntryDateProvider {
+            return await lastEntryDateProvider()
+        }
+        let now = dateProvider()
+        return await PersistenceController.shared.container.performBackgroundTask { context -> Date? in
             let request: NSFetchRequest<NSDictionary> = NSFetchRequest(entityName: "DiaryEntry")
-            let now = Date()
             request.predicate = NSPredicate(format: "date != nil AND date <= %@", now as NSDate)
             request.resultType = .dictionaryResultType
             request.propertiesToFetch = ["date"]

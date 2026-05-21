@@ -146,7 +146,9 @@ struct NarrativeSummaryCard: View {
         // (wave18 前 stream 锁在卡片 @State:切 range 会 cancel、关 sheet 状态丢失 ——
         // 见 NarrativeGenerationCoordinator.swift 顶部注释。)
         .lumoryAdaptiveModal(item: $detailSubject) { subject in
-            NarrativeDetailSheet(payload: subject.payload)
+            NarrativeDetailSheet(payload: subject.payload) {
+                Task { await startGeneration() }
+            }
                 .environment(\.managedObjectContext, viewContext)
         }
     }
@@ -319,7 +321,7 @@ struct NarrativeSummaryCard: View {
             if !displayHeadline.isEmpty, let payload = cachedNarrative {
                 detailSubject = NarrativeDetailSubject(payload: payload)
             } else {
-                startGeneration()
+                Task { await startGeneration() }
             }
         }
         // VoiceOver:整卡是个隐式 button(自定义 onTapGesture 不带 trait),手动加 isButton + hint
@@ -472,7 +474,7 @@ struct NarrativeSummaryCard: View {
             }
             Button {
                 HapticManager.shared.impact(.light)
-                startGeneration()
+                Task { await startGeneration() }
             } label: {
                 Text(NSLocalizedString("narrative.summary.regenerate", comment: ""))
                     .font(.subheadline.weight(.semibold))
@@ -499,7 +501,7 @@ struct NarrativeSummaryCard: View {
             Spacer()
             Button {
                 HapticManager.shared.impact(.light)
-                startGeneration()
+                Task { await startGeneration() }
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.caption.weight(.semibold))
@@ -530,8 +532,8 @@ struct NarrativeSummaryCard: View {
     /// 把生成委托给 NarrativeGenerationCoordinator(单例,不随本卡 view 实例存亡)。同 range
     /// 已有在飞 task → coordinator 当「重试」cancel 旧的再起。结果不靠返回值 —— coordinator
     /// persist 到 viewContext 后,卡片靠 `.onChange(of: isStreaming)` / `.onReceive` 回灌。
-    private func startGeneration() {
-        coordinator.start(
+    private func startGeneration() async {
+        await coordinator.start(
             range: range,
             dateInterval: dateInterval,
             entryCount: entryCount,

@@ -157,6 +157,59 @@ struct EntryCreationServiceTests {
         #expect(entries.isEmpty, "save 失败不应留下 ghost entry")
     }
 
+    @Test func create_saveFailureCleansPersistedImageAndAudioFiles() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let ai = MockAIService()
+        struct ForcedSaveError: Error {}
+
+        let fm = FileManager.default
+        let imageDir = try LumoryAttachmentPaths.ensureLocalDirectory(for: .image)
+        let imageFilesBefore = Set((try? fm.contentsOfDirectory(atPath: imageDir.path)) ?? [])
+        let audioName = "test_audio_failure_\(UUID().uuidString).m4a"
+        let audioURL = LumoryAttachmentPaths.legacyURL(fileName: audioName)
+        try Data(repeating: 0xA1, count: 16).write(to: audioURL)
+        defer {
+            try? fm.removeItem(at: audioURL)
+            if let files = try? fm.contentsOfDirectory(atPath: imageDir.path) {
+                for file in files where !imageFilesBefore.contains(file) {
+                    try? fm.removeItem(at: imageDir.appendingPathComponent(file))
+                }
+            }
+        }
+
+        let result = await EntryCreationService.create(
+            .init(text: "will fail with attachments", audioFileName: audioName, images: [Data(repeating: 0xBC, count: 64)], moodValue: 0.5),
+            in: persistence,
+            viewContext: context,
+            ai: ai,
+            saveAction: { _ in throw ForcedSaveError() },
+            aliasJudge: { _, _ in },
+            requestReminderReschedule: {}
+        )
+
+        guard case .failed = result else {
+            Issue.record("expected .failed, got \(result)")
+            return
+        }
+        #expect(!fm.fileExists(atPath: audioURL.path), "save 失败后 audio 文件应被清理,避免孤儿附件")
+        let imageFilesAfter = Set((try? fm.contentsOfDirectory(atPath: imageDir.path)) ?? [])
+        #expect(imageFilesAfter == imageFilesBefore, "save 失败后新写入的 image 文件应被清理")
+    }
+
+    @Test func updateMood_missingEntry_returnsFalse() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+
+        let ok = EntryCreationService.updateMood(
+            entryID: UUID(),
+            moodValue: 0.9,
+            viewContext: context
+        )
+
+        #expect(ok == false, "entry 已不存在时不能静默当成功,否则 HomeView 不会提示保存失败")
+    }
+
     @Test func performAIWriteback_staleText_skipsCommitAndAliasJudge() async throws {
         let persistence = PersistenceController(inMemory: true)
         let context = persistence.container.viewContext

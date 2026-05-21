@@ -227,7 +227,7 @@ final class ContextPromptGenerator {
             var older: [Snapshot] = []
             for entry in entries {
                 let date = entry["date"] as? Date ?? Date.distantPast
-                let rawThemes = Self.parseThemesCSV(entry["themes"] as? String)
+                let rawThemes = DiaryEntry.parseThemesCSV(entry["themes"] as? String)
                 let canonicalThemes = Self.canonicalize(rawThemes, with: aliasMap)
                 let moodValue = (entry["moodValue"] as? NSNumber)?.doubleValue ?? 0.5
                 let snap = Snapshot(date: date, themes: canonicalThemes, moodValue: moodValue)
@@ -259,11 +259,4 @@ final class ContextPromptGenerator {
         return out
     }
 
-    private static func parseThemesCSV(_ csv: String?) -> [String] {
-        guard let csv, !csv.isEmpty else { return [] }
-        return csv
-            .split(separator: ",")
-            .map { String($0).trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-    }
 }

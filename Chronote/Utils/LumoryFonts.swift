@@ -21,6 +21,10 @@ enum LumoryFonts {
     /// HomeTimelineCard 第二行 body preview(13pt) — 介于 `.caption`(12)和 `.footnote`(13)。
     /// 用 token 保持跟 DiaryEntryRow text preview 等其他 row 一致。
     static let timelineCardPreview: Font = .system(size: 13)
+    static let diarySummaryRow: Font = .callout.weight(.medium)
+    static let diarySummaryCard: Font = .subheadline.weight(.semibold)
+    static let diarySummaryPreview: Font = .headline
+    static let diarySummaryDetail: Font = .title3.weight(.medium)
 
     /// ThemeCardList 主题卡标题(18pt semibold) — 跟 narrativeHeadline(19pt serif)拉开
     /// 一档不抢主卡 hero;比 `.headline`(17pt)更接近主题感。

@@ -41,7 +41,7 @@ struct HomeTimelineCard: View {
                     }
                     if let summary = entry.summary, !summary.isEmpty {
                         Text(cleanedSummary(summary))
-                            .font(.subheadline.weight(.semibold))
+                            .font(LumoryFonts.diarySummaryCard)
                             .foregroundColor(.primary)
                             .lineLimit(2)
                     } else if isSummaryLoading {

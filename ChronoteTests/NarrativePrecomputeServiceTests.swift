@@ -110,6 +110,30 @@ struct NarrativePrecomputeServiceTests {
         #expect(payload.headline?.isEmpty == false)
     }
 
+    @Test func refreshesFinalMetricsWhenEntryIsAddedDuringStream() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        try seedEntries(count: 5, in: persistence)
+        let ai = EntryMutatingNarrativeAIService(persistence: persistence)
+        let engine = InsightsEngine(persistence: persistence, ai: ai)
+        let service = NarrativePrecomputeService(
+            persistence: persistence,
+            engine: engine,
+            debounce: .milliseconds(50)
+        )
+
+        await service.requestRefreshIfNeeded(for: .month)
+        await service.drainPendingForTesting()
+
+        let context = persistence.container.viewContext
+        context.refreshAllObjects()
+        let req = NSFetchRequest<AIConversation>(entityName: "AIConversation")
+        req.predicate = NSPredicate(format: "kind == %@", AIConversation.Kind.narrative.rawValue)
+        let conv = try #require(try context.fetch(req).first)
+        let payload = try #require(conv.narrativePayload)
+        #expect(payload.entryCount == 6, "stream 期间新增 entry 后,payload metrics 必须用最终 count")
+        #expect(payload.sourceLatestEntryDate != nil, "stream 后最终 mostRecent 必须写入 payload")
+    }
+
     @Test func skipsWhenCacheFresh() async throws {
         let persistence = PersistenceController(inMemory: true)
         try seedEntries(count: 5, in: persistence)
@@ -379,6 +403,61 @@ private struct SlowNarrativeAIService: AIServiceProtocol {
                     return
                 }
                 continuation.yield(.chunk("[HEADLINE]\n晚风把日子放轻\n[BODY]\nbody after delay"))
+                continuation.yield(.done)
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+private final class EntryMutatingNarrativeAIService: AIServiceProtocol, @unchecked Sendable {
+    private let base = MockAIService()
+    private let persistence: PersistenceController
+
+    init(persistence: PersistenceController) {
+        self.persistence = persistence
+    }
+
+    func summarize(text: String) async -> String? { await base.summarize(text: text) }
+    func analyzeMood(text: String) async -> Double { await base.analyzeMood(text: text) }
+    func extractThemes(text: String) async -> [String] { await base.extractThemes(text: text) }
+    func judgeThemeAliases(
+        newTags: [String],
+        inventory: [ThemeAliasJudgeCandidate]
+    ) async -> [ThemeAliasJudgeMatch] {
+        await base.judgeThemeAliases(newTags: newTags, inventory: inventory)
+    }
+    func scanThemeAliasGroups(
+        candidates: [ThemeAliasJudgeCandidate]
+    ) async throws -> [ThemeAliasJudgeGroup] {
+        try await base.scanThemeAliasGroups(candidates: candidates)
+    }
+    func embed(text: String) async -> [Float]? { await base.embed(text: text) }
+    func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        base.askEvents(question: question, context: entries)
+    }
+    func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? {
+        await base.composeSuggestions(context: context)
+    }
+    func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] {
+        try await base.parseImportedDiaries(rawText: rawText)
+    }
+
+    func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                await persistence.container.performBackgroundTask { context in
+                    let entry = DiaryEntry(context: context)
+                    entry.id = UUID()
+                    entry.date = Date()
+                    entry.text = "Entry written while narrative stream is running."
+                    entry.moodValue = 0.5
+                    entry.themes = "工作"
+                    entry.wordCount = 8
+                    try? context.save()
+                }
+                continuation.yield(.chunk("[HEADLINE]\n晚风把日子放轻\n[BODY]\nbody after mid-stream write"))
                 continuation.yield(.done)
                 continuation.finish()
             }

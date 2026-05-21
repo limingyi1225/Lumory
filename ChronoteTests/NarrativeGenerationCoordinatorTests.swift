@@ -82,7 +82,7 @@ struct NarrativeGenerationCoordinatorTests {
         // 立刻 finish,但 runStream 内部仍要 await for-loop 结束 + persist guards;cancel 路径
         // 通过 streamGeneration bump 让 task 完成时不 clobber state,然后 cancelAll 走"有 task"
         // 路径清三件套。
-        coord.start(
+        await coord.start(
             range: .all,
             dateInterval: DateInterval(start: Date().addingTimeInterval(-86400), end: Date()),
             entryCount: 3,
@@ -101,7 +101,7 @@ struct NarrativeGenerationCoordinatorTests {
     @Test func start_sameRangeTwice_bumpsGenerationAndClearsStreamFailure() async {
         let coord = makeCoordinator()
         // 第一次 start
-        coord.start(
+        await coord.start(
             range: .month,
             dateInterval: DateInterval(start: Date().addingTimeInterval(-86400), end: Date()),
             entryCount: 3,
@@ -111,7 +111,7 @@ struct NarrativeGenerationCoordinatorTests {
         #expect(coord.generating.contains(.month))
 
         // 二次 start 同 range — 内部 cancel 前一个 task + bump generation
-        coord.start(
+        await coord.start(
             range: .month,
             dateInterval: DateInterval(start: Date().addingTimeInterval(-86400), end: Date()),
             entryCount: 3,

@@ -197,4 +197,15 @@ enum LumoryDateFormatters {
             return f
         }
     }
+
+    /// `.medium + .short`,按 `appLanguage` 锁定语言。AI 回顾 provenance 等 App 内语言敏感位置用。
+    static func fullDateTime(language: String) -> DateFormatter {
+        cachedFormatter(key: "fullDateTime-\(language)") {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: language)
+            f.dateStyle = .medium
+            f.timeStyle = .short
+            return f
+        }
+    }
 }

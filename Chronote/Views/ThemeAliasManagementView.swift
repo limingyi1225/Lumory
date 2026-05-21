@@ -591,37 +591,9 @@ struct ThemeAliasManagementView: View {
         name: String,
         undoPayload: ThemeManagementService.ThemeDeletionUndoPayload?
     ) {
-        let message = String(format: NSLocalizedString("已删除主题「%@」", comment: "Delete toast"), name)
-        guard let undoPayload else {
-            LumoryToastCenter.shared.show(message, severity: .success)
-            return
+        ThemeDeletionToast.show(name: name, undoPayload: undoPayload) {
+            InsightsResultCache.shared.clear()
         }
-        LumoryToastCenter.shared.show(
-            message,
-            severity: .success,
-            duration: EntryDeletionUndoService.undoWindow,
-            action: LumoryToastCenter.Action(
-                label: NSLocalizedString("撤销", comment: "Undo delete action")
-            ) {
-                Task { @MainActor in
-                    let outcome = await ThemeManagementService.shared.restoreDeletedTheme(undoPayload)
-                    if outcome.succeeded {
-                        #if canImport(UIKit)
-                        HapticManager.shared.notification(.success)
-                        #endif
-                        InsightsResultCache.shared.clear()
-                    } else {
-                        #if canImport(UIKit)
-                        HapticManager.shared.notification(.error)
-                        #endif
-                        LumoryToastCenter.shared.show(
-                            NSLocalizedString("撤销失败,请稍后再试。", comment: "Undo theme delete failed"),
-                            severity: .warning
-                        )
-                    }
-                }
-            }
-        )
     }
 
     private func reject(_ suggestion: PendingSuggestion) {

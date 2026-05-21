@@ -154,12 +154,23 @@ extension HomeView {
             // service 内部)。HomeView 拿 Result 以便失败 toast 能说明原因。
             let saveResult = await saveTask.value
             if case .saved(let entryID) = saveResult, finalMoodValue != initialMoodForSave {
-                await MainActor.run {
+                let didUpdateMood = await MainActor.run {
                     EntryCreationService.updateMood(
                         entryID: entryID,
                         moodValue: finalMoodValue,
                         viewContext: viewContext
                     )
+                }
+                if !didUpdateMood {
+                    await MainActor.run {
+                        #if canImport(UIKit)
+                        HapticManager.shared.notification(.warning)
+                        #endif
+                        LumoryToastCenter.shared.show(
+                            NSLocalizedString("已记录,但心情调整保存失败。", comment: "Mood update after save failed"),
+                            severity: .warning
+                        )
+                    }
                 }
             }
 
@@ -187,8 +198,11 @@ extension HomeView {
                         // 之前已经重置一次,但这里再清一次保证回滚态干净。
                         inputVM.moodEditTouchTick = 0
                         inputVM.moodEditReleasedAt = nil
-                        recordingVM.currentAudioFileName = audioToSend
-                        recordingVM.audioRecordings = audioToSend.map {
+                        let restorableAudio = audioToSend.flatMap { fileName in
+                            LumoryAttachmentPaths.existingAudioURL(fileName: fileName) == nil ? nil : fileName
+                        }
+                        recordingVM.currentAudioFileName = restorableAudio
+                        recordingVM.audioRecordings = restorableAudio.map {
                             [Recording(id: $0, fileName: $0, duration: audioDurationToRestore)]
                         } ?? []
                         photoVM.selectedImageItems = imagesToSend.map { HomePhotoViewModel.SelectedImage(data: $0) }
@@ -200,6 +214,9 @@ extension HomeView {
                     #if canImport(UIKit)
                     HapticManager.shared.notification(.error)
                     #endif
+                    if let failureError = saveResult.failureError {
+                        Log.error("[HomeView SendButton] save failed: \(failureError)", category: .ui)
+                    }
                     LumoryToastCenter.shared.show(
                         Self.sendFailureMessage(error: saveResult.failureError),
                         severity: .warning
@@ -307,13 +324,6 @@ extension HomeView {
             }
         }
 
-        let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !detail.isEmpty else {
-            return NSLocalizedString("发送失败,内容已恢复。请稍后再试。", comment: "Generic send failure toast")
-        }
-        return String(
-            format: NSLocalizedString("发送失败: %@。内容已恢复。", comment: "Send failure with reason"),
-            detail
-        )
+        return NSLocalizedString("发送失败,内容已恢复。请稍后再试。", comment: "Generic send failure toast")
     }
 }

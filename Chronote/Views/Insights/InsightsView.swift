@@ -297,39 +297,11 @@ struct InsightsView: View {
         name: String,
         undoPayload: ThemeManagementService.ThemeDeletionUndoPayload?
     ) {
-        let message = String(format: NSLocalizedString("已删除主题「%@」", comment: "Delete toast"), name)
-        guard let undoPayload else {
-            LumoryToastCenter.shared.show(message, severity: .success)
-            return
+        ThemeDeletionToast.show(name: name, undoPayload: undoPayload) {
+            InsightsResultCache.shared.clear()
+            dailyCellsCache.removeAll()
+            await reload()
         }
-        LumoryToastCenter.shared.show(
-            message,
-            severity: .success,
-            duration: EntryDeletionUndoService.undoWindow,
-            action: LumoryToastCenter.Action(
-                label: NSLocalizedString("撤销", comment: "Undo delete action")
-            ) {
-                Task { @MainActor in
-                    let outcome = await ThemeManagementService.shared.restoreDeletedTheme(undoPayload)
-                    if outcome.succeeded {
-                        #if canImport(UIKit)
-                        HapticManager.shared.notification(.success)
-                        #endif
-                        InsightsResultCache.shared.clear()
-                        dailyCellsCache.removeAll()
-                        await reload()
-                    } else {
-                        #if canImport(UIKit)
-                        HapticManager.shared.notification(.error)
-                        #endif
-                        LumoryToastCenter.shared.show(
-                            NSLocalizedString("撤销失败,请稍后再试。", comment: "Undo theme delete failed"),
-                            severity: .warning
-                        )
-                    }
-                }
-            }
-        )
     }
 
     // MARK: Range selector
@@ -571,43 +543,33 @@ struct InsightsView: View {
 
     private func warmRangeSnapshotsIfNeeded(excluding currentRange: TimeRange) {
         guard !didWarmRangeSnapshots else { return }
+        let allRanges = TimeRange.allCases
+        guard let currentIndex = allRanges.firstIndex(of: currentRange),
+              allRanges.indices.contains(currentIndex + 1) else { return }
+        let rangeToWarm = allRanges[currentIndex + 1]
+        guard InsightsResultCache.shared.snapshot(for: rangeToWarm) == nil else { return }
         didWarmRangeSnapshots = true
-        let rangesToWarm = TimeRange.allCases.filter {
-            $0 != currentRange && InsightsResultCache.shared.snapshot(for: $0) == nil
-        }
-        guard !rangesToWarm.isEmpty else { return }
 
         Task(priority: .utility) { @MainActor in
-            // (C-07 superreview 2026-05-19) 原实现一次性 3 range × 4 async let = 12 个并发
-            // `performBackgroundTask` 同时打到 store coordinator。本文件 :519 的 Fix #23 注释
-            // 明确警告"快速来回切 range 会让 N 个 bg fetch 同时跑完, 挤压 store coordinator"
-            // —— 新加的 warm 路径直接打那条警告的脸。改成 range 间串行 + 200ms 间隔,
-            // 让前景 reload() 始终有 priority,warm 只是 nice-to-have。
-            for (idx, rangeToWarm) in rangesToWarm.enumerated() {
-                if Task.isCancelled { return }
-                if idx > 0 {
-                    // 给当前 range 的前景 reload + UI 重渲一个呼吸空间,再 fire 下一组 fetch。
-                    try? await Task.sleep(nanoseconds: 200_000_000)
-                    if Task.isCancelled { return }
-                }
-                let interval = rangeToWarm.dateInterval
-                async let themesTask = engine.themes(in: interval, limit: 30)
-                async let cellsTask = fetchDailyCells(in: interval)
-                async let entryCountTask = engine.entryCount(in: interval)
-                async let mostRecentDateTask = engine.mostRecentEntryDate(in: interval)
-                let (warmedThemes, warmedCells, warmedEntryCount, warmedMostRecent) =
-                    await (themesTask, cellsTask, entryCountTask, mostRecentDateTask)
-                if Task.isCancelled { return }
-                InsightsResultCache.shared.update(
-                    .init(
-                        themes: warmedThemes,
-                        dailyCells: warmedCells,
-                        entryCount: warmedEntryCount,
-                        mostRecentEntryDate: warmedMostRecent
-                    ),
-                    for: rangeToWarm
-                )
-            }
+            // Warm only the next broader range. The old "warm every other range" path could do
+            // 12 background fetches on first Insights open, even when users never switch ranges.
+            let interval = rangeToWarm.dateInterval
+            async let themesTask = engine.themes(in: interval, limit: 30)
+            async let cellsTask = fetchDailyCells(in: interval)
+            async let entryCountTask = engine.entryCount(in: interval)
+            async let mostRecentDateTask = engine.mostRecentEntryDate(in: interval)
+            let (warmedThemes, warmedCells, warmedEntryCount, warmedMostRecent) =
+                await (themesTask, cellsTask, entryCountTask, mostRecentDateTask)
+            if Task.isCancelled { return }
+            InsightsResultCache.shared.update(
+                .init(
+                    themes: warmedThemes,
+                    dailyCells: warmedCells,
+                    entryCount: warmedEntryCount,
+                    mostRecentEntryDate: warmedMostRecent
+                ),
+                for: rangeToWarm
+            )
         }
     }
 

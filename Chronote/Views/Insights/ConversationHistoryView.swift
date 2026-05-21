@@ -24,19 +24,13 @@ struct ConversationHistoryView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var hSizeClass
 
-    @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \AIConversation.createdAt, ascending: false)]
-    ) private var conversations: FetchedResults<AIConversation>
+    @FetchRequest private var conversations: FetchedResults<AIConversation>
 
     @State private var pendingDeletion: AIConversation?
     @State private var selectedConversation: AIConversation?
 
-    /// 不在 init 里设 `_conversations` predicate(`AIConversation.kindRaw` 是 String 字段不一定有,
-    /// 不同 schema 维护成本高),改在内存里 filter — 历史记录通常 ≤ 200 条不构成性能问题。
     private var allRecords: [AIConversation] {
-        let all = Array(conversations)
-        guard let kind = filterKind else { return all }
-        return all.filter { $0.kindEnum == kind }
+        Array(conversations)
     }
 
     /// nav title 根据 filter 切换。
@@ -75,6 +69,14 @@ struct ConversationHistoryView: View {
 
     init(filterKind: AIConversation.Kind? = nil) {
         self.filterKind = filterKind
+        let request: NSFetchRequest<AIConversation> = AIConversation.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \AIConversation.createdAt, ascending: false)]
+        request.fetchBatchSize = 50
+        request.fetchLimit = 300
+        if let filterKind {
+            request.predicate = NSPredicate(format: "kind == %@", filterKind.rawValue)
+        }
+        _conversations = FetchRequest(fetchRequest: request)
     }
 
     var body: some View {
@@ -239,6 +241,9 @@ struct ConversationHistoryView: View {
 
 private struct ConversationGlassRow: View {
     let conversation: AIConversation
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
+        Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"
+    }()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -302,8 +307,13 @@ private struct ConversationGlassRow: View {
             return nil
         case .narrative:
             guard let pl = conversation.narrativePayload else { return nil }
-            let f = LumoryDateFormatters.monthDay
-            var s = "\(f.string(from: pl.rangeStart)) – \(f.string(from: pl.rangeEnd))"
+            var s: String
+            if pl.rangeKind == TimeRange.all.rawValue {
+                s = NSLocalizedString("全部时间", comment: "Time range all")
+            } else {
+                let f = LumoryDateFormatters.monthDay(language: appLanguage)
+                s = "\(f.string(from: pl.rangeStart)) – \(f.string(from: pl.rangeEnd))"
+            }
             if let count = pl.entryCount, count > 0 {
                 s += " · "
                 s += String(format: NSLocalizedString("%d 篇", comment: "Entry count short"), count)
@@ -332,6 +342,9 @@ private struct ConversationGlassRow: View {
 
 private struct ConversationDetailView: View {
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
+        Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"
+    }()
     let conversation: AIConversation
 
     var body: some View {
@@ -400,7 +413,7 @@ private struct ConversationDetailView: View {
 
     private var createdAtLabel: String {
         guard let date = conversation.createdAt else { return "" }
-        return LumoryDateFormatters.fullDateTime.string(from: date)
+        return LumoryDateFormatters.fullDateTime(language: appLanguage).string(from: date)
     }
 
     @ViewBuilder
@@ -472,7 +485,7 @@ private struct ConversationDetailView: View {
             HStack(spacing: 6) {
                 Image(systemName: "calendar")
                     .font(.caption2)
-                Text(rangeLabel(start: payload.rangeStart, end: payload.rangeEnd))
+                Text(rangeLabel(for: payload))
                     .font(.caption)
                 if let count = payload.entryCount, count > 0 {
                     Text("·")
@@ -515,9 +528,12 @@ private struct ConversationDetailView: View {
         }
     }
 
-    private func rangeLabel(start: Date, end: Date) -> String {
-        let f = LumoryDateFormatters.monthDay
-        return "\(f.string(from: start)) – \(f.string(from: end))"
+    private func rangeLabel(for payload: AIConversation.NarrativePayload) -> String {
+        if payload.rangeKind == TimeRange.all.rawValue {
+            return NSLocalizedString("全部时间", comment: "Time range all")
+        }
+        let f = LumoryDateFormatters.monthDay(language: appLanguage)
+        return "\(f.string(from: payload.rangeStart)) – \(f.string(from: payload.rangeEnd))"
     }
 
     /// 详情页右上角分享按钮的导出文本(纯文本,不带 markdown)。

@@ -195,24 +195,6 @@ class DiaryExportService {
         }
     }
 
-    /// Heuristic: maps a write error to "disk full" for the few codes iOS uses.
-    private static func isDiskFull(_ error: Error) -> Bool {
-        let ns = error as NSError
-        if ns.domain == NSCocoaErrorDomain && ns.code == NSFileWriteOutOfSpaceError {
-            return true
-        }
-        if ns.domain == NSPOSIXErrorDomain && ns.code == Int(ENOSPC) {
-            return true
-        }
-        // Underlying POSIX error wrapped in Cocoa error.
-        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
-            if underlying.domain == NSPOSIXErrorDomain && underlying.code == Int(ENOSPC) {
-                return true
-            }
-        }
-        return false
-    }
-
     /// Generates a date string suitable for file names.
     /// (2026-05-15 superreview-4 P2)收编到 `LumoryDateFormatters.fileTimestamp`,跟 view-layer
     /// 同 idiom(共享 cache,POSIX 锁定数字系)。

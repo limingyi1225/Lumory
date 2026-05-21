@@ -603,6 +603,41 @@ final class ThemeAliasResolver: ObservableObject {
         Log.info("[ThemeAliasResolver] purgePending: 清掉 \(before - store.pending.count) 条命中标签的 pending", category: .persistence)
     }
 
+    func pendingSuggestions(matchingLowercasedLabels labels: Set<String>) -> [PendingSuggestion] {
+        guard !labels.isEmpty else { return [] }
+        return store.pending.filter { suggestion in
+            labels.contains(suggestion.newTag.lowercased())
+                || labels.contains(suggestion.canonicalGuess.lowercased())
+        }
+    }
+
+    func restorePending(_ suggestions: [PendingSuggestion]) {
+        guard !suggestions.isEmpty else { return }
+        objectWillChange.send()
+        store.update { state in
+            for suggestion in suggestions {
+                let pairKey = ThemeAliasStore.pairKey(
+                    suggestion.newTag.lowercased(),
+                    suggestion.canonicalGuess.lowercased()
+                )
+                let alreadyExists = state.pending.contains { existing in
+                    existing.id == suggestion.id
+                        || ThemeAliasStore.pairKey(
+                            existing.newTag.lowercased(),
+                            existing.canonicalGuess.lowercased()
+                        ) == pairKey
+                }
+                if !alreadyExists {
+                    state.pending.append(suggestion)
+                }
+            }
+            let maxPending = 200
+            if state.pending.count > maxPending {
+                state.pending.removeFirst(state.pending.count - maxPending)
+            }
+        }
+    }
+
     /// 删除日记后调用 —— 扫所有 pending,把"newTag/canonicalGuess 都不在当前
     /// entry.themes inventory 里"的建议清掉(说明触发它的日记已被删,suggestion 是孤儿)。
     /// **保守策略**:只在两端都不在 inventory 时清,任一端仍存在则保留(可能在别的 entry 里)。
@@ -688,12 +723,10 @@ final class ThemeAliasResolver: ObservableObject {
             var labels = Set<String>()
             for row in rows {
                 guard let csv = row["themes"] as? String, !csv.isEmpty else { continue }
-                // 复刻 DiaryEntry.themeArray 的 split 逻辑(CSV 用 `,` 分隔,trim,丢空)。
                 // (megareview P1 #1)用 ThemeKey.make 而非裸 `.lowercased()` —— 跟 store 反向索引
                 // 同归一化,日记 NFD 内容 + pending NFC 输入(或反向)都能在 cleanup 时正确判定。
-                for piece in csv.split(separator: ",") {
-                    let tag = piece.trimmingCharacters(in: .whitespaces)
-                    if !tag.isEmpty { labels.insert(ThemeKey.make(tag)) }
+                for tag in DiaryEntry.parseThemesCSV(csv) {
+                    labels.insert(ThemeKey.make(tag))
                 }
             }
             return labels

@@ -222,14 +222,14 @@ struct OneClickRebuildRow: View {
     /// 关键:**只 cancel 当前 service 不够** — runAll 是 sequential await chain,前一阶段返
     /// 后立刻起下一阶段。设 oneClickStopRequested=true 让 runAll 在阶段间隙 short-circuit。
     /// 不主动翻 stage=.idle:runAll 内部 stop check 会自己翻,避免跟 service progress publish 的
-    /// 终态写入 race(service.cancel() 不清 runningRunID,publish(...isRunning:false) 仍会到达)。
+    /// 终态写入抢状态。
     private func stopAll() {
         oneClickStopRequested = true
         switch stage {
         case .themes:
-            themeService.cancel()
+            Task { await themeService.cancel() }
         case .embeddings:
-            embeddingService.cancel()
+            Task { await embeddingService.cancel() }
         case .suggestions:
             // suggestions 阶段是单次 LLM call,没 task handle;无法 cancel,只能等它自己结束。
             // 设 stopRequested 后 runAll 跑完该 await 立刻 short-circuit 出 .done/.idle。
@@ -435,7 +435,7 @@ struct EmbeddingBackfillRow: View {
                         #if canImport(UIKit)
                         HapticManager.shared.impact(.light)
                         #endif
-                        service.cancel()
+                        Task { await service.cancel() }
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "stop.fill")
@@ -528,7 +528,7 @@ struct ThemeBackfillRow: View {
                         #if canImport(UIKit)
                         HapticManager.shared.impact(.light)
                         #endif
-                        service.cancel()
+                        Task { await service.cancel() }
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "stop.fill")

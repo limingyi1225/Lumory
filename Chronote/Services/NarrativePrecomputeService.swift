@@ -229,10 +229,9 @@ actor NarrativePrecomputeService {
         }
 
         // **P1 fix (2026-05-13 superreview round 2)**:stream 期间(30-60s)用户可能新增/删除
-        // 日记。line 96 的 count + line 108 的 mostRecent 已过期。同时 line 93 拍照的 interval
-        // 也是 stream 开始时的快照(`range.dateInterval` 的 `now = Date()`),30-60s 后早过了 →
-        // 用户在 stream 期间写的 fresh entry(date > 老 interval.end)不被算入 → 写盘后立即
-        // isStale → 下次 debounce 又重生 → 多烧一次 API。重新算 finalInterval 拿真最终值。
+        // 日记。前面的 count + mostRecent 是 stream 开始前的快照,interval 也是旧的
+        // `range.dateInterval`。若新写日记触发 generation bump 不及时,用最终区间和最终 entry
+        // metrics 写 payload,避免写盘后马上被判 stale 而重复烧一次 API。
         let finalInterval = range.dateInterval
         let finalCount = await engine.entryCount(in: finalInterval)
         let finalMostRecent = await engine.mostRecentEntryDate(in: finalInterval)

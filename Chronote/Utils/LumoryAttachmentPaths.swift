@@ -57,10 +57,6 @@ enum LumoryAttachmentPaths {
         existingURL(fileName: fileName, kind: .audio)
     }
 
-    static func existingImageURL(fileName: String, iCloudDirectoryOverride: URL? = nil) -> URL? {
-        existingURL(fileName: fileName, kind: .image, iCloudDirectoryOverride: iCloudDirectoryOverride)
-    }
-
     @discardableResult
     static func ensureLocalDirectory(for kind: Kind) throws -> URL {
         let directory = localDirectory(for: kind)

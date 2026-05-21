@@ -39,9 +39,8 @@ struct DiaryEntryRow: View {
                             // 标题加载中 - 显示shimmer动画
                             summaryLoadingView
                         } else {
-                            // F9 — entry.summary 字号语义化(Dynamic Type 友好,跟 4 处 callsite 统一)
                             Text(entry.displayText)
-                                .font(.callout.weight(.medium))
+                                .font(LumoryFonts.diarySummaryRow)
                                 .foregroundColor(.primary)
                                 .lineLimit(2)
                                 .multilineTextAlignment(.leading)

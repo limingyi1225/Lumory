@@ -154,15 +154,20 @@ final class ScreenshotTests: XCTestCase {
         usleep(1_000_000)
 
         let askPast = app.buttons["insightsAskPastPresetChip0"]
+        let askPastHero = app.buttons["insightsAskPastHeroEntry"]
         for _ in 0..<6 {
-            if askPast.exists, askPast.isHittable { break }
+            if (askPast.exists && askPast.isHittable) || (askPastHero.exists && askPastHero.isHittable) { break }
             scrollView.swipeUp()
             usleep(400_000)
         }
-        XCTAssertTrue(askPast.waitForExistence(timeout: 5), "AskPast preset chip 找不到")
-        askPast.tap()
+        if askPast.exists, askPast.isHittable {
+            askPast.tap()
+        } else {
+            XCTAssertTrue(askPastHero.waitForExistence(timeout: 5), "AskPast 入口找不到")
+            askPastHero.tap()
+        }
 
-        XCTAssertTrue(app.otherElements["askPastRoot"].waitForExistence(timeout: 5), "AskPast sheet 未打开")
+        XCTAssertTrue(app.descendants(matching: .any)["askPastRoot"].waitForExistence(timeout: 5), "AskPast sheet 未打开")
         usleep(6_000_000)
         snapshot(app, named: "05-AskPast")
     }

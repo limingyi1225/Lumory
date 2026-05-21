@@ -44,6 +44,7 @@ final class ThemeManagementService: ObservableObject {
         let originalThemesByEntryID: [UUID: [String]]
         let aliasGroupCanonical: String?
         let aliasGroupAliases: [String]
+        let removedPending: [PendingSuggestion]
     }
 
     /// 删除主题 + 所有别名,从所有 entry 的 themes CSV 抹掉。
@@ -119,15 +120,17 @@ final class ThemeManagementService: ObservableObject {
             return DeletionOutcome(affected: 0, succeeded: false, undoPayload: nil)
         }
 
+        // 同步从 alias resolver 删 group(用户已经决定它彻底没了,后续不应再被建议合并)。
+        // deleteGroup 内部已经清理 pending(matching group labels),codex P2 fix。
+        let removedPending = resolver.pendingSuggestions(matchingLowercasedLabels: tagsToRemove)
         let undoPayload = ThemeDeletionUndoPayload(
             canonical: canonical,
             originalThemesByEntryID: outcome.originals,
             aliasGroupCanonical: aliasGroupCanonical,
-            aliasGroupAliases: aliasGroupAliases
+            aliasGroupAliases: aliasGroupAliases,
+            removedPending: removedPending
         )
 
-        // 同步从 alias resolver 删 group(用户已经决定它彻底没了,后续不应再被建议合并)。
-        // deleteGroup 内部已经清理 pending(matching group labels),codex P2 fix。
         if let exactKey = resolver.groups.keys.first(where: { $0.lowercased() == canonLower }) {
             resolver.deleteGroup(canonical: exactKey)
         }
@@ -188,6 +191,7 @@ final class ThemeManagementService: ObservableObject {
         if let aliasGroupCanonical = payload.aliasGroupCanonical {
             resolver.restoreGroup(canonical: aliasGroupCanonical, aliases: payload.aliasGroupAliases)
         }
+        resolver.restorePending(payload.removedPending)
         NotificationCenter.default.post(name: .themeAliasMapDidChange, object: nil)
         Log.info("[ThemeManagement] restored theme \(payload.canonical), affected entries: \(restored.affected)", category: .persistence)
         return DeletionOutcome(affected: restored.affected, succeeded: true, undoPayload: nil)

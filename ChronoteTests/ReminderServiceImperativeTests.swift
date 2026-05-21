@@ -33,6 +33,7 @@ final class MockReminderNotificationCenter: ReminderNotificationCenter {
     var requestAuthorizationError: Error? = nil
     /// `add` 失败模拟。
     var addError: Error? = nil
+    var addDelayNanos: UInt64 = 0
 
     // 录制调用
     private(set) var pendingRequests: [UNNotificationRequest] = []
@@ -44,6 +45,9 @@ final class MockReminderNotificationCenter: ReminderNotificationCenter {
     private(set) var removedDeliveredIDs: [[String]] = []
     private(set) var authorizationRequests: [UNAuthorizationOptions] = []
     private(set) var authorizationStatusQueries: Int = 0
+    private var addStartedCount = 0
+    private var addStartedWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var removedPendingWaiters: [(String, CheckedContinuation<Void, Never>)] = []
 
     func currentAuthorizationStatus() async -> UNAuthorizationStatus {
         authorizationStatusQueries += 1
@@ -63,6 +67,7 @@ final class MockReminderNotificationCenter: ReminderNotificationCenter {
     func removePendingNotificationRequests(withIdentifiers ids: [String]) {
         removedPendingIDs.append(ids)
         pendingRequests.removeAll { ids.contains($0.identifier) }
+        resumeRemovedPendingWaiters()
     }
 
     func deliveredNotificationIdentifiers() async -> [String] {
@@ -75,6 +80,11 @@ final class MockReminderNotificationCenter: ReminderNotificationCenter {
     }
 
     func add(_ request: UNNotificationRequest) async throws {
+        addStartedCount += 1
+        resumeAddStartedWaiters()
+        if addDelayNanos > 0 {
+            try? await Task.sleep(nanoseconds: addDelayNanos)
+        }
         addedRequests.append(request)
         if let err = addError { throw err }
         pendingRequests.append(request)
@@ -89,6 +99,45 @@ final class MockReminderNotificationCenter: ReminderNotificationCenter {
             pendingRequests.append(req)
         }
     }
+
+    func waitUntilAddStarted(count target: Int) async {
+        if addStartedCount >= target { return }
+        await withCheckedContinuation { continuation in
+            addStartedWaiters.append((target, continuation))
+        }
+    }
+
+    func waitUntilRemovedPending(containing needle: String) async {
+        if removedPendingIDs.flatMap({ $0 }).contains(where: { $0.contains(needle) }) { return }
+        await withCheckedContinuation { continuation in
+            removedPendingWaiters.append((needle, continuation))
+        }
+    }
+
+    private func resumeAddStartedWaiters() {
+        var remaining: [(Int, CheckedContinuation<Void, Never>)] = []
+        for waiter in addStartedWaiters {
+            if addStartedCount >= waiter.0 {
+                waiter.1.resume()
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        addStartedWaiters = remaining
+    }
+
+    private func resumeRemovedPendingWaiters() {
+        let removed = removedPendingIDs.flatMap { $0 }
+        var remaining: [(String, CheckedContinuation<Void, Never>)] = []
+        for waiter in removedPendingWaiters {
+            if removed.contains(where: { $0.contains(waiter.0) }) {
+                waiter.1.resume()
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        removedPendingWaiters = remaining
+    }
 }
 
 @MainActor
@@ -101,15 +150,40 @@ struct ReminderServiceImperativeTests {
 
     private func makeService(
         center: MockReminderNotificationCenter,
-        isEnabled: Bool = false
+        isEnabled: Bool = false,
+        frequency: ReminderFrequency = .weekly,
+        anchorDate: Date? = nil,
+        hour: Int = 21,
+        minute: Int = 0,
+        dateProvider: @escaping @MainActor @Sendable () -> Date = { Date() },
+        lastEntryDateProvider: (@MainActor @Sendable () async -> Date?)? = nil
     ) -> ReminderService {
         let defaults = isolatedDefaultsForReminder()
+        defaults.set(frequency.rawValue, forKey: "lumory.reminder.frequency")
+        defaults.set(hour, forKey: "lumory.reminder.hour")
+        defaults.set(minute, forKey: "lumory.reminder.minute")
         if isEnabled {
             defaults.set(true, forKey: "lumory.reminder.enabled")
             // anchor 必须 persisted 让 isEnabled load 时 anchorIsPersisted=true
-            defaults.set(Date(), forKey: "lumory.reminder.anchorDate")
+            defaults.set(anchorDate ?? dateProvider(), forKey: "lumory.reminder.anchorDate")
         }
-        return ReminderService(notificationCenter: center, defaults: defaults)
+        return ReminderService(
+            notificationCenter: center,
+            defaults: defaults,
+            dateProvider: dateProvider,
+            lastEntryDateProvider: lastEntryDateProvider
+        )
+    }
+
+    private func makeDate(year: Int, month: Int, day: Int, hour: Int = 0, minute: Int = 0) -> Date {
+        var comps = DateComponents()
+        comps.calendar = Calendar.current
+        comps.year = year
+        comps.month = month
+        comps.day = day
+        comps.hour = hour
+        comps.minute = minute
+        return comps.date!
     }
 
     // MARK: - refreshAuthorizationStatus
@@ -219,5 +293,81 @@ struct ReminderServiceImperativeTests {
                 "无 lumory prefix 的 pending 不应触发 removePendingNotificationRequests")
         #expect(center.removedDeliveredIDs.isEmpty,
                 "无 lumory prefix 的 delivered 不应触发 removeDeliveredNotifications")
+    }
+
+    @Test func requestReschedule_enabledUnwrittenCycle_schedulesTodayAndFallbacks() async {
+        let center = MockReminderNotificationCenter()
+        center.authorizationStatusToReturn = .authorized
+        let now = makeDate(year: 2026, month: 4, day: 7, hour: 10)
+        let anchor = makeDate(year: 2026, month: 4, day: 1)
+        let service = makeService(
+            center: center,
+            isEnabled: true,
+            frequency: .weekly,
+            anchorDate: anchor,
+            hour: 21,
+            minute: 0,
+            dateProvider: { now },
+            lastEntryDateProvider: { nil }
+        )
+
+        service.requestReschedule()
+        await service.awaitPendingRescheduleTaskForTesting()
+
+        #expect(center.addedRequests.count == 9, "today one-shot + 8 future fallbacks")
+        #expect(center.addedRequests.contains { $0.identifier.contains("lumory.reminder.today") })
+        #expect(center.addedRequests.filter { $0.identifier.contains("lumory.reminder.cycleEnd") }.count == 8)
+    }
+
+    @Test func requestReschedule_currentCycleAlreadyWritten_skipsTodayAndSchedulesFallbacks() async {
+        let center = MockReminderNotificationCenter()
+        center.authorizationStatusToReturn = .authorized
+        let now = makeDate(year: 2026, month: 4, day: 7, hour: 10)
+        let anchor = makeDate(year: 2026, month: 4, day: 1)
+        let wroteToday = makeDate(year: 2026, month: 4, day: 7, hour: 9)
+        let service = makeService(
+            center: center,
+            isEnabled: true,
+            frequency: .weekly,
+            anchorDate: anchor,
+            hour: 21,
+            minute: 0,
+            dateProvider: { now },
+            lastEntryDateProvider: { wroteToday }
+        )
+
+        service.requestReschedule()
+        await service.awaitPendingRescheduleTaskForTesting()
+
+        #expect(center.addedRequests.count == 8, "fulfilled current cycle should not schedule today's reminder")
+        #expect(!center.addedRequests.contains { $0.identifier.contains("lumory.reminder.today") })
+    }
+
+    @Test func requestReschedule_staleGenerationRemovesOldPendingRequests() async {
+        let center = MockReminderNotificationCenter()
+        center.authorizationStatusToReturn = .authorized
+        center.addDelayNanos = 20_000_000
+        let now = makeDate(year: 2026, month: 4, day: 7, hour: 10)
+        let anchor = makeDate(year: 2026, month: 4, day: 1)
+        let service = makeService(
+            center: center,
+            isEnabled: true,
+            frequency: .weekly,
+            anchorDate: anchor,
+            hour: 21,
+            minute: 0,
+            dateProvider: { now },
+            lastEntryDateProvider: { nil }
+        )
+
+        service.requestReschedule()
+        await center.waitUntilAddStarted(count: 1)
+        service.updateFrequency(.daily)
+        await service.awaitPendingRescheduleTaskForTesting()
+        await center.waitUntilRemovedPending(containing: ".gen1")
+
+        #expect(center.addedRequests.contains { $0.identifier.contains(".gen1") })
+        #expect(center.removedPendingIDs.flatMap { $0 }.contains { $0.contains(".gen1") })
+        #expect(!center.pendingRequests.contains { $0.identifier.contains(".gen1") })
     }
 }

@@ -1,5 +1,6 @@
 const path = require('path');
 const crypto = require('crypto');
+const net = require('net');
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const express = require('express');
@@ -194,12 +195,85 @@ const installKey = (req) => {
   const id = req.get('x-install-id');
   const normalized = normalizeInstallId(id);
   if (normalized) return 'install:' + normalized;
-  return 'ip:' + req.ip;
+  return 'ip:' + clientIPKey(req);
 };
 
 function normalizeInstallId(id) {
   if (typeof id === 'string' && /^[A-F0-9-]{36}$/i.test(id)) return id.toLowerCase();
   return null;
+}
+
+function upstreamStatusForError(err) {
+  if (err.response?.status) return err.response.status;
+  if (['ECONNABORTED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'].includes(err.code)) {
+    return 504;
+  }
+  return 500;
+}
+
+function ipv6Bytes(ip) {
+  let normalized = ip.toLowerCase();
+  if (normalized.includes('%')) {
+    normalized = normalized.split('%')[0];
+  }
+
+  const parts = normalized.split('::');
+  if (parts.length > 2) return null;
+
+  const parseSide = (side) => {
+    if (!side) return [];
+    const groups = [];
+    for (const raw of side.split(':')) {
+      if (!raw) return null;
+      if (raw.includes('.')) {
+        if (net.isIP(raw) !== 4) return null;
+        const octets = raw.split('.').map(Number);
+        groups.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]);
+      } else {
+        const value = Number.parseInt(raw, 16);
+        if (!Number.isInteger(value) || value < 0 || value > 0xffff) return null;
+        groups.push(value);
+      }
+    }
+    return groups;
+  };
+
+  const left = parseSide(parts[0]);
+  const right = parts.length === 2 ? parseSide(parts[1]) : [];
+  if (!left || !right) return null;
+  const missing = 8 - left.length - right.length;
+  if (missing < 0 || (parts.length === 1 && missing !== 0)) return null;
+  const groups = [...left, ...Array(missing).fill(0), ...right];
+  if (groups.length !== 8) return null;
+
+  const bytes = [];
+  for (const group of groups) {
+    bytes.push((group >> 8) & 0xff, group & 0xff);
+  }
+  return bytes;
+}
+
+function clientIPKey(req) {
+  const ip = req.ip || req.socket?.remoteAddress || '';
+  if (net.isIP(ip) !== 6) return ip;
+  const bytes = ipv6Bytes(ip);
+  if (!bytes) return ip;
+  const isIPv4Mapped =
+    bytes.slice(0, 10).every((byte) => byte === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
+  if (isIPv4Mapped) {
+    return bytes.slice(12, 16).join('.');
+  }
+  const isLoopbackOrUnspecified =
+    bytes.slice(0, 15).every((byte) => byte === 0) && (bytes[15] === 0 || bytes[15] === 1);
+  if (isLoopbackOrUnspecified) {
+    return ip;
+  }
+  // express-rate-limit 7.4.x does not expose ipKeyGenerator. Collapse IPv6 to
+  // /56 so host-bit rotation inside the same client allocation shares one bucket.
+  return `ipv6:${bytes
+    .slice(0, 7)
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')}/56`;
 }
 
 // 速率限制。分端点 + per-install (`X-Install-Id`) 按"单用户"计额。
@@ -246,6 +320,7 @@ const transcriptionsIPLimiter = rateLimit({
   max: 60,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
+  keyGenerator: clientIPKey,
   message: { error: 'rate_limited_global' },
 });
 
@@ -258,6 +333,7 @@ const globalIPLimiter = rateLimit({
   max: GLOBAL_IP_LIMIT_MAX,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
+  keyGenerator: clientIPKey,
   message: { error: 'rate_limited_global' },
 });
 
@@ -282,7 +358,29 @@ app.get('/health', (_req, res) => {
 // 顺序固定:pino-http(已挂) → /api requireAppSecret → express.json → globalIPLimiter → endpoint limiters → handlers。
 // transcriptions 路由用 multer multipart,不受 express.json 影响(json parser 只在
 // Content-Type: application/json 时激活)。
-app.use('/api', requireAppSecret, express.json({ limit: '1mb' }), globalIPLimiter);
+function jsonBodyErrorHandler(err, req, res, next) {
+  if (!err) {
+    next();
+    return;
+  }
+  if (err.type === 'entity.too.large') {
+    res.status(413).json({ error: 'request_body_too_large' });
+    return;
+  }
+  if (err instanceof SyntaxError && 'body' in err) {
+    res.status(400).json({ error: 'invalid_json' });
+    return;
+  }
+  next(err);
+}
+
+app.use(
+  '/api',
+  requireAppSecret,
+  express.json({ limit: '1mb' }),
+  jsonBodyErrorHandler,
+  globalIPLimiter
+);
 app.use('/api/openai/chat/completions', chatLimiter);
 app.use('/api/openai/embeddings', embeddingsLimiter);
 // 转写挂双层:per-install 紧 + per-IP 独立兜底。注意挂的顺序在 multer 之前,
@@ -555,7 +653,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       req.log.info('non-streaming chat request cancelled');
       return;
     }
-    const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
+    const status = upstreamStatusForError(err);
     req.log.error({ err: safeUpstreamError(err), status }, 'OpenAI request failed');
     if (!res.headersSent) {
       const retryAfter = err.response?.headers?.['retry-after'];
@@ -609,7 +707,7 @@ app.post('/api/openai/embeddings', async (req, res) => {
       req.log.info('embeddings request cancelled');
       return;
     }
-    const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
+    const status = upstreamStatusForError(err);
     req.log.error({ err: safeUpstreamError(err), status }, 'OpenAI embeddings request failed');
     if (!res.headersSent) {
       const retryAfter = err.response?.headers?.['retry-after'];
@@ -726,7 +824,7 @@ app.post('/api/openai/audio/transcriptions', (req, res) => {
         req.log.info('transcription request cancelled');
         return;
       }
-      const status = err.response?.status || (err.code === 'ECONNABORTED' ? 504 : 500);
+      const status = upstreamStatusForError(err);
       req.log.error({ err: safeUpstreamError(err), status }, 'OpenAI transcription request failed');
       if (!res.headersSent) {
         const retryAfter = err.response?.headers?.['retry-after'];
@@ -859,5 +957,7 @@ module.exports = {
   sanitizeUpstreamError,
   sseFrameHasDone,
   normalizeInstallId,
+  clientIPKey,
+  upstreamStatusForError,
   startServer,
 };

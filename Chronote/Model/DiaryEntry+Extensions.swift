@@ -54,8 +54,15 @@ extension DiaryEntry {
 extension DiaryEntry {
     /// 解析 themes CSV → [String]
     var themeArray: [String] {
-        guard let raw = themes, !raw.isEmpty else { return [] }
-        return raw.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        Self.parseThemesCSV(themes)
+    }
+
+    nonisolated static func parseThemesCSV(_ csv: String?) -> [String] {
+        guard let csv, !csv.isEmpty else { return [] }
+        return csv
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 
     /// 覆盖主题标签（去重、去空、最多 6 个）。
@@ -267,20 +274,6 @@ extension DiaryEntry {
         try LumoryAttachmentPaths.deleteAllCopies(fileName: fileName, kind: .image)
     }
 
-    /// Gets the proper URL for image storage (iCloud or local)
-    private static func getImageURL(for fileName: String) -> URL {
-        // Try to use iCloud container
-        if let imagesURL = LumoryAttachmentPaths.iCloudDirectory(for: .image) {
-            Log.info("[DiaryEntry] Using iCloud URL for image: \(imagesURL.path)", category: .persistence)
-            return imagesURL.appendingPathComponent(fileName)
-        } else {
-            // Fallback to local documents directory
-            let imagesURL = LumoryAttachmentPaths.localDirectory(for: .image)
-            Log.info("[DiaryEntry] iCloud not available, using local URL for image: \(imagesURL.path)", category: .persistence)
-            return imagesURL.appendingPathComponent(fileName)
-        }
-    }
-
     /// (2026-05-15 megareview OPT-HIGH-2)iCloud ubiquity container URL 缓存一次。
     /// `FileManager.url(forUbiquityContainerIdentifier:)` 是 IPC 调用,每次 ~10ms;
     /// 这个 path 进程内永远不变,thumbnail miss 时反复问让 fast-scroll 看见"placeholder 一闪再出图"。
@@ -337,18 +330,6 @@ extension DiaryEntry {
             }
             return results.compactMap { $0 }
         }
-    }
-
-    /// 删除此 entry 绑定的音频文件。覆盖 iCloud / LumoryAudio / 老扁平 Documents 三处——
-    /// 同一个 fileName 可能在多处都有副本（iCloud 下载缓存 + 本地原始），漏删任意一处都会
-    /// 留成孤儿 .m4a 文件在用户的磁盘/iCloud 上累积。
-    ///
-    /// **必须在 `viewContext.delete(entry)` 之前调用**——managed object 被 delete 之后
-    /// `audioFileName` 的读取会 crash 或返回脏数据。三处删除点（HomeView.deleteEntry /
-    /// DiaryDetailView delete button / SettingsView.deleteAllEntries）都调用本方法。
-    func deleteAudioFile() {
-        guard let fileName = audioFileName, !fileName.isEmpty else { return }
-        DiaryEntry.deleteAudioFromDocuments(fileName)
     }
 
     static func deleteAudioFromDocuments(_ fileName: String) {

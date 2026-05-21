@@ -18,6 +18,8 @@ const {
   sanitizeUpstreamError,
   sseFrameHasDone,
   normalizeInstallId,
+  clientIPKey,
+  upstreamStatusForError,
 } = require('./index');
 
 function listen(app) {
@@ -52,6 +54,41 @@ function postJSON(server, path, body, headers = {}) {
       (res) => {
         res.resume();
         res.on('end', () => resolve(res.statusCode));
+      }
+    );
+    req.on('error', reject);
+    req.end(payload);
+  });
+}
+
+function rawPost(server, path, payload, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const { port } = server.address();
+    const req = http.request(
+      {
+        method: 'POST',
+        host: '127.0.0.1',
+        port,
+        path,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+          ...headers,
+        },
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.on('end', () =>
+          resolve({
+            status: res.statusCode,
+            contentType: res.headers['content-type'],
+            body,
+          })
+        );
       }
     );
     req.on('error', reject);
@@ -135,8 +172,31 @@ test('normalizeInstallId lowercases valid UUIDs', () => {
   );
 });
 
+test('clientIPKey collapses IPv6 host-bit rotation to /56', () => {
+  const a = clientIPKey({ ip: '2001:db8:77:ab01::1' });
+  const b = clientIPKey({ ip: '2001:db8:77:abff::2' });
+  const c = clientIPKey({ ip: '2001:db8:77:ac00::1' });
+  assert.equal(a, b);
+  assert.notEqual(a, c);
+});
+
+test('clientIPKey preserves mapped IPv4 and loopback addresses', () => {
+  assert.equal(clientIPKey({ ip: '::ffff:1.2.3.4' }), '1.2.3.4');
+  assert.equal(clientIPKey({ ip: '::ffff:9.9.9.9' }), '9.9.9.9');
+  assert.equal(clientIPKey({ ip: '::1' }), '::1');
+  assert.equal(clientIPKey({ ip: '::' }), '::');
+});
+
 test('sanitizeUpstreamError has non-prod fallback code', () => {
   assert.deepEqual(sanitizeUpstreamError({}, 500), { code: 'upstream_error', status: 500 });
+});
+
+test('upstream network errors map to gateway timeout', () => {
+  for (const code of ['ECONNABORTED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN']) {
+    assert.equal(upstreamStatusForError({ code }), 504);
+  }
+  assert.equal(upstreamStatusForError({ code: 'ECONNREFUSED' }), 500);
+  assert.equal(upstreamStatusForError({ response: { status: 429 }, code: 'ECONNRESET' }), 429);
 });
 
 test('sseFrameHasDone ignores [DONE] inside streamed model content', () => {
@@ -168,6 +228,54 @@ test('missing app secret requests do not consume authenticated global quota', as
     }
   );
   assert.equal(authenticatedStatus, 400);
+});
+
+test('invalid JSON and oversized JSON return JSON errors', async (t) => {
+  const server = await listen(app);
+  t.after(() => close(server));
+
+  const invalid = await rawPost(server, '/api/openai/embeddings', '{bad json', {
+    'X-App-Secret': process.env.APP_SHARED_SECRET,
+    'X-Forwarded-For': '10.10.30.1',
+  });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.contentType, /^application\/json/);
+  assert.deepEqual(JSON.parse(invalid.body), { error: 'invalid_json' });
+
+  const tooLarge = await rawPost(
+    server,
+    '/api/openai/embeddings',
+    JSON.stringify({ input: 'x'.repeat(1024 * 1024 + 1) }),
+    {
+      'X-App-Secret': process.env.APP_SHARED_SECRET,
+      'X-Forwarded-For': '10.10.30.2',
+    }
+  );
+  assert.equal(tooLarge.status, 413);
+  assert.match(tooLarge.contentType, /^application\/json/);
+  assert.deepEqual(JSON.parse(tooLarge.body), { error: 'request_body_too_large' });
+});
+
+test('global IP limiter groups IPv6 clients by /56', async (t) => {
+  const server = await listen(app);
+  t.after(() => close(server));
+
+  const statuses = [];
+  for (let i = 1; i <= 4; i += 1) {
+    statuses.push(
+      await postJSON(
+        server,
+        '/api/openai/embeddings',
+        {},
+        {
+          'X-App-Secret': process.env.APP_SHARED_SECRET,
+          'X-Forwarded-For': `2001:db8:77:ab0${i}::1`,
+        }
+      )
+    );
+  }
+
+  assert.deepEqual(statuses, [400, 400, 400, 429]);
 });
 
 test('app secret byte length mismatch returns unauthorized', async (t) => {

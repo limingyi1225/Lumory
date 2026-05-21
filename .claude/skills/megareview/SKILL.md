@@ -39,37 +39,50 @@ description: 不计成本对**整个 repo**(不是 uncommitted diff)做最严的
 
 ## 流程
 
-### Step 1 — 先问关注点(每次运行必做,最先做)
+### Step 1 — 先问关注点 + 要不要扫 dead code(每次运行必做,最先做)
 
-用 `AskUserQuestion` 问用户本次审计的重心。**这一步在摸底 Bash 之前做**(关注点会影响后面切片 × 视角矩阵,先问省得白跑)。
+用**一次** `AskUserQuestion` 同时问两件事:本次审计的重心、以及要不要扫 dead code。**这一步在摸底 Bash 之前做**(答案会影响后面切片 × 视角矩阵,先问省得白跑)。
 
 ```
 AskUserQuestion({
-  questions: [{
-    header: "关注点",
-    question: "本次 megareview 想重点看哪方面?",
-    multiSelect: false,
-    options: [
-      { label: "全面(含未来进步,推荐)", description: "BUG + OPT + FEAT 全套。FEAT 含新功能机会 + UI 视觉 + UX 交互。这是默认最全的一档。" },
-      { label: "纯 UI/UX", description: "只看 FEAT 的 UI(视觉/布局/暗色/iPad)+ UX(交互/反馈/动效/空态/haptic)。不派 BUG/OPT,也不派'新功能'angle。" },
-      { label: "不含 FEAT(不关注未来进步)", description: "只 BUG + OPT(正确性/并发/数据/SSE/性能/抽象/死代码/测试)。完全不派任何 FEAT angle,报告不出 FEAT 档。" }
-    ]
-  }]
+  questions: [
+    {
+      header: "关注点",
+      question: "本次 megareview 想重点看哪方面?",
+      multiSelect: false,
+      options: [
+        { label: "全面(含未来进步,推荐)", description: "BUG + OPT + FEAT 全套。FEAT 含新功能机会 + UI 视觉 + UX 交互。这是默认最全的一档。" },
+        { label: "纯 UI/UX", description: "只看 FEAT 的 UI(视觉/布局/暗色/iPad)+ UX(交互/反馈/动效/空态/haptic)。不派 BUG/OPT,也不派'新功能'angle。" },
+        { label: "不含 FEAT(不关注未来进步)", description: "只 BUG + OPT(正确性/并发/数据/SSE/性能/抽象/死代码/测试)。完全不派任何 FEAT angle,报告不出 FEAT 档。" }
+      ]
+    },
+    {
+      header: "Dead code",
+      question: "要不要扫 dead code(未引用的 func/class/file、注释掉的代码)?",
+      multiSelect: false,
+      options: [
+        { label: "扫(推荐)", description: "派一个 code-simplifier 死代码扫描 angle,整仓找未被引用的符号/文件 + 可删的注释代码。" },
+        { label: "不扫", description: "跳过死代码 angle,省一个 subagent + 一段报告噪音。" }
+      ]
+    }
+  ]
 })
 ```
 
-> **不要自己加"其他/自定义"选项** —— `AskUserQuestion` 会自动给一个 "Other" 自由输入框,用户想限定重心(如"只看后端" / "只看 CoreData/CloudKit" / "只看性能" / "只看 server + 转写链路")就走 Other 打字,主 agent 按那段文字裁剪 angle 矩阵。手动塞一个固定 label 的"其他"反而没法收自由文本,纯属冗余。
+> **关注点那题不要自己加"其他/自定义"选项** —— `AskUserQuestion` 会自动给一个 "Other" 自由输入框,用户想限定重心(如"只看后端" / "只看 CoreData/CloudKit" / "只看性能" / "只看 server + 转写链路")就走 Other 打字,主 agent 按那段文字裁剪 angle 矩阵。手动塞一个固定 label 的"其他"反而没法收自由文本,纯属冗余。
 
-**关注点 → angle 选择映射**(Step 3 据此裁剪矩阵):
+> **Dead code 那题的答案只在"本次含 OPT"时生效**(全面 / 不含 FEAT / 含 OPT 的自定义):答"扫"才派死代码 angle,答"不扫"就不派。**纯 UIUX 没 OPT,死代码 angle 本来就不派,这题答什么都忽略**(照样问无妨,省得分支)。
+
+**关注点(× dead code 开关)→ angle 选择映射**(Step 3 据此裁剪矩阵):
 
 | 用户选 | 派哪些 angle | Codex task |
 |---|---|---|
-| 全面(含未来进步) | BUG + OPT + FEAT(新功能 + UI + UX)全套;含强制视角(coredata / sse / dead code) | bug task + UX task |
-| 纯 UI/UX | 只 FEAT-UI + FEAT-UX;**不派** BUG/OPT/新功能,也跳过 coredata/sse 强制视角 | 只 UX task |
-| 不含 FEAT | BUG + OPT 全套(含强制视角);**不派任何** FEAT angle | 只 bug task |
-| Other 自由输入(自定义重心) | 按用户打的那段文字裁剪(如"只看后端"→ 只派 backend correctness / API contract / server perf 几条);拿不准就回问一句再定 | 按裁剪后的重心选(0-2 个) |
+| 全面(含未来进步) | BUG + OPT + FEAT(新功能 + UI + UX)全套;强制视角 coredata / sse;**dead code 看 Q2(扫才派)** | bug task + UX task |
+| 纯 UI/UX | 只 FEAT-UI + FEAT-UX;**不派** BUG/OPT/新功能,也跳过 coredata/sse/dead code | 只 UX task |
+| 不含 FEAT | BUG + OPT 全套 + 强制视角 coredata / sse;**dead code 看 Q2(扫才派)**;**不派任何** FEAT angle | 只 bug task |
+| Other 自由输入(自定义重心) | 按用户打的那段文字裁剪(如"只看后端"→ 只派 backend correctness / API contract / server perf 几条);**含 OPT 且 Q2 答"扫"才加 dead code**;拿不准就回问一句再定 | 按裁剪后的重心选(0-2 个) |
 
-把用户的选择记在心里,Step 6 写报告时报告头部要写明"本次关注点:<选项>"。
+把用户两题的选择都记在心里,Step 6 写报告时报告头部要写明"本次关注点:<选项> / dead code:扫|不扫"。
 
 ### Step 2 — 摸底:仓库规模 + 切片策略
 
@@ -154,7 +167,7 @@ grep -nE 'P1|backlog|TODO' CLAUDE.md 2>/dev/null | head -30
 *A. BUG/数据强制视角*(**全面** 或 **不含 FEAT** 时召唤;**纯 UIUX** 跳过):
 - `coredata-migration-reviewer` 看 Models/Persistence + 任何动 `DiaryEntry` schema 的服务
 - `sse-pipeline-reviewer` 看 AI/Network/SSE slice(项目自带 agent)
-- 死代码扫(整仓):反复要扫的场景
+- 死代码扫(整仓,`code-simplifier:code-simplifier`):**只有 Step 1 Q2 答"扫"才派**;答"不扫"就跳过这一个 angle
 
 *B. FEAT 强制视角*(**全面** 或 **纯 UIUX** 时召唤;**不含 FEAT** 跳过):
 - 新功能(**仅全面**;纯 UIUX 不派新功能)+ UI(视觉/布局)+ UX(交互/反馈),各至少 1 个(user 明确要求重点关注 UI 和 UX)
@@ -177,7 +190,7 @@ grep -nE 'P1|backlog|TODO' CLAUDE.md 2>/dev/null | head -30
 # 单条消息,全部并行(以"全面"档为例)
   Agent { subagent_type: "coredata-migration-reviewer", model: "opus", description: "Models/Persistence data review", ... }
   Agent { subagent_type: "sse-pipeline-reviewer", model: "opus", description: "AI/SSE pipeline review", ... }
-  Agent { subagent_type: "code-simplifier:code-simplifier", model: "opus", description: "Dead code scan (整仓)", ... }
+  Agent { subagent_type: "code-simplifier:code-simplifier", model: "opus", description: "Dead code scan (整仓)", ... }   # 仅 Step 1 Q2 答"扫"才发
   Agent { subagent_type: "general-purpose", model: "opus", description: "Concurrency review on AI/Network", ... }
   Agent { subagent_type: "general-purpose", model: "opus", description: "Backend correctness (server/index.js)", ... }
   Agent { subagent_type: "general-purpose", model: "opus", description: "Home VM stack correctness", ... }
@@ -321,7 +334,7 @@ codex exec --sandbox read-only "Audit Lumory read-only for UI consistency + UX p
 # Megareview Report — <YYYY-MM-DD HH:mm>
 
 ## 仓库概览
-- 本次关注点:<Step 1 用户选的选项>
+- 本次关注点:<Step 1 用户选的选项> / dead code:<扫 | 不扫>
 - 总文件 / LoC / 顶层目录分布
 - 最近 90 天 churn 热点文件 top N
 - TODO/FIXME 总数
@@ -452,7 +465,7 @@ codex exec --sandbox read-only "Read the megareview report at CodeReview/megarev
 用户:`/megareview`
 
 主 agent 该做:
-1. **Step 1**:`AskUserQuestion` 问关注点(全面 / 纯 UIUX / 不含 FEAT / 自定义)
+1. **Step 1**:`AskUserQuestion` 一次问两题 —— 关注点(全面 / 纯 UIUX / 不含 FEAT / 自定义)+ 要不要扫 dead code(扫 / 不扫;只在含 OPT 时生效)
 2. 跑摸底 Bash(并行命令)+ `mkdir -p CodeReview/.megareview-raw`
 3. 看仓库规模 + 关注点定 slice × angle 矩阵(Lumory 中等 + 全面 → 8-10 Opus + 2 Codex;纯 UIUX → 3-5 Opus + 1 Codex)
 4. **一次性并行派发**:一条消息里把所有 Opus subagent + Codex task 全发出去(各写文件、只回摘要、带 ESCALATION 说明)
@@ -464,7 +477,7 @@ codex exec --sandbox read-only "Read the megareview report at CodeReview/megarev
 
 ## 失败模式 / 别这么干
 
-- ❌ **跳过 Step 1 问关注点**:直接默认全套硬跑。用户明确要求每次先问;选了纯 UIUX 还派一堆 bug/opt agent = 浪费 + 噪音。
+- ❌ **跳过 Step 1 的两题(关注点 + dead code)**:直接默认全套硬跑。用户明确要求每次先问这两题;选了纯 UIUX 还派一堆 bug/opt agent、或答了"不扫"还派死代码 angle = 浪费 + 噪音。
 - ❌ **subagent return 里贴全文 findings**:一次性回来 10+ 份全文会撑爆主 agent context。必须写文件、只回摘要 —— 这是"一次性派发"能成立的前提。
 - ❌ **subagent 自己 spawn 子 agent**:嵌套不可靠。只发 ESCALATION 信号,由主 agent 追派。
 - ❌ **忽略 ESCALATION**:reviewer 说 slice 没看完 / 某 finding 拿不准,主 agent 不追派直接写报告 → 漏覆盖 + 高风险 finding 没二次确认。

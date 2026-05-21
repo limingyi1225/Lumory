@@ -355,7 +355,8 @@ app.get('/health', (_req, res) => {
 // globalIPLimiter 在 per-path limiter 前面:per-install 配额 + per-IP 上限两层保险。
 // (megareview P1 #2)express.json 在 requireAppSecret 之后挂,**未鉴权请求不会消耗
 // body parse 内存/CPU**(对 1MB cap 仍可放大),防 unauthenticated body amplification。
-// 顺序固定:pino-http(已挂) → /api requireAppSecret → express.json → globalIPLimiter → endpoint limiters → handlers。
+// globalIPLimiter 在 express.json 前面,让已鉴权但超全局配额的 JSON 请求不用先 parse 1MB body。
+// 顺序固定:pino-http(已挂) → /api requireAppSecret → globalIPLimiter → express.json → endpoint limiters → handlers。
 // transcriptions 路由用 multer multipart,不受 express.json 影响(json parser 只在
 // Content-Type: application/json 时激活)。
 function jsonBodyErrorHandler(err, req, res, next) {
@@ -377,9 +378,9 @@ function jsonBodyErrorHandler(err, req, res, next) {
 app.use(
   '/api',
   requireAppSecret,
+  globalIPLimiter,
   express.json({ limit: '1mb' }),
-  jsonBodyErrorHandler,
-  globalIPLimiter
+  jsonBodyErrorHandler
 );
 app.use('/api/openai/chat/completions', chatLimiter);
 app.use('/api/openai/embeddings', embeddingsLimiter);
@@ -602,6 +603,9 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       upstream.data.on('end', () => {
         activeStreams.delete(upstream.data);
         res.off('close', abortUpstream);
+        if (res.destroyed) {
+          return;
+        }
         if (!sawDone && sseFrameHasDone(sseBuffer)) {
           sawDone = true;
         }
@@ -628,6 +632,8 @@ app.post('/api/openai/chat/completions', async (req, res) => {
           },
           timeout: REQUEST_TIMEOUT_MS,
           signal: nonStreamAbort.signal,
+          maxContentLength: 1024 * 1024,
+          maxRedirects: 0,
         });
         res.json(upstream.data);
       } finally {
@@ -699,6 +705,8 @@ app.post('/api/openai/embeddings', async (req, res) => {
         },
         timeout: REQUEST_TIMEOUT_MS,
         signal: embeddingAbort.signal,
+        maxContentLength: 1024 * 1024,
+        maxRedirects: 0,
       }
     );
     res.json(upstream.data);
@@ -813,6 +821,8 @@ app.post('/api/openai/audio/transcriptions', (req, res) => {
         // axios 默认会把 FormData 自动序列化并加 Content-Type: multipart/form-data; boundary=...
         // 不要手动设 Content-Type,会丢 boundary。
         maxBodyLength: MAX_TRANSCRIPTION_FILE_BYTES + 1024 * 1024, // 留 1 MB 余量给 multipart 头
+        maxContentLength: 1024 * 1024,
+        maxRedirects: 0,
         signal: transcriptionAbort.signal,
       });
 

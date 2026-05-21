@@ -192,15 +192,64 @@ extension OpenAIService {
             throw DiaryImportError.parsingFailed(reason: error.localizedDescription)
         }
 
-        let df = ISO8601DateFormatter()
-        df.formatOptions = [.withFullDate]
         var results: [ParsedDiaryEntry] = []
-        for raw in raws {
-            if let date = df.date(from: raw.date) {
-                results.append(ParsedDiaryEntry(date: date, text: raw.text))
+        for (index, raw) in raws.enumerated() {
+            let text = raw.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                throw DiaryImportError.parsingFailed(
+                    reason: String(
+                        format: NSLocalizedString(
+                            "error.import.emptyParsedEntry",
+                            value: "AI 返回的第 %d 条日记正文为空。",
+                            comment: "Import parse failed because one parsed entry has empty text"
+                        ),
+                        index + 1
+                    )
+                )
             }
+            guard let date = Self.parseImportedDiaryDate(raw.date) else {
+                throw DiaryImportError.parsingFailed(
+                    reason: String(
+                        format: NSLocalizedString(
+                            "error.import.invalidParsedDate",
+                            value: "AI 返回的第 %d 条日记日期无法识别:%@",
+                            comment: "Import parse failed because one parsed entry has an invalid date"
+                        ),
+                        index + 1,
+                        raw.date
+                    )
+                )
+            }
+            results.append(ParsedDiaryEntry(date: date, text: text))
         }
         // **空数组是合法成功**:模型读完粘贴内容认定"里面没有日记结构"。UI 会区分对待。
         return results
+    }
+
+    nonisolated private static func parseImportedDiaryDate(_ raw: String) -> Date? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let fullDate = ISO8601DateFormatter()
+        fullDate.formatOptions = [.withFullDate]
+        if let date = fullDate.date(from: trimmed) { return date }
+
+        let internetDateTime = ISO8601DateFormatter()
+        internetDateTime.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = internetDateTime.date(from: trimmed) { return date }
+
+        let internetDateTimeNoFraction = ISO8601DateFormatter()
+        internetDateTimeNoFraction.formatOptions = [.withInternetDateTime]
+        if let date = internetDateTimeNoFraction.date(from: trimmed) { return date }
+
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.calendar = Calendar(identifier: .gregorian)
+        df.timeZone = TimeZone(secondsFromGMT: 0)
+        for format in ["yyyy-MM-dd", "yyyy/MM/dd"] {
+            df.dateFormat = format
+            if let date = df.date(from: trimmed) { return date }
+        }
+        return nil
     }
 }

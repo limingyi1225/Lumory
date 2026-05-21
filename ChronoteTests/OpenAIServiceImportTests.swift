@@ -14,7 +14,7 @@
 //   - 200 + 非 JSON 数组 content → `.parsingFailed`
 //   - 200 + 畸形 JSON → `.parsingFailed`
 //   - 200 + 合法数组 → 返 [ParsedDiaryEntry]
-//   - 200 + 含无效日期条目 → 该条 filter 掉
+//   - 200 + 含无效日期 / 空正文条目 → `.parsingFailed`(不能静默丢条目)
 //   - 200 + 空数组 → 合法成功,返 []
 //
 //  **AppSecrets 解耦**:`chatThrowing` 头部 guard `appSharedSecret.isEmpty` 会在我们的
@@ -229,15 +229,30 @@ final class OpenAIServiceImportTests: XCTestCase {
         XCTAssertEqual(entries[1].text, "下雨")
     }
 
-    func test_invalidDatesAreFilteredOut() async throws {
-        // 模型返了 entries,某条 date 无法解析 → 该条被 filter 掉,其他保留
+    func test_invalidDate_throwsParsingFailedInsteadOfDroppingEntry() async throws {
+        // 模型返了 entries,某条 date 无法解析 → 整体解析失败,不能静默丢掉那条。
         MockURLProtocol.requestHandler = Self.handler(
             status: 200,
             content: #"[{"date":"2023-10-01","text":"valid"},{"date":"not-a-date","text":"invalid"}]"#
         )
+        await assertThrowsParsingFailed(rawText: "irrelevant")
+    }
+
+    func test_emptyParsedText_throwsParsingFailedInsteadOfImportingBlankEntry() async throws {
+        MockURLProtocol.requestHandler = Self.handler(
+            status: 200,
+            content: #"[{"date":"2023-10-01","text":"   \n  "}]"#
+        )
+        await assertThrowsParsingFailed(rawText: "irrelevant")
+    }
+
+    func test_validResponse_acceptsCommonDateDriftAndTrimsText() async throws {
+        MockURLProtocol.requestHandler = Self.handler(
+            status: 200,
+            content: #"[{"date":"2023/10/01","text":"  国庆  "},{"date":"2023-10-02T03:04:05Z","text":"下雨"}]"#
+        )
         let entries = try await service.parseImportedDiaries(rawText: "irrelevant")
-        XCTAssertEqual(entries.count, 1)
-        XCTAssertEqual(entries.first?.text, "valid")
+        XCTAssertEqual(entries.map(\.text), ["国庆", "下雨"])
     }
 
     func test_emptyArrayResponse_isSuccess() async throws {

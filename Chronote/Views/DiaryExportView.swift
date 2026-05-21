@@ -192,8 +192,11 @@ struct DiaryExportView: View {
     
     #if canImport(UIKit)
     private func presentShareSheet(for fileURL: URL) {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootViewController = windowScene.windows.first?.rootViewController else {
+        guard let windowScene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive }),
+              let rootViewController = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+                ?? windowScene.windows.first?.rootViewController else {
             return
         }
         

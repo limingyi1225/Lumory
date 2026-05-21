@@ -93,14 +93,15 @@ extension HomeView {
         #if canImport(UIKit)
         HapticManager.shared.impact(.light)
         #endif
-        processStoppedRecording(fileName: fileName, duration: recorder.duration)
+        _ = processStoppedRecording(fileName: fileName, duration: recorder.duration)
     }
 
     /// 走过了 `recorder.stopRecording()` 之后,把 (fileName, duration) 接进 UI 状态、清孤儿、起转写。
     /// 用户主动按停 (handleStopRecording) 和被音频中断 (recorder.interruptedRecordingFileName .onChange)
     /// 都走这里,**保证中断录到的段落不会被默默吞掉**。
     @MainActor
-    func processStoppedRecording(fileName: String, duration: TimeInterval) {
+    @discardableResult
+    func processStoppedRecording(fileName: String, duration: TimeInterval) -> Bool {
         Log.info("[HomeView processStoppedRecording: fileName=\(fileName), duration=\(duration)] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
 
         // **P1 fix (2026-05-15 megareview)**:发送流程进行中(`isSending=true`)时把中断录音追加到
@@ -122,7 +123,8 @@ extension HomeView {
             // 用户极端链路:转写失败 banner 还挂着 → 立刻发送一条 → 发送中途录音中断 →
             // banner 残留指向已经不存在的录音,用户疑惑"我没在转写为啥还显示错误"。
             recordingVM.transcriptionError = nil
-            return
+            recordingVM.audioPlaybackError = nil
+            return false
         }
 
         // 标记正在转录
@@ -144,13 +146,17 @@ extension HomeView {
             recordingVM.audioRecordings.append(rec)
         }
 
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let audioURL = documentsURL.appendingPathComponent(fileName)
+        guard let audioURL = Self.resolvedAudioURL(fileName: fileName) else {
+            recordingVM.transcriptionError = .audioReadFailed
+            recordingVM.isTranscribing = false
+            return false
+        }
 
         // 进入转写任务前清掉上次的错误,新一轮开始。
         recordingVM.transcriptionError = nil
         startTranscription(audioURL: audioURL, fileName: fileName)
         Log.info("[HomeView processStoppedRecording END] SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
+        return true
     }
 
     /// 启动转写任务,失败时把错误塞进 `recordingVM.transcriptionError` 让 UI 显示 inline banner +

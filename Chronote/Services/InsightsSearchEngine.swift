@@ -177,6 +177,7 @@ final class InsightsSearchEngine {
                         continuation.yield(InsightsEngine.AnswerChunk(text: text))
                     case .truncated(let reason):
                         continuation.yield(InsightsEngine.AnswerChunk(truncatedReason: reason))
+                        break streamLoop
                     case .failed(let error):
                         // **区分 truncated 和 failed**:truncated 是"断在中间,已有部分内容";
                         // failed 是"一点内容都没产出"(离线 / 401 / 5xx)。合并成 truncated 会让

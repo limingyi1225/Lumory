@@ -204,18 +204,25 @@ struct HomeView: View {
             // (单次消费)。否则用户的录音段落留在磁盘但 UI 看不到,等于丢失。
             .onChange(of: recorder.interruptedRecordingFileName) { _, fileName in
                 if let fileName {
-                    processStoppedRecording(fileName: fileName, duration: recorder.duration)
+                    _ = processStoppedRecording(fileName: fileName, duration: recorder.duration)
                     recorder.interruptedRecordingFileName = nil
                 }
             }
             .onChange(of: recorder.maxDurationRecording) { _, completed in
                 guard let completed else { return }
-                processStoppedRecording(fileName: completed.fileName, duration: completed.duration)
+                let accepted = processStoppedRecording(fileName: completed.fileName, duration: completed.duration)
                 recorder.maxDurationRecording = nil
-                LumoryToastCenter.shared.show(
-                    NSLocalizedString("录音已到 10 分钟上限,已自动停止。", comment: "Recording auto-stopped after max duration"),
-                    severity: .info
-                )
+                if accepted {
+                    LumoryToastCenter.shared.show(
+                        NSLocalizedString("录音已到 10 分钟上限,已自动停止。", comment: "Recording auto-stopped after max duration"),
+                        severity: .info
+                    )
+                } else {
+                    LumoryToastCenter.shared.show(
+                        NSLocalizedString("录音已停止,但当前状态下未保存。", comment: "Recording auto-stopped but was not saved"),
+                        severity: .warning
+                    )
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: .databaseRecreated)) { _ in
                 Log.info("[HomeView] Database recreated notification received", category: .ui)

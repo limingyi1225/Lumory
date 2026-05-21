@@ -13,6 +13,22 @@ import AVFoundation
 
 extension DiaryDetailView {
 
+    func refreshResolvedAudioURL() async {
+        guard let fileName = entry.audioFileName else {
+            resolvedAudioURL = nil
+            displayableAudioDuration = 0
+            return
+        }
+        let url = await Task.detached(priority: .utility) {
+            DiaryEntry.resolvedAudioURL(fileName: fileName)
+        }.value
+        guard entry.audioFileName == fileName else { return }
+        resolvedAudioURL = url
+        if url == nil {
+            displayableAudioDuration = 0
+        }
+    }
+
     // 辅助函数：获取音频文件时长 - marked async
     func fetchAudioDuration(url: URL) async -> TimeInterval? {
         let audioAsset = AVURLAsset(url: url)

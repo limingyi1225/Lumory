@@ -148,19 +148,21 @@ final class ThemeAliasStore {
         return aliasToCanonical
     }
 
-    /// 一次性扫已合并的 canonical 名 + 各 alias 的 lowercased set。scan service 用来
+    /// 一次性扫已合并的 canonical 名 + 各 alias 的 normalized key set。scan service 用来
     /// dedupe 已知对子,不重复打扰。
     func knownLowercasedTagsCovered() -> Set<String> {
         var out = Set<String>()
         for (canonical, aliases) in groups {
-            out.insert(canonical.lowercased())
-            for a in aliases { out.insert(a.lowercased()) }
+            out.insert(ThemeKey.make(canonical))
+            for a in aliases { out.insert(ThemeKey.make(a)) }
         }
         return out
     }
 
     func isNegative(_ a: String, _ b: String) -> Bool {
-        negativePairs.contains(Self.pairKey(a.lowercased(), b.lowercased()))
+        let legacyKey = Self.pairKey(a.lowercased(), b.lowercased())
+        let normalizedKey = Self.pairKey(ThemeKey.make(a), ThemeKey.make(b))
+        return negativePairs.contains(legacyKey) || negativePairs.contains(normalizedKey)
     }
 
     /// 给 UI 用:预览 `mergeThemes(source:into:)` 会把哪些 alias / canonical **一并**搬移到 target 组。
@@ -170,21 +172,21 @@ final class ThemeAliasStore {
         let targetTrim = target.trimmingCharacters(in: .whitespaces)
         guard !sourceTrim.isEmpty, !targetTrim.isEmpty else { return [] }
 
-        let sourceLower = sourceTrim.lowercased()
-        let targetLower = targetTrim.lowercased()
-        guard sourceLower != targetLower else { return [] }
+        let sourceKey = ThemeKey.make(sourceTrim)
+        let targetKey = ThemeKey.make(targetTrim)
+        guard sourceKey != targetKey else { return [] }
 
-        let resolvedTargetLower = (aliasToCanonical[targetLower] ?? targetTrim).lowercased()
+        let resolvedTargetKey = ThemeKey.make(aliasToCanonical[targetKey] ?? targetTrim)
 
-        guard let sourceCanonical = aliasToCanonical[sourceLower] else { return [] }
-        if sourceCanonical.lowercased() == resolvedTargetLower { return [] }
+        guard let sourceCanonical = aliasToCanonical[sourceKey] else { return [] }
+        if ThemeKey.make(sourceCanonical) == resolvedTargetKey { return [] }
 
         var collateral: [String] = []
-        if sourceCanonical.lowercased() != sourceLower {
+        if ThemeKey.make(sourceCanonical) != sourceKey {
             collateral.append(sourceCanonical)
         }
         if let aliases = groups[sourceCanonical] {
-            for a in aliases where a.lowercased() != sourceLower {
+            for a in aliases where ThemeKey.make(a) != sourceKey {
                 collateral.append(a)
             }
         }

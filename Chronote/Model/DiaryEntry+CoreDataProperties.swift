@@ -27,6 +27,11 @@ extension DiaryEntry {
     func audioURL() -> URL? {
         guard let fileName = audioFileName else { return nil }
 
+        return Self.resolvedAudioURL(fileName: fileName)
+    }
+
+    /// 解析音频文件 URL。可能触发 legacy → iCloud 的一次性迁移,因此不要在 SwiftUI body 内调用。
+    nonisolated static func resolvedAudioURL(fileName: String) -> URL? {
         if let url = LumoryAttachmentPaths.existingAudioURL(fileName: fileName) {
             // 触发迁移：成功 → 返新 URL(老 URL 已被同步删除);失败 → 返老 URL,文件保留。
             // 原实现 sync migrate + remove old + 返 oldURL —— caller 拿到一个已被删除的 URL,
@@ -45,7 +50,7 @@ extension DiaryEntry {
     /// 把音频从老的 Documents 根迁到 iCloud `Documents/LumoryAudio/`,返回新 URL。
     /// 写新 URL 成功后才删老文件;任何失败保留 oldURL,让调用方仍可读取。
     @discardableResult
-    private func migrateAudioToiCloud(fileName: String, oldURL: URL) -> URL? {
+    nonisolated private static func migrateAudioToiCloud(fileName: String, oldURL: URL) -> URL? {
         guard let audioDir = try? LumoryAttachmentPaths.ensureICloudDirectory(for: .audio) else { return nil }
         guard let audioData = try? Data(contentsOf: oldURL) else { return nil }
 

@@ -224,26 +224,26 @@ extension DiaryDetailView {
     static func refreshAIIndex(for objectID: NSManagedObjectID, newText: String, ai: AIServiceProtocol) async {
         let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let themes: [String]
+        let themeOutcome: ThemeExtractionOutcome
         let embedding: [Float]?
         if trimmed.isEmpty {
             // 用户把内容清空：直接清 themes + embedding，不发网络
-            themes = []
+            themeOutcome = .success([])
             embedding = nil
         } else {
-            async let themesTask = ai.extractThemes(text: trimmed)
+            async let themesTask = ai.extractThemesOutcome(text: trimmed)
             async let embeddingTask = ai.embed(text: trimmed)
-            (themes, embedding) = await (themesTask, embeddingTask)
+            (themeOutcome, embedding) = await (themesTask, embeddingTask)
         }
 
         // 把"是否真的提交了 themes" + entryID 一起跨出 MainActor.run。
         // 如果 stale guard 丢了写入,我们仍要 short-circuit 后面的 alias judge,
         // 否则会基于 ghost 数据生成建议。codex review 标记为 high-priority 修。
-        let postWrite: (committed: Bool, entryID: UUID?) = await MainActor.run {
+        let postWrite: (committed: Bool, entryID: UUID?, themes: [String]) = await MainActor.run {
             let context = PersistenceController.shared.container.viewContext
             guard let entry = try? context.existingObject(with: objectID) as? DiaryEntry else {
                 Log.error("[DiaryDetailView] refreshAIIndex: 原条目已不存在", category: .ai)
-                return (false, nil)
+                return (false, nil, [])
             }
             // Stale-write guard：如果 entry.text 已经被更后的保存改掉了，这次 Task 结果已过期，
             // 直接丢弃不写，让新 Task 的新 themes/embedding 生效。
@@ -251,43 +251,49 @@ extension DiaryDetailView {
             let currentTrimmed = entry.wrappedText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard currentTrimmed == trimmed else {
                 Log.info("[DiaryDetailView] refreshAIIndex: 文本已被更新的保存覆盖，丢弃 stale 结果", category: .ai)
-                return (false, entry.id)
+                return (false, entry.id, [])
             }
 
+            let committedThemes: [String]
             if trimmed.isEmpty {
                 // 用户明确把内容清空了 → 清掉 themes + embedding（这是用户意图）
                 entry.setThemes([])
                 entry.embedding = nil
+                committedThemes = []
             } else {
-                // **Partial-failure guard**：`extractThemes` 网络失败返 []、`embed` 失败返 nil，
-                // 两种返回值无法区分"真 empty"和"transient 故障"。如果这里遇到任一返回"空/nil"，
-                // 就把现有 themes/embedding 全量保留——宁可让用户多等下一次 edit 或 backfill 重试，
-                // 也不在 AI 出故障时用空值污染一条已索引好的 entry（否则 themes 清空 / embedding
-                // 指向旧文本，Ask Past 检索 ranking 和 theme chips 会对不上直到手动重建）。
-                // 两者"都成功"才整组 commit。
-                guard !themes.isEmpty, let vector = embedding else {
-                    Log.info("[DiaryDetailView] refreshAIIndex: AI 部分失败（themes=\(themes.count), embedding=\(embedding != nil ? "ok" : "nil")），保留原值", category: .ai)
-                    return (false, entry.id)
+                // **Partial-failure guard**：主题抽取现在用 outcome 区分"合法无主题"和"请求失败"。
+                // `.success([])` 代表用户把文本改成确实无主题的内容,必须清掉旧 themes;只有
+                // `.failed` 或 embedding nil 才保留旧索引,避免 transient 故障污染 entry。
+                guard case .success(let themes) = themeOutcome, let vector = embedding else {
+                    Log.info("[DiaryDetailView] refreshAIIndex: AI 部分失败（themeOutcome=\(String(describing: themeOutcome)), embedding=\(embedding != nil ? "ok" : "nil")），保留原值", category: .ai)
+                    return (false, entry.id, [])
                 }
                 entry.setThemes(themes)
                 entry.setEmbedding(vector)
+                committedThemes = themes
             }
 
             do {
                 try context.save()
-                Log.info("[DiaryDetailView] refreshAIIndex 完成：themes=\(themes.count), embedding=\(embedding != nil ? "ok" : "nil")", category: .ai)
-                return (true, entry.id)
+                let themeCount: Int
+                if case .success(let themes) = themeOutcome {
+                    themeCount = themes.count
+                } else {
+                    themeCount = -1
+                }
+                Log.info("[DiaryDetailView] refreshAIIndex 完成：themes=\(themeCount), embedding=\(embedding != nil ? "ok" : "nil")", category: .ai)
+                return (true, entry.id, committedThemes)
             } catch {
                 Log.error("[DiaryDetailView] refreshAIIndex save 失败: \(error)", category: .ai)
-                return (false, entry.id)
+                return (false, entry.id, [])
             }
         }
 
         // Theme alias judge —— **仅当 themes 真写入时才跑**(stale-write 或 partial-failure 时跳过)。
-        if postWrite.committed, !themes.isEmpty, let entryID = postWrite.entryID {
+        if postWrite.committed, !postWrite.themes.isEmpty, let entryID = postWrite.entryID {
             await ThemeAliasJudgeService.shared.judgeAfterWrite(
                 entryID: entryID,
-                newTags: themes
+                newTags: postWrite.themes
             )
         }
     }

@@ -171,18 +171,17 @@ final class ThemeAliasResolver: ObservableObject {
         // **同时**检查 raw `originalCanonKey` 和 resolved `canonKey`:reject 当时存的是
         // 原对子 (newTag, canonicalGuess),后来 canonicalGuess 被合并成别人的 alias 时,
         // resolved key 跟 reject 时的 key 不同 → 仅检 resolved 会让已 reject 的对子换个 canonical 名又冒出来。
-        let resolvedPairKey = ThemeAliasStore.pairKey(newKey, canonKey)
-        if store.negativePairs.contains(resolvedPairKey) { return false }
+        if store.isNegative(suggestion.newTag, resolvedCanonical) { return false }
         if originalCanonKey != canonKey {
-            let originalPairKey = ThemeAliasStore.pairKey(newKey, originalCanonKey)
-            if store.negativePairs.contains(originalPairKey) { return false }
+            if store.isNegative(suggestion.newTag, suggestion.canonicalGuess) { return false }
         }
 
         // pending dedup 用 **unordered pair key**,与 negativePairs 对齐:
         // AI 在两次 scan 间可能 swap newTag/canonicalGuess —— 之前的 direction-aware 比较会让
         // 同一对子重复入队,用户被迫审核两次(codex P2 fix)。
+        let pendingPairKey = ThemeAliasStore.pairKey(newKey, canonKey)
         if store.pending.contains(where: {
-            ThemeAliasStore.pairKey($0.newTag.lowercased(), $0.canonicalGuess.lowercased()) == resolvedPairKey
+            ThemeAliasStore.pairKey($0.newTag.lowercased(), $0.canonicalGuess.lowercased()) == pendingPairKey
         }) { return false }
 
         // 入队的是**归一化后**的版本。若 canonicalGuess 被改写成现有 canonical,UI / confirm 都

@@ -56,7 +56,12 @@ enum InstallIdentity {
                 kSecAttrService as String: service,
                 kSecAttrAccount as String: account
             ]
-            SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            let updateStatus = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            if updateStatus != errSecSuccess {
+                Log.warning("[InstallIdentity] Failed to update install id in Keychain: \(updateStatus)", category: .network)
+            }
+        } else if status != errSecSuccess {
+            Log.warning("[InstallIdentity] Failed to write install id to Keychain: \(status)", category: .network)
         }
     }
 }

@@ -636,3 +636,8 @@
 
 /* codex 终审 2026-05-19: SettingsView 删除全部失败 alert body 没本地化,en 用户会看到中文裸 key。 */
 "删除暂时无法完成。请稍后再试。如果反复失败,先确认 iCloud 已完成同步,或重启 App 后再试。" = "删除暂时无法完成。请稍后再试。如果反复失败,先确认 iCloud 已完成同步,或重启 App 后再试。";
+
+/* 2026-05-20 megareview fixes: 新增导入/录音用户可见文案。 */
+"error.import.emptyParsedEntry" = "AI 返回的第 %d 条日记正文为空。";
+"error.import.invalidParsedDate" = "AI 返回的第 %d 条日记日期无法识别:%@";
+"录音已停止,但当前状态下未保存。" = "录音已停止,但当前状态下未保存。";

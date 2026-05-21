@@ -634,3 +634,8 @@
 
 /* codex 终审 2026-05-19: SettingsView delete-all failure body was missing localization. */
 "删除暂时无法完成。请稍后再试。如果反复失败,先确认 iCloud 已完成同步,或重启 App 后再试。" = "Couldn't finish deleting. Try again in a moment. If it keeps failing, confirm iCloud has finished syncing, or restart the app and try again.";
+
+/* 2026-05-20 megareview fixes: newly added import/recording user-visible strings. */
+"error.import.emptyParsedEntry" = "Entry %d returned by AI has no text.";
+"error.import.invalidParsedDate" = "Entry %d returned by AI has an unrecognized date: %@";
+"录音已停止,但当前状态下未保存。" = "Recording stopped, but wasn't saved in the current state.";

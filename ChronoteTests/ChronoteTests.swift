@@ -3521,6 +3521,62 @@ struct ThemeAliasResolverNFCNormalizationTests {
         #expect(resolver.groups[nfdCafe] == nil,
                 "不应该新建 NFD 字符串 group")
     }
+
+    @Test func collateralLabels_NFDSourceHitsNFCAliasGroup() {
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let seed = PendingSuggestion(
+            newTag: nfcCafe,
+            canonicalGuess: "Coffee Shop",
+            confidence: .high,
+            source: .scan
+        )
+        _ = resolver.enqueue(seed)
+        resolver.confirm(seed, canonical: "Coffee Shop")
+        let sibling = PendingSuggestion(
+            newTag: "Mocha",
+            canonicalGuess: "Coffee Shop",
+            confidence: .high,
+            source: .scan
+        )
+        _ = resolver.enqueue(sibling)
+        resolver.confirm(sibling, canonical: "Coffee Shop")
+
+        let collateral = resolver.collateralLabels(forMerging: nfdCafe, into: "Work")
+        #expect(Set(collateral) == Set(["Coffee Shop", "Mocha"]),
+                "NFD source 必须命中 NFC alias group,预览出 parent canonical + sibling aliases")
+    }
+
+    @Test func knownCoveredAndNegativePairsUseNFCKeysWithoutBreakingLegacyPairs() {
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let seed = PendingSuggestion(
+            newTag: nfcCafe,
+            canonicalGuess: "Coffee Shop",
+            confidence: .high,
+            source: .scan
+        )
+        _ = resolver.enqueue(seed)
+        resolver.confirm(seed, canonical: "Coffee Shop")
+
+        let duplicate = PendingSuggestion(
+            newTag: nfdCafe,
+            canonicalGuess: "Other",
+            confidence: .high,
+            source: .scan
+        )
+        #expect(resolver.enqueue(duplicate) == false,
+                "knownCovered 应用 ThemeKey.make,避免 NFD 等价 tag 重复入队")
+
+        let reject = PendingSuggestion(
+            newTag: nfcCafe,
+            canonicalGuess: "Tea Shop",
+            confidence: .high,
+            source: .scan
+        )
+        _ = resolver.enqueue(reject)
+        resolver.reject(reject)
+        #expect(resolver.isNegative(nfdCafe, "Tea Shop"),
+                "isNegative 应同时兼容 legacy lowercased pair 与 NFC normalized pair")
+    }
 }
 
 // MARK: - DataMigrationService(megareview OPT-HIGH H3)

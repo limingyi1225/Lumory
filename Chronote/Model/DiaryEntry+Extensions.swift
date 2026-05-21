@@ -306,15 +306,23 @@ extension DiaryEntry {
     }
 
     /// 异步加载所有图片（避免阻塞主线程）
+    @MainActor
     func loadAllImageDataAsync() async -> [Data] {
+        // 先在 owning context 的 actor 上把 NSManagedObject 属性快照成值类型;真正的文件 IO /
+        // blob decode 再交给 nonisolated helper,避免跨 await 边界读 CoreData 属性。
+        let syncedData = imagesData
+        let fileNames = imageFileNameArray
+        return await Self.loadAllImageDataAsync(syncedData: syncedData, fileNames: fileNames)
+    }
+
+    nonisolated private static func loadAllImageDataAsync(syncedData: Data?, fileNames: [String]) async -> [Data] {
         // First try to load from synced data
-        let syncedImages = loadImagesFromSync()
+        let syncedImages = loadImagesFromSyncData(syncedData)
         if !syncedImages.isEmpty {
             return syncedImages
         }
 
         // Fallback to loading from files with concurrent loading
-        let fileNames = imageFileNameArray
         guard !fileNames.isEmpty else { return [] }
 
         return await withTaskGroup(of: (Int, Data?).self, returning: [Data].self) { group in
@@ -330,6 +338,21 @@ extension DiaryEntry {
             }
             return results.compactMap { $0 }
         }
+    }
+
+    nonisolated private static func loadImagesFromSyncData(_ data: Data?) -> [Data] {
+        guard let data else { return [] }
+
+        do {
+            if let images = try NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSArray.self, NSData.self], from: data) as? [Data] {
+                Log.info("[DiaryEntry] Loaded \(images.count) images from sync", category: .persistence)
+                return images
+            }
+        } catch {
+            Log.error("[DiaryEntry] Failed to decode images: \(error)", category: .persistence)
+        }
+
+        return []
     }
 
     static func deleteAudioFromDocuments(_ fileName: String) {

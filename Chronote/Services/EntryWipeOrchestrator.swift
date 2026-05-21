@@ -30,6 +30,8 @@ enum EntryWipeOrchestrator {
     ///
     /// `await` 直到所有清理完成 — 调用方应在 `viewContext.save()` 成功分支 await 它,失败分支 rollback 不调。
     static func performBulkWipeCleanup() async {
+        NarrativeCacheService.markInvalidatedForEntryChange()
+        NotificationCenter.default.post(name: .lumoryNarrativeCacheInvalidated, object: nil)
         // **P1 fix (2026-05-13 superreview)**:写日记后触发 60s NarrativePrecompute debounce 窗口内
         // → 用户立刻删全部日记 → 老 task 完成 stream 后写一条 narrative 引用 ghost entry IDs。
         // SettingsView.resetNarrativeCache 单独的"清除 AI 回顾缓存"按钮已修过这条 race

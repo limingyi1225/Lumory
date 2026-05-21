@@ -117,15 +117,14 @@ final class ThemeAliasJudgeService: ObservableObject {
             Log.info("[ThemeAliasJudge] judgeAfterWrite: 60s 内已 judge 过,跳过(entry \(entryID))", category: .ai)
             return
         }
-        lastJudgeAfterWriteAt = Date()
 
         // 把 "已经在 group 里的别名 / 已经是 canonical" 排掉,留下真正"新出现的"
         let known = resolver.knownLowercasedTagsCovered()
         let cleanedNewTags = rawNewTags
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-            .filter { !known.contains($0.lowercased()) }
-            .uniqued(byKey: { $0.lowercased() })
+            .filter { !known.contains(ThemeKey.make($0)) }
+            .uniqued(byKey: { ThemeKey.make($0) })
 
         guard !cleanedNewTags.isEmpty else { return }
 
@@ -142,10 +141,11 @@ final class ThemeAliasJudgeService: ObservableObject {
 
         // inventory 里如果某个 tag 的 lowercased 和 newTag 完全相同(逐字命中),
         // 说明用户以前就用过同样的 tag,根本不是"新出现"——judge 不会找出 alias,跳过。
-        let inventoryKeys = Set(inventory.map { $0.tag.lowercased() })
-        let actuallyNew = cleanedNewTags.filter { !inventoryKeys.contains($0.lowercased()) }
+        let inventoryKeys = Set(inventory.map { ThemeKey.make($0.tag) })
+        let actuallyNew = cleanedNewTags.filter { !inventoryKeys.contains(ThemeKey.make($0)) }
         guard !actuallyNew.isEmpty else { return }
 
+        lastJudgeAfterWriteAt = Date()
         let matches = await ai.judgeThemeAliases(
             newTags: actuallyNew,
             inventory: inventory

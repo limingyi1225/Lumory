@@ -621,7 +621,7 @@ final class ReminderService: ObservableObject {
         // 主题词文案 vs 通用模板:开关 + cache 命中时用 placeholder,否则 fallback。
         // randomHomePlaceholder() 是同步纯函数,不发网络;cache 由 HomeView/AskPast 进入
         // 时通过 PromptSuggestionEngine.refreshIfNeeded 自然刷新。
-        let contextualBody: String? = useContextualBody
+        let contextualBody: String? = useContextualBody && daysSilent != nil
             ? PromptSuggestionEngine.shared.randomHomePlaceholder()
             : nil
         content.body = contextualBody ?? Self.notificationBody(frequency: frequency, daysSilent: daysSilent)

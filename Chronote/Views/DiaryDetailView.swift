@@ -20,6 +20,7 @@ struct DiaryDetailView: View {
     // showDeleteAlert 已移除 — 删除走 4 秒撤销 toast,不再有 alert。
     @StateObject var audioPlaybackController = AudioPlaybackController() // 新的控制器
     @State var displayableAudioDuration: TimeInterval = 0.0 // State for fetched duration
+    @State var resolvedAudioURL: URL?
 
     // 编辑模式相关状态
     @State var isEditing = false
@@ -82,7 +83,7 @@ struct DiaryDetailView: View {
                         }
                         summaryBlock
                         entryBodyBlock
-                        if let audioFileName = entry.audioFileName, let audioURL = entry.audioURL() {
+                        if let audioFileName = entry.audioFileName, let audioURL = resolvedAudioURL {
                             audioBlock(audioFileName: audioFileName, audioURL: audioURL)
                         }
                         if !entry.imageFileNameArray.isEmpty {
@@ -99,6 +100,9 @@ struct DiaryDetailView: View {
                 // iOS 26 顶部边缘软渐隐 — 详情滚动到顶时跟 navigation chrome 自然过渡。
                 .scrollEdgeEffectStyle(.soft, for: .top)
                 .scrollDismissesKeyboard(.interactively)
+                .task(id: entry.audioFileName) {
+                    await refreshResolvedAudioURL()
+                }
                 .background(detailBackground.ignoresSafeArea())
                 .navigationTitle(NSLocalizedString("日记详情", comment: "Diary details title"))
             .toolbar {

@@ -98,18 +98,17 @@ git log <RANGE> --oneline                            # 仅 commit range 模式
 
 **如果用户说"跳过 codex / skip codex":跳过本 Step + Step 5,并在 Reviewer 矩阵记 `codex | skipped (user request)`。**
 
-否则和 Step 2 同一条消息里 trigger:
-
-```
-Skill({ skill: "codex:review", args: "--background" })
-```
-
-或直接 Bash run_in_background:
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --background
-```
-
-之后用 `/codex:status` / `/codex:result` 取结果。
+否则和 Step 2 同一条消息里 trigger。**codex 调用优先级**(同 megareview / CLAUDE.md 约定):
+1. **会话起点的可用 skill 列表里有 `codex:*`** → 用 skill(superreview 审 diff,`codex:review` 正合用):
+   ```
+   Skill({ skill: "codex:review", args: "--background" })
+   ```
+   之后用 `/codex:status` / `/codex:result` 取结果。
+2. **skill 当前会话不可用**(codex 插件没 `/reload-plugins` / scope 没启用)→ 用 standalone `codex` CLI 兜底(`/opt/homebrew/bin/codex`),Bash `run_in_background`:
+   ```bash
+   codex exec review --base <base-ref> > CodeReview/.superreview-codex-review.md 2>&1   # working tree 审就去掉 --base
+   ```
+3. **codex CLI 也没有 / 未登录** → 跳过本 Step + Step 5,Reviewer 矩阵记 `codex | skipped (codex unavailable)`。codex 是增强不是硬依赖。
 
 ### Step 4 — 主 agent 核对(最关键 — 不要跳)
 
@@ -191,7 +190,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review --background
 
 **用户要"跳过 codex"时:直接跳到 Step 6,在 Reviewer 矩阵补一行 `codex-final | skipped (user request)`。**
 
-Step 4 报告草稿落盘后，跑一次 Codex rescue 的 **read-only task**（通过 `codex-companion.mjs task` 或对应 skill 调用,**不是** `Agent` 工具的 `subagent_type` —— `codex:*` 不在 subagent_type 池里,当 subagent 派会 hard error）完整读取报告文件 + 所有被改动的源文件，做最后一轮独立扫描。
+Step 4 报告草稿落盘后，跑一次 Codex 的 **read-only 终审**，完整读取报告文件 + 所有被改动的源文件，做最后一轮独立扫描。codex 调用优先级同 Step 3:**①有 `codex:rescue` skill 就用 skill;②否则 standalone `codex` CLI 兜底**(`codex exec --sandbox read-only "<读报告 + 被改文件并复审>" > CodeReview/.superreview-codex-final.md 2>&1`,Bash `run_in_background`);**③都没有就跳过本步 + 注明**。
+
+> **别把 codex 当 `Agent` 的 `subagent_type` 直接派** —— 即使 `/reload-plugins` 后 `codex:codex-rescue` 进了 subagent_type 池,正确用法仍是走 `/codex:rescue` slash command(它内部自己调度 codex),直接 Agent 派不符合插件设计。
 
 **Prompt 要点**（主 agent 在召唤时必须包含）：
 - 给出报告文件路径（`CodeReview/superreview-*.md`）和所有被改动文件的绝对路径

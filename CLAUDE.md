@@ -29,7 +29,7 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,主 target
 - `server/` — Node 后端,代码主体集中在 [server/index.js](server/index.js)(单文件,~970 行量级,会随功能增长漂)。详见 [`backend-server.md`](.claude/rules/backend-server.md)。
 - `Lumory.xcodeproj` · `Lumory-Info.plist` · `Lumory.entitlements` · `Lumory.icon` · `LumoryWidgets-Info.plist` · `LumoryWidgets.entitlements`(widget plist / entitlement **放项目根目录**,不放 `LumoryWidgets/` —— 那是 PBXFileSystemSynchronizedRootGroup,扔进去会被自动塞进 Resources copy phase)。
 - `ecosystem.config.js` — PM2 配置(`lumory-server`,fork 模式,`max_memory_restart: 512M`)。
-- `Scripts/` — `generate-screenshots.sh`、`reset-database.sh`;根目录 `clean-build.sh` / `deep-clean.sh` / `clean-corrupted-db.sh` 维护脚本。
+- `Scripts/` — `reset-database.sh`;根目录 `clean-build.sh` / `deep-clean.sh` / `clean-corrupted-db.sh` 维护脚本。
 - `.claude/` — Claude Code 本地自动化(`rules/` / `skills/` / `agents/` / `hooks/` / `settings.json`)。
 - `CHANGELOG.md` — **内容不可信,不要据此推断版本/日期/功能状态**。实际状态以代码和 git 为准。
 
@@ -40,8 +40,6 @@ iOS:
 - 跑测试(必带串行 flag,见 `testing.md`):`xcodebuild test -project Lumory.xcodeproj -scheme Lumory -destination 'platform=iOS Simulator,name=iPhone 17' -parallel-testing-enabled NO -disable-concurrent-destination-testing`
 - 清理:`./clean-build.sh`;彻底清(含 DerivedData / ModuleCache / .swiftpm):`./deep-clean.sh`
 - 本地 DB 损坏恢复:`./clean-corrupted-db.sh` 或 `Scripts/reset-database.sh`
-- 生成 App Store 截图:`./Scripts/generate-screenshots.sh`(iPhone 1320×2868)/ `./Scripts/generate-screenshots.sh ipad`(2064×2752)
-
 后端(`server/`):见 [`backend-server.md`](.claude/rules/backend-server.md) 完整列表。常用:`npm start` / `npm run dev` / `npm run lint` / `pm2 restart lumory-server` / `curl https://lumory.isaabby.com/health`。
 
 ## ⚠️ Secrets
@@ -87,6 +85,6 @@ iOS:
   - 其他:`code-simplifier:code-simplifier`(代码简化)/ `plugin-dev:*`(改 `.claude/skills` / plugin 时用)/ `agent-sdk-dev:*`
   - 兜底通用:`general-purpose`(把 focus 写进 prompt)/ `Explore`(只读搜索)/ `Plan`(设计实现)/ `claude-code-guide` / `statusline-setup` / `claude`
 - **历史上常被瞎猜、但今天 spawn 仍会 hard error 的**:裸名 `code-reviewer` / `debugger` / `security-auditor` / `architect-review` / `test-automator` / `performance-engineer` / `database-optimizer` / `api-design-principles` / `backend-security-coder`;前缀 `feature-dev:*` / `superpowers:*`。
-- **codex 插件**(`codex@openai-codex` marketplace,2026-05-20 装上,user scope):提供 `/codex:review` `/codex:adversarial-review` `/codex:rescue` `/codex:status` `/codex:result` `/codex:cancel` 等 **slash command(skill)**,以及 `codex:codex-rescue` **subagent**(`/reload-plugins` + 新会话后才进 subagent_type 池)。**用法:codex 的 review/rescue 一律当 `/codex:*` slash command(Skill)调,不要当 `Agent` 的 subagent_type 直接派** —— slash command 内部会自己 spawn `codex:codex-rescue`,直接 Agent 派不符合插件设计。codex CLI 在 `/opt/homebrew/bin/codex`(ChatGPT 登录);skill 当前会话不可用(没 reload / scope 没启用)时,用 `codex exec`(audit 加 `--sandbox read-only`;diff review 用 `codex exec review`)兜底,都没有就跳过 codex 步并在报告注明。`megareview` / `superreview` 都靠它做跨模型终审。
+- **codex 插件**(`codex@openai-codex` marketplace,2026-05-20 装上,user scope):提供 `/codex:review` `/codex:adversarial-review` `/codex:rescue` `/codex:status` `/codex:result` `/codex:cancel` `/codex:setup` 等 **slash command**,以及 `codex:codex-rescue` **subagent**(`/reload-plugins` + 新会话后才进 subagent_type 池)。**关键约束(2026-05-23 实测插件源码):`/codex:review` / `/codex:adversarial-review` / `/codex:status` / `/codex:result` / `/codex:cancel` 全是 `disable-model-invocation: true` —— 只有用户手敲 slash command 才触发,主 agent 用 `Skill` 工具调不动(它们不在会话 skill 列表里,盲调 hard fail)。能被主 agent 程序化调用的只有 `codex:rescue` 和 `codex:setup`;`codex:rescue` 是自动化流水线(megareview / superreview)里 codex 的唯一程序化入口** —— `Skill({ skill: "codex:rescue", args: "--background --fresh <prompt>" })`,底层 `task` 默认就是 `--sandbox read-only`(**别传 `--write`**),它内部自己 spawn `codex:codex-rescue` subagent,**不要**当 `Agent` 的 subagent_type 直接派。codex CLI 在 `/opt/homebrew/bin/codex`(ChatGPT 登录);`codex:rescue` skill 当前会话不可用(没 reload / scope 没启用,会话 skill 列表里没有)时,用 `codex exec` 兜底(audit 加 `--sandbox read-only`;diff review 用 `codex exec review`),都没有就跳过 codex 步并在报告注明。`megareview` / `superreview` 都靠它做跨模型终审。
 - **怎么办**:不确定走 `general-purpose` + 把 focus 写进 prompt。`.claude/agents/*.md` 的内容也可以**抄进 prompt** 给 `general-purpose` 用,等同手贴 system prompt。读 / 搜代码走 `Explore`,设计 plan 走 `Plan`。
 - **Hooks**(PostToolUse,失败不阻塞对话):`.claude/hooks/server-lint.sh` 编辑 `server/*.js` 后静默跑 `eslint --fix` + `prettier --write`;`.claude/hooks/swift-lint.sh` 编辑 `Chronote/` / `LumoryWidgets/` / `LumoryWidgetShared/` 下 Swift 文件后在已安装 `swiftlint` 时跑 `swiftlint lint --fix`;`.claude/hooks/i18n-parity.sh` 编辑 `Chronote/*/Localizable.strings` 后检查中英文 key 同步与重复 key。改 hook 脚本记得 `chmod +x`。

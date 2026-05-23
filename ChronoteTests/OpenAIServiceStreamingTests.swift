@@ -23,6 +23,10 @@ import XCTest
 final class OpenAIServiceStreamingTests: XCTestCase {
 
     private var service: OpenAIService!
+    private struct RequestBody: Decodable {
+        struct Message: Decodable { let content: String }
+        let messages: [Message]
+    }
 
     override func setUp() async throws {
         try await super.setUp()
@@ -206,5 +210,83 @@ final class OpenAIServiceStreamingTests: XCTestCase {
             XCTFail("缺 [DONE] 已 yield chunk 路径终态应为 .truncated,实际 events=\(events)")
             return
         }
+    }
+
+    func test_askEvents_trimsLargeQuestionAndContextBeforeSending() async throws {
+        let body = makeSSEBody(frames: [chunkJSON(content: "ok", finishReason: "stop")])
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream"]
+            )!
+            return (response, body)
+        }
+
+        let entries = (0..<6).map { index in
+            DiaryEntryData(
+                id: UUID(),
+                date: Date(timeIntervalSince1970: 1_700_000_000 + TimeInterval(index)),
+                text: String(repeating: "很长的日记内容", count: 5_000),
+                moodValue: 0.5,
+                summary: "",
+                themes: [],
+                embedding: nil,
+                wordCount: 50_000
+            )
+        }
+        _ = await collectEvents(service.askEvents(
+            question: String(repeating: "这个问题也很长", count: 1_000),
+            context: entries
+        ))
+
+        XCTAssertEqual(MockURLProtocol.recordedRequests.count, 1)
+        let requestBody = try XCTUnwrap(MockURLProtocol.recordedRequests.first?.body)
+
+        let decoded = try JSONDecoder().decode(RequestBody.self, from: requestBody)
+        let prompt = try XCTUnwrap(decoded.messages.first?.content)
+        XCTAssertLessThanOrEqual(prompt.utf16.count, 31_000)
+        XCTAssertTrue(prompt.contains("用户问题"))
+        XCTAssertTrue(prompt.contains("相关日记"))
+    }
+
+    func test_askEvents_trimsLargeEnglishQuestionAndContextBeforeSending() async throws {
+        let body = makeSSEBody(frames: [chunkJSON(content: "ok", finishReason: "stop")])
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream"]
+            )!
+            return (response, body)
+        }
+
+        let entries = (0..<6).map { index in
+            DiaryEntryData(
+                id: UUID(),
+                date: Date(timeIntervalSince1970: 1_700_000_000 + TimeInterval(index)),
+                text: String(repeating: "very long diary content ", count: 5_000),
+                moodValue: 0.5,
+                summary: "",
+                themes: [],
+                embedding: nil,
+                wordCount: 50_000
+            )
+        }
+        _ = await collectEvents(service.askEvents(
+            question: String(repeating: "This question is also very long. ", count: 1_000),
+            context: entries
+        ))
+
+        XCTAssertEqual(MockURLProtocol.recordedRequests.count, 1)
+        let requestBody = try XCTUnwrap(MockURLProtocol.recordedRequests.first?.body)
+        let decoded = try JSONDecoder().decode(RequestBody.self, from: requestBody)
+        let prompt = try XCTUnwrap(decoded.messages.first?.content)
+        XCTAssertLessThanOrEqual(prompt.utf16.count, 31_000)
+        XCTAssertTrue(prompt.contains("Question:"))
+        XCTAssertTrue(prompt.contains("Relevant entries:"))
+        XCTAssertFalse(prompt.contains("用户问题"))
     }
 }

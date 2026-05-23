@@ -27,18 +27,26 @@ extension HomeView {
 
         guard let audioURL = Self.resolvedAudioURL(fileName: fileName) else {
             Log.info("[HomeView playAudio] File NOT FOUND: \(fileName). Current SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
-            // **失败提示**:文件丢失走早返路径 — onPlayError 不会 fire,banner 不会显示。这里手动 set。
-            recordingVM.audioPlaybackError = NSLocalizedString("无法播放该录音,文件可能已损坏或丢失。",
-                                                                comment: "Audio playback failure banner")
-            if recordingVM.currentAudioFileName == fileName { // 如果UI上显示的是这个不存在的文件
-                 Log.info("[HomeView playAudio] Clearing SFCFN because file missing. Old SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
-                 withAnimation(AnimationConfig.standardResponse) {
-                    recordingVM.currentAudioFileName = nil // SET NIL
-                    Log.info("[HomeView playAudio] Did set SFCFN to nil due to missing file. New SFCFN: \(recordingVM.currentAudioFileName ?? "nil")", category: .ui)
-                 }
-                 if audioPlaybackController.currentPlayingFileName == fileName {
-                    audioPlaybackController.stopPlayback()
-                 }
+            LumoryToastCenter.shared.show(
+                NSLocalizedString("无法播放该录音,文件可能已损坏或丢失。",
+                                  comment: "Audio playback failure banner"),
+                severity: .warning
+            )
+            Log.info("[HomeView playAudio] Removing stale missing recording row: \(fileName)", category: .ui)
+            let wasCurrentRecording = recordingVM.currentAudioFileName == fileName
+            withAnimation(AnimationConfig.standardResponse) {
+                if wasCurrentRecording {
+                    recordingVM.currentAudioFileName = nil
+                }
+                recordingVM.audioRecordings.removeAll { $0.fileName == fileName }
+            }
+            if wasCurrentRecording {
+                recordingVM.transcriptionTask?.cancel()
+                recordingVM.transcriptionTask = nil
+                recordingVM.isTranscribing = false
+            }
+            if audioPlaybackController.currentPlayingFileName == fileName {
+                audioPlaybackController.stopPlayback()
             }
             return
         }

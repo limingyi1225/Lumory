@@ -599,9 +599,11 @@ struct HomeComposerCard: View {
     /// `hasSendableContent` 仍 true 就会进第二次 send 拿旧 snapshot 并发写两条重复)。把 `isSending`
     /// 纳入 UI 级互斥 + parent 的 `handleSendAction` 开头再加一层 guard 兜底,双重保险。
     private var hasSendableContent: Bool {
-        (!inputVM.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !recordingVM.audioRecordings.isEmpty
+        let hasPersistedAudio = recordingVM.currentAudioFileName != nil && !recordingVM.audioRecordings.isEmpty
+        return (!inputVM.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || hasPersistedAudio
             || !photoVM.selectedImageItems.isEmpty)
+            && !recorder.isRecording
             && !recordingVM.isTranscribing
             && !photoVM.isProcessingSelection
             && !inputVM.isSending

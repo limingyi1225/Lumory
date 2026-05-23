@@ -210,6 +210,98 @@ struct InsightsSearchEngineTests {
         #expect(answerText.contains("基于 \(citationCount) 条日记"), "Mock 回答应证明 citation 数量等于 askEvents 实际 context,实际: \(answerText)")
     }
 
+    @Test func ask_excludesFutureDatedEntriesFromContext() async {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        let now = Date()
+        makeEntry(
+            in: ctx,
+            text: "past context should be visible",
+            date: now.addingTimeInterval(-60),
+            withEmbedding: true,
+            embedding: vector(cosine: 0.95)
+        )
+        makeEntry(
+            in: ctx,
+            text: "future context must stay hidden",
+            date: now.addingTimeInterval(86_400),
+            withEmbedding: true,
+            embedding: vector(cosine: 1.0)
+        )
+        try? ctx.save()
+
+        let engine = InsightsEngine(persistence: persistence, ai: ContextEchoAI())
+        var answerText = ""
+        for await chunk in engine.ask("context", topK: 3) {
+            if case .text = chunk.kind {
+                answerText += chunk.text
+            }
+        }
+
+        #expect(answerText.contains("past context should be visible"))
+        #expect(!answerText.contains("future context must stay hidden"))
+    }
+
+    @Test func searchSemantic_excludesFutureDatedEntries() async {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        let now = Date()
+        let past = makeEntry(
+            in: ctx,
+            text: "past semantic result",
+            date: now.addingTimeInterval(-60),
+            withEmbedding: true,
+            embedding: vector(cosine: 0.95)
+        )
+        let future = makeEntry(
+            in: ctx,
+            text: "future semantic result",
+            date: now.addingTimeInterval(86_400),
+            withEmbedding: true,
+            embedding: vector(cosine: 1.0)
+        )
+        try? ctx.save()
+
+        let searchEngine = InsightsSearchEngine(persistence: persistence, ai: ContextEchoAI())
+        let result = await searchEngine.searchSemantic(query: "semantic", topK: 5)
+
+        #expect(result.ids.contains(past.objectID))
+        #expect(!result.ids.contains(future.objectID))
+    }
+
+    @Test func recentEntries_excludesFutureDatedEntries() async {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        let now = Date()
+        makeEntry(in: ctx, text: "past recent entry", date: now.addingTimeInterval(-60), withEmbedding: false)
+        makeEntry(in: ctx, text: "future recent entry", date: now.addingTimeInterval(86_400), withEmbedding: false)
+        try? ctx.save()
+
+        let engine = InsightsEngine(persistence: persistence, ai: MockAIService())
+        let entries = await engine.recentEntries(limit: 5, textCharCap: 200)
+
+        #expect(entries.map(\.text).contains("past recent entry"))
+        #expect(!entries.map(\.text).contains("future recent entry"))
+    }
+
+    @Test func narrativeInput_excludesFutureDatedEntriesEvenWhenRangeEndsInFuture() async {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        let now = Date()
+        makeEntry(in: ctx, text: "past narrative entry", date: now.addingTimeInterval(-60), withEmbedding: false)
+        makeEntry(in: ctx, text: "future narrative entry", date: now.addingTimeInterval(86_400), withEmbedding: false)
+        try? ctx.save()
+
+        let engine = InsightsEngine(persistence: persistence, ai: MockAIService())
+        let input = await engine.narrativeInput(
+            in: DateInterval(start: now.addingTimeInterval(-3_600), end: now.addingTimeInterval(172_800))
+        )
+
+        let texts = input.entries.map(\.text)
+        #expect(texts.contains("past narrative entry"))
+        #expect(!texts.contains("future narrative entry"))
+    }
+
     @Test func ask_facade_dynamicallyTrimsWeakSemanticCandidates() async {
         let persistence = PersistenceController(inMemory: true)
         let ctx = persistence.container.viewContext

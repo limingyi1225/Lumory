@@ -42,15 +42,14 @@ print('passed=',d['passedTests'],'failed=',d['failedTests'])
 
 截图模式下任何主动系统授权都必须 early return,否则权限弹窗会盖住首屏:`AudioRecorder.startRecording()` 在 `UITestSampleData.isActive` 时跳过麦克风弹窗;`ReminderService.enable()` 同样早返(防 toggle 被意外触发时通知权限弹窗盖住截图)。旧 `ChronoteApp.requestPermissions()` 已删除,启动不再主动请求麦克风权限;任何新加的 `requestRecordPermission` / `requestAuthorization` 路径都得过这道闸。
 
-`Scripts/generate-screenshots.sh` 默认 iPhone 17 Pro Max → `simctl status_bar override`(9:41 / 满电) → `xcodebuild test -only-testing ... -parallel-testing-enabled NO` → `xcresulttool export attachments`。
-
-iPad:`./Scripts/generate-screenshots.sh ipad` → 2064×2752 → `Screenshots/zh-Hans-iPad/`。任意机型:`LUMORY_SIM="iPhone 13 Pro Max - Lumory" ./Scripts/generate-screenshots.sh`。
+`Scripts/generate-screenshots.sh` 已删除。需要截图证据时直接跑 `ChronoteUITests/ScreenshotTests`
+或重新设计一条显式失败即失败的截图流水线,不要恢复旧脚本的 partial-success 行为。
 
 iPad 上 `lumoryAdaptiveModal` 走 `fullScreenCover`(`shouldUseExpandedModal: isPad || hSizeClass == .regular`,见 [LumoryAdaptivePresentation.swift:12](Chronote/Views/Components/LumoryAdaptivePresentation.swift:12)),Insights / AskPast / Settings 等都全屏覆盖,iPad 截图跟 iPhone 视觉一致。
 
 ## bash PIPESTATUS
 
-**`cmd1 | cmd2 || true` 会覆盖 `PIPESTATUS`**。`|| true` 之后 `${PIPESTATUS[0]}` 只剩 `true` 的 exit code,原 pipeline 状态丢光。需要真实 exit code 时改用 `set +e` + 直接 pipeline(不加 `|| true`),然后读 `PIPESTATUS[0]`,最后 `set -e`(参见 `Scripts/generate-screenshots.sh`)。
+**`cmd1 | cmd2 || true` 会覆盖 `PIPESTATUS`**。`|| true` 之后 `${PIPESTATUS[0]}` 只剩 `true` 的 exit code,原 pipeline 状态丢光。需要真实 exit code 时改用 `set +e` + 直接 pipeline(不加 `|| true`),然后读 `PIPESTATUS[0]`,最后 `set -e`。
 
 ## MockURLProtocol 基建(2026-05-16)
 

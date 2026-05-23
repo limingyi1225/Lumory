@@ -209,6 +209,70 @@ struct ReminderServiceImperativeTests {
         #expect(service.authorizationStatus == .provisional)
     }
 
+    @Test func refreshAuthorizationStatus_deniedDrainsInFlightRescheduleBeforeReturning() async {
+        let center = MockReminderNotificationCenter()
+        center.authorizationStatusToReturn = .authorized
+        center.addDelayNanos = 20_000_000
+        let now = makeDate(year: 2026, month: 4, day: 7, hour: 10)
+        let anchor = makeDate(year: 2026, month: 4, day: 1)
+        let service = makeService(
+            center: center,
+            isEnabled: true,
+            frequency: .weekly,
+            anchorDate: anchor,
+            hour: 21,
+            minute: 0,
+            dateProvider: { now },
+            lastEntryDateProvider: { nil }
+        )
+
+        service.requestReschedule()
+        await center.waitUntilAddStarted(count: 1)
+        center.authorizationStatusToReturn = .denied
+
+        await service.refreshAuthorizationStatus()
+
+        #expect(service.isEnabled == false)
+        #expect(center.pendingRequests.contains { $0.identifier.hasPrefix("lumory.reminder.") } == false)
+        #expect(center.removedPendingIDs.flatMap { $0 }.contains { $0.hasPrefix("lumory.reminder.") })
+    }
+
+    @Test func requestReschedule_authorizationDeniedInsideTask_finishesWithoutSelfAwait() async {
+        let center = MockReminderNotificationCenter()
+        center.authorizationStatusToReturn = .denied
+        center.seedPending(identifiers: [
+            "lumory.reminder.today.gen0",
+            "some.other.app.reminder"
+        ])
+        center.deliveredIDs = [
+            "lumory.reminder.today.gen0",
+            "some.other.app.notification"
+        ]
+        let now = makeDate(year: 2026, month: 4, day: 7, hour: 10)
+        let anchor = makeDate(year: 2026, month: 4, day: 1)
+        let service = makeService(
+            center: center,
+            isEnabled: true,
+            frequency: .weekly,
+            anchorDate: anchor,
+            hour: 21,
+            minute: 0,
+            dateProvider: { now },
+            lastEntryDateProvider: { nil }
+        )
+        let previousCompletionCount = service.rescheduleCompletionCountForTesting
+
+        service.requestReschedule()
+        let completed = await service.awaitPendingRescheduleTaskForTesting(timeoutNanoseconds: 2_000_000_000)
+
+        #expect(completed, "doReschedule 内部发现权限被拒时不能 await 当前 rescheduleTask 本身")
+        #expect(service.rescheduleCompletionCountForTesting > previousCompletionCount)
+        #expect(service.isEnabled == false)
+        #expect(center.addedRequests.isEmpty, "权限被撤销后不应继续挂新 reminder")
+        #expect(center.pendingRequests.contains { $0.identifier.hasPrefix("lumory.reminder.") } == false)
+        #expect(center.deliveredIDs.contains { $0.hasPrefix("lumory.reminder.") } == false)
+    }
+
     // MARK: - enable / disable
 
     @Test func enable_requestsAuthorizationWithAlertAndSoundOnly() async {

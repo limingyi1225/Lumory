@@ -16,7 +16,7 @@ import Combine
 
 @available(iOS 15.0, macOS 12.0, *)
 final class EmbeddingBackfillService: ObservableObject {
-    static let shared = EmbeddingBackfillService()
+    static let shared = EmbeddingBackfillService(expectedDimensions: [1_536])
 
     // MARK: Public state
 
@@ -38,6 +38,7 @@ final class EmbeddingBackfillService: ObservableObject {
     private let ai: AIServiceProtocol
     private let batchSize: Int
     private let throttleNanos: UInt64
+    private let expectedDimensions: Set<Int>?
 
     // runningTask 加 @MainActor 隔离：所有 start / cancel 入口都要 await 到 MainActor 才能读写，
     // 从而保证 Settings「一键重建」按钮、自动路径、未来的 auto-backfill 任何多入口都在同一条线上排队。
@@ -52,12 +53,14 @@ final class EmbeddingBackfillService: ObservableObject {
         // 撞死。改 batch=3, throttle=900ms → peak ~200 req/min，留 50% headroom。
         // 500 条日记跑完约 2.5 分钟。
         batchSize: Int = 3,
-        throttleMs: UInt64 = 900
+        throttleMs: UInt64 = 900,
+        expectedDimensions: Set<Int>? = nil
     ) {
         self.persistence = persistence
         self.ai = ai
         self.batchSize = batchSize
         self.throttleNanos = throttleMs * 1_000_000
+        self.expectedDimensions = expectedDimensions
     }
 
     // MARK: Public API
@@ -149,23 +152,18 @@ final class EmbeddingBackfillService: ObservableObject {
     /// (Lumory 量级 SQL count < 1ms,不需要再套 5s 的 stale cache)
     @MainActor
     func pendingCount() async -> Int {
-        await persistence.container.performBackgroundTask { context -> Int in
-            let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
-            request.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
-            return (try? context.count(for: request)) ?? 0
+        let expectedDimensions = expectedDimensions
+        return await persistence.container.performBackgroundTask { context -> Int in
+            countEntriesNeedingEmbedding(in: context, expectedDimensions: expectedDimensions)
         }
     }
 
     // MARK: DB helpers
 
     private func fetchMissingObjectIDs() async -> [NSManagedObjectID] {
-        await persistence.container.performBackgroundTask { context -> [NSManagedObjectID] in
-            let request = NSFetchRequest<NSManagedObjectID>(entityName: "DiaryEntry")
-            // 只挑 text 非空且 embedding 为 nil 的
-            request.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
-            request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
-            request.resultType = .managedObjectIDResultType
-            return (try? context.fetch(request)) ?? []
+        let expectedDimensions = expectedDimensions
+        return await persistence.container.performBackgroundTask { context -> [NSManagedObjectID] in
+            objectIDsNeedingEmbedding(in: context, expectedDimensions: expectedDimensions)
         }
     }
 
@@ -183,6 +181,10 @@ final class EmbeddingBackfillService: ObservableObject {
         let vector = await ai.embed(text: text)
         guard let vector, !vector.isEmpty else {
             Log.error("[EmbeddingBackfill] embed 失败: \(objectID)", category: .migration)
+            return false
+        }
+        if let expectedDimensions, !expectedDimensions.contains(vector.count) {
+            Log.error("[EmbeddingBackfill] embed 维度不符: got \(vector.count), expected \(expectedDimensions.sorted())", category: .migration)
             return false
         }
         guard !Task.isCancelled else {
@@ -223,6 +225,78 @@ final class EmbeddingBackfillService: ObservableObject {
 }
 
 // MARK: - Array chunk helper
+
+private func countEntriesNeedingEmbedding(in context: NSManagedObjectContext, expectedDimensions: Set<Int>?) -> Int {
+    guard let expectedDimensions, !expectedDimensions.isEmpty else {
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
+        return (try? context.count(for: request)) ?? 0
+    }
+
+    let missingRequest: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+    missingRequest.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
+    let missingCount = (try? context.count(for: missingRequest)) ?? 0
+
+    let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+    request.resultType = .dictionaryResultType
+    request.propertiesToFetch = ["embedding"]
+    request.predicate = NSPredicate(format: "embedding != nil AND text != nil AND text != %@", "")
+    let rows = (try? context.fetch(request)) ?? []
+    let mismatchedCount = rows.reduce(into: 0) { count, row in
+        guard let data = row["embedding"] as? Data,
+              let vector = DiaryEntry.decodeEmbeddingVector(data),
+              expectedDimensions.contains(vector.count) else {
+            count += 1
+            return
+        }
+    }
+    return missingCount + mismatchedCount
+}
+
+private func objectIDsNeedingEmbedding(
+    in context: NSManagedObjectContext,
+    expectedDimensions: Set<Int>?
+) -> [NSManagedObjectID] {
+    guard let expectedDimensions, !expectedDimensions.isEmpty else {
+        let request = NSFetchRequest<NSManagedObjectID>(entityName: "DiaryEntry")
+        request.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+        request.resultType = .managedObjectIDResultType
+        return (try? context.fetch(request)) ?? []
+    }
+
+    let missingRequest = NSFetchRequest<NSManagedObjectID>(entityName: "DiaryEntry")
+    missingRequest.predicate = NSPredicate(format: "embedding == nil AND text != nil AND text != %@", "")
+    missingRequest.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
+    missingRequest.resultType = .managedObjectIDResultType
+    let missingIDs = (try? context.fetch(missingRequest)) ?? []
+
+    let objectIDExpr = embeddingObjectIDExpression()
+    let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+    request.resultType = .dictionaryResultType
+    request.propertiesToFetch = [objectIDExpr, "embedding"]
+    request.predicate = NSPredicate(format: "embedding != nil AND text != nil AND text != %@", "")
+    request.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
+    let rows = (try? context.fetch(request)) ?? []
+    let mismatchedIDs = rows.compactMap { row -> NSManagedObjectID? in
+        guard let objectID = row["objectID"] as? NSManagedObjectID else { return nil }
+        guard let data = row["embedding"] as? Data,
+              let vector = DiaryEntry.decodeEmbeddingVector(data),
+              expectedDimensions.contains(vector.count) else {
+            return objectID
+        }
+        return nil
+    }
+    return missingIDs + mismatchedIDs
+}
+
+private func embeddingObjectIDExpression() -> NSExpressionDescription {
+    let objectIDExpr = NSExpressionDescription()
+    objectIDExpr.name = "objectID"
+    objectIDExpr.expression = NSExpression.expressionForEvaluatedObject()
+    objectIDExpr.expressionResultType = .objectIDAttributeType
+    return objectIDExpr
+}
 
 private extension Array {
     func chunked(into size: Int) -> [[Element]] {

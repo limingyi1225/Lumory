@@ -96,6 +96,17 @@ extension HomeView {
         _ = processStoppedRecording(fileName: fileName, duration: recorder.duration)
     }
 
+    @MainActor
+    func finalizeActiveRecordingForBackground() {
+        guard recorder.isRecording else { return }
+        guard let fileName = recorder.stopRecording() else {
+            Log.info("[HomeView] background recording stop returned nil", category: .ui)
+            return
+        }
+        Log.info("[HomeView] finalized active recording before background: \(fileName)", category: .ui)
+        _ = processStoppedRecording(fileName: fileName, duration: recorder.duration)
+    }
+
     /// 走过了 `recorder.stopRecording()` 之后,把 (fileName, duration) 接进 UI 状态、清孤儿、起转写。
     /// 用户主动按停 (handleStopRecording) 和被音频中断 (recorder.interruptedRecordingFileName .onChange)
     /// 都走这里,**保证中断录到的段落不会被默默吞掉**。

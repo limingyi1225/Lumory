@@ -426,12 +426,14 @@ final class InsightsEngine {
     /// 返回最近 `limit` 条日记，按时间倒序。每条的 `text` 会被截到 `textCharCap` 字符以内，
     /// 避免塞给 LLM 的 context 膨胀。
     func recentEntries(limit: Int = 3, textCharCap: Int = 200) async -> [DiaryEntryData] {
-        await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
+        let now = Date()
+        return await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
             // (megareview P1 #6)dict-fetch 真投影,同 `fetchEntryData` 改法 —— grounding 用例
             // 只读 7 个标量列,绝不进 imagesData / audioFileName。
             let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
             request.resultType = .dictionaryResultType
             request.propertiesToFetch = ["id", "date", "text", "moodValue", "summary", "themes", "wordCount"]
+            request.predicate = NSPredicate(format: "date <= %@", now as NSDate)
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
             request.fetchLimit = limit
 
@@ -459,7 +461,11 @@ final class InsightsEngine {
     // MARK: - Private
 
     private func fetchEntryData(in range: DateInterval, includeEmbedding: Bool = false) async -> [DiaryEntryData] {
-        await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
+        let now = Date()
+        let cappedEnd = min(range.end, now)
+        guard range.start <= cappedEnd else { return [] }
+
+        return await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
             // (megareview P1 #6)dict-fetch 真投影 —— 之前用 `NSFetchRequest<DiaryEntry>` +
             // `returnsObjectsAsFaults = false` 强制实例化全字段(`imagesData` Binary external
             // KB-MB / `embedding` KB / 整 `text` / `imageFileNames` / `audioFileName`)。
@@ -475,7 +481,7 @@ final class InsightsEngine {
             if includeEmbedding { fields.append("embedding") }
             request.propertiesToFetch = fields
             request.predicate = NSPredicate(format: "date >= %@ AND date <= %@",
-                                            range.start as NSDate, range.end as NSDate)
+                                            range.start as NSDate, cappedEnd as NSDate)
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: true)]
 
             guard let rows = try? context.fetch(request) else { return [] }

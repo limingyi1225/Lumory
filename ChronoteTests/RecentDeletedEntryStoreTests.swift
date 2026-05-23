@@ -167,6 +167,72 @@ struct RecentDeletedEntryStoreTests {
         #expect(try context.fetch(request).isEmpty)
     }
 
+    @Test func restoreWithEntryIDCollisionRegeneratesAttachmentFileNames() async throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recent-deleted-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        RecentDeletedEntryStore.setRootDirectoryForTesting(tempRoot)
+        let originalImageFileName = "recent-collision-\(UUID().uuidString).jpg"
+        let originalAudioFileName = "recent-collision-\(UUID().uuidString).m4a"
+        defer {
+            RecentDeletedEntryStore.setRootDirectoryForTesting(nil)
+            try? FileManager.default.removeItem(at: tempRoot)
+            try? DiaryEntry.deleteImageFromDocuments(originalImageFileName)
+            DiaryEntry.deleteAudioFromDocuments(originalAudioFileName)
+        }
+
+        _ = try DiaryEntry.saveImageToDocuments(Data("original-image".utf8), fileName: originalImageFileName)
+        let audioDirectory = try LumoryAttachmentPaths.ensureLocalDirectory(for: .audio)
+        try Data("original-audio".utf8).write(to: audioDirectory.appendingPathComponent(originalAudioFileName))
+
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let entryID = UUID()
+        let deleted = DiaryEntry(context: context)
+        deleted.id = entryID
+        deleted.date = Date()
+        deleted.text = "Deleted copy"
+        deleted.moodValue = 0.5
+        deleted.imageFileNames = originalImageFileName
+        deleted.audioFileName = originalAudioFileName
+        try context.save()
+
+        let snapshot = EntryDeletionSnapshot(entry: deleted)
+        context.delete(deleted)
+        try context.save()
+        #expect(await RecentDeletedEntryStore.archive(snapshot: snapshot))
+        let archiveID = try #require((await RecentDeletedEntryStore.previews()).first?.id)
+
+        let existing = DiaryEntry(context: context)
+        existing.id = entryID
+        existing.date = Date()
+        existing.text = "Already restored elsewhere"
+        existing.moodValue = 0.5
+        existing.imageFileNames = originalImageFileName
+        existing.audioFileName = originalAudioFileName
+        try context.save()
+
+        #expect(await RecentDeletedEntryStore.restore(archiveID: archiveID, into: context))
+
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.text, ascending: true)]
+        let restoredEntries = try context.fetch(request)
+        let restored = try #require(restoredEntries.first { $0.wrappedText == "Deleted copy" })
+        #expect(restored.id != entryID)
+        #expect(restored.imageFileNameArray.count == 1)
+        #expect(restored.imageFileNameArray.first != originalImageFileName)
+        #expect(restored.audioFileName != originalAudioFileName)
+
+        if let newImage = restored.imageFileNameArray.first {
+            #expect(LumoryAttachmentPaths.existingURL(fileName: newImage, kind: .image) != nil)
+            try? DiaryEntry.deleteImageFromDocuments(newImage)
+        }
+        if let newAudio = restored.audioFileName {
+            #expect(LumoryAttachmentPaths.existingURL(fileName: newAudio, kind: .audio) != nil)
+            DiaryEntry.deleteAudioFromDocuments(newAudio)
+        }
+    }
+
     @Test func purgeAll_removesExistingArchives() async throws {
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("recent-deleted-\(UUID().uuidString)", isDirectory: true)

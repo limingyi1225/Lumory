@@ -124,6 +124,9 @@ final class ReminderService: ObservableObject {
     /// 兜底,避免老 task 用 stale 状态覆盖新 task 已写好的结果(codex P1 #5 fix)。
     private var rescheduleTask: Task<Void, Never>?
     private var currentRescheduleGen: Int = 0
+    #if DEBUG
+    private(set) var rescheduleCompletionCountForTesting = 0
+    #endif
 
     private convenience init() {
         self.init(notificationCenter: UNUserNotificationCenterAdapter(), defaults: UserDefaults.standard)
@@ -228,6 +231,10 @@ final class ReminderService: ObservableObject {
 
     /// Settings / app lifecycle 调,把 OS 当前权限同步到 @Published。
     func refreshAuthorizationStatus() async {
+        await refreshAuthorizationStatus(drainInFlightReschedule: true)
+    }
+
+    private func refreshAuthorizationStatus(drainInFlightReschedule: Bool) async {
         #if canImport(UserNotifications)
         // (megareview OPT-HIGH H4)走注入的 notificationCenter,生产 default adapter 跟之前一致;
         // protocol 返 `UNAuthorizationStatus` 而非 `UNNotificationSettings`(后者不可 mock 构造),
@@ -256,8 +263,7 @@ final class ReminderService: ObservableObject {
         if isEnabled, authorizationStatus == .denied {
             isEnabled = false
             defaults.set(false, forKey: enabledKey)
-            // 不绕 reschedule,直接 cancel(等价于 disable() 的 cancel-only 逻辑)。
-            await cancelAllPendingReminderNotifications()
+            await cancelDisabledReminderNotificationsDrainingInFlight(awaitInFlight: drainInFlightReschedule)
         }
         #endif
     }
@@ -308,6 +314,17 @@ final class ReminderService: ObservableObject {
 
     private func releaseMutationSlot() {
         isMutatingState = false
+    }
+
+    private func cancelDisabledReminderNotificationsDrainingInFlight(awaitInFlight: Bool = true) async {
+        let oldTask = awaitInFlight ? rescheduleTask : nil
+        rescheduleTask?.cancel()
+        currentRescheduleGen &+= 1
+        await cancelAllPendingReminderNotifications()
+        if awaitInFlight {
+            await oldTask?.value
+            await cancelAllPendingReminderNotifications()
+        }
     }
 
     /// 开 toggle:requestAuthorization + 落 schedule。返回 false 表示权限被拒。
@@ -369,12 +386,7 @@ final class ReminderService: ObservableObject {
         defer { releaseMutationSlot() }
         isEnabled = false
         defaults.set(false, forKey: enabledKey)
-        let oldTask = rescheduleTask
-        rescheduleTask?.cancel()
-        currentRescheduleGen &+= 1
-        await cancelAllPendingReminderNotifications()  // 1) 存量
-        await oldTask?.value  // Task<Void, Never>:cancel 后 await .value 仍等到 Task 退出
-        await cancelAllPendingReminderNotifications()  // 2) race 新增
+        await cancelDisabledReminderNotificationsDrainingInFlight()
     }
 
     func updateTime(hour newHour: Int, minute newMinute: Int) {
@@ -410,7 +422,11 @@ final class ReminderService: ObservableObject {
         currentRescheduleGen &+= 1
         let myGen = currentRescheduleGen
         rescheduleTask = Task { [weak self] in
-            await self?.doReschedule(gen: myGen)
+            guard let self else { return }
+            await self.doReschedule(gen: myGen)
+            #if DEBUG
+            await self.markRescheduleCompletedForTesting()
+            #endif
         }
     }
 
@@ -421,6 +437,27 @@ final class ReminderService: ObservableObject {
     #if DEBUG
     func awaitPendingRescheduleTaskForTesting() async {
         await rescheduleTask?.value
+    }
+
+    func awaitPendingRescheduleTaskForTesting(timeoutNanoseconds: UInt64) async -> Bool {
+        guard let task = rescheduleTask else { return true }
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await task.value
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func markRescheduleCompletedForTesting() {
+        rescheduleCompletionCountForTesting += 1
     }
     #endif
 
@@ -534,7 +571,8 @@ final class ReminderService: ObservableObject {
         }
         #endif
 
-        await refreshAuthorizationStatus()
+        // `doReschedule` is itself the current `rescheduleTask`; draining here would self-await.
+        await refreshAuthorizationStatus(drainInFlightReschedule: false)
         guard gen == currentRescheduleGen else { return }
         guard authorizationStatus == .authorized || authorizationStatus == .provisional else { return }
 

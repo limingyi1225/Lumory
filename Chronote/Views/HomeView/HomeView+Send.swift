@@ -42,6 +42,10 @@ extension HomeView {
             Log.info("[HomeView SendButton] 已有发送在跑，忽略重复 tap", category: .ui)
             return
         }
+        guard !recorder.isRecording else {
+            Log.info("[HomeView SendButton] 录音仍在进行，忽略发送", category: .ui)
+            return
+        }
         guard !photoVM.isProcessingSelection else {
             Log.info("[HomeView SendButton] 照片仍在处理中，忽略发送", category: .ui)
             return

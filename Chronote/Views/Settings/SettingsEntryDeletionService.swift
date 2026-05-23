@@ -1,4 +1,7 @@
 import CoreData
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 enum SettingsEntryDeletionService {
@@ -63,6 +66,17 @@ enum SettingsEntryDeletionService {
             return false
         }
 
+        #if canImport(UIKit)
+        let backgroundTask = SettingsBulkWipeBackgroundTaskHolder()
+        backgroundTask.id = UIApplication.shared.beginBackgroundTask(withName: "LumorySettingsBulkWipeAttachmentCleanup") {
+            Log.warning("[SettingsView] bulk-wipe attachment cleanup background task expired", category: .persistence)
+            endSettingsBulkWipeBackgroundTask(backgroundTask)
+        }
+        defer {
+            endSettingsBulkWipeBackgroundTask(backgroundTask)
+        }
+        #endif
+
         await Task.detached(priority: .utility) {
             for snapshot in attachmentSnapshots {
                 for fileName in snapshot.imageFileNames {
@@ -85,3 +99,17 @@ private struct EntryAttachmentSnapshot: Sendable {
     let imageFileNames: [String]
     let audioFileName: String?
 }
+
+#if canImport(UIKit)
+@MainActor
+private final class SettingsBulkWipeBackgroundTaskHolder {
+    var id: UIBackgroundTaskIdentifier = .invalid
+}
+
+@MainActor
+private func endSettingsBulkWipeBackgroundTask(_ holder: SettingsBulkWipeBackgroundTaskHolder) {
+    guard holder.id != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(holder.id)
+    holder.id = .invalid
+}
+#endif

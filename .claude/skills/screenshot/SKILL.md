@@ -1,11 +1,11 @@
 ---
 name: screenshot
-description: 跑 Lumory 的 App Store 上架截图流水线(iPhone / iPad),封装 simctl 状态栏 override + UI test + xcresult 导出。用户说"截图"、"生成上架截图"、"app store screenshot"、"出一组截图"时触发。
+description: 跑 Lumory 的 App Store 上架截图(iPhone / iPad),手动封装 simctl 状态栏 override + UI test + xcresult 导出。用户说"截图"、"生成上架截图"、"app store screenshot"、"出一组截图"时触发。
 ---
 
 # App Store 截图生成
 
-把 `Scripts/generate-screenshots.sh` 跑通,输出 6 张固定尺寸截图到 `Screenshots/zh-Hans/` 或 `Screenshots/zh-Hans-iPad/`。
+截图脚本已删除。需要截图时直接跑 `ChronoteUITests/ScreenshotTests`,再从 `.xcresult` 导出附件到目标目录。
 
 ## 触发场景
 - 用户要生成 App Store 上架截图
@@ -14,16 +14,39 @@ description: 跑 Lumory 的 App Store 上架截图流水线(iPhone / iPad),封�
 
 ## 命令
 
-| 场景 | 命令 | 输出 |
-|---|---|---|
-| iPhone(默认 1320×2868) | `./Scripts/generate-screenshots.sh` | `Screenshots/zh-Hans/` |
-| iPad(2064×2752) | `./Scripts/generate-screenshots.sh ipad` | `Screenshots/zh-Hans-iPad/` |
-| 指定 simulator | `LUMORY_SIM="iPhone 13 Pro Max - Lumory" ./Scripts/generate-screenshots.sh` | 同上 |
+1. 选一个固定 simulator,先设置状态栏:
+
+```bash
+xcrun simctl boot "iPhone 17 Pro Max" || true
+xcrun simctl status_bar "iPhone 17 Pro Max" override --time 9:41 --batteryState charged --batteryLevel 100
+```
+
+2. 串行跑截图 UI test,避免 Xcode clone simulator:
+
+```bash
+xcodebuild test \
+  -project Lumory.xcodeproj \
+  -scheme Lumory \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
+  -parallel-testing-enabled NO \
+  -disable-concurrent-destination-testing \
+  -only-testing:ChronoteUITests/ScreenshotTests \
+  -resultBundlePath /tmp/LumoryScreenshots.xcresult
+```
+
+3. 导出附件:
+
+```bash
+mkdir -p Screenshots/zh-Hans
+xcrun xcresulttool export attachments \
+  --path /tmp/LumoryScreenshots.xcresult \
+  --output-path Screenshots/zh-Hans
+```
 
 ## 必须知道的坑(来自 CLAUDE.md)
 
 1. **`-parallel-testing-enabled NO -disable-concurrent-destination-testing` 必加**
-   `xcodebuild test` 默认会 clone simulator,`simctl status_bar override` **不继承到 clone**,会导致截图角上是真实电量 / 真实时间。脚本里已处理,别手动改掉。
+   `xcodebuild test` 默认会 clone simulator,`simctl status_bar override` **不继承到 clone**,会导致截图角上是真实电量 / 真实时间。手动命令里必须保留串行 flags。
 
 2. **样例数据是启动参数触发,不是跑前准备**
    `-LumoryUITestSampleData YES` 触发 `UITestSampleData.seedIfNeeded`,会**同步擦库**后种入 30 条手写 + ~60 条模板化样例日记(主角"林子衿")。跑完别以为数据是你的。

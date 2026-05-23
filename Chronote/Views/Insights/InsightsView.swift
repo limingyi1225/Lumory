@@ -622,6 +622,7 @@ struct InsightsView: View {
         let rangeEnd = calendar.date(byAdding: .day, value: 1, to: rangeEndDay) ?? range.end
         let start = min(lookbackStart, rangeStart)
         let end = max(today, rangeEnd)
+        let fetchEnd = min(end, Date())
         let fetchRange = DateInterval(start: start, end: end)
         let cacheKey = "\(Int(start.timeIntervalSinceReferenceDate)):\(Int(end.timeIntervalSinceReferenceDate))"
 
@@ -649,7 +650,7 @@ struct InsightsView: View {
             request.predicate = NSPredicate(
                 format: "date >= %@ AND date <= %@",
                 fetchRange.start as NSDate,
-                fetchRange.end as NSDate
+                fetchEnd as NSDate
             )
             request.propertiesToFetch = ["date", "moodValue", "wordCount"]
             guard let rows = try? context.fetch(request) else { return [] }

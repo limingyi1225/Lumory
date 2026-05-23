@@ -85,7 +85,10 @@ final class DatabaseRecoveryService {
                 Log.error("[DatabaseRecovery] Failed to recreate store: \(error)", category: .persistence)
                 
                 // Try to restore from backup if recreation fails
-                self.restoreFromBackup(backupURL: backupURL, to: storeURL)
+                guard self.restoreFromBackup(backupURL: backupURL, to: storeURL) else {
+                    completion(.failure(RecoveryError.recoveryFailed))
+                    return
+                }
                 container.loadPersistentStores { _, retryError in
                     if let retryError = retryError {
                         completion(.failure(retryError))
@@ -162,51 +165,35 @@ final class DatabaseRecoveryService {
             try FileManager.default.copyItem(at: url, to: backupURL)
             Log.info("[DatabaseRecovery] Created backup at: \(backupURL.path)", category: .persistence)
 
-            // Also backup related files
-            for ext in Self.sqliteSidecarExtensions {
-                let sourceFile = url.deletingPathExtension().appendingPathExtension(ext)
-                let backupFile = backupURL.deletingPathExtension().appendingPathExtension(ext)
-                try? FileManager.default.copyItem(at: sourceFile, to: backupFile)
-            }
+            try Self.copyExistingStoreCompanions(from: url, to: backupURL)
 
             return backupURL
         } catch {
             Log.error("[DatabaseRecovery] Failed to create backup: \(error)", category: .persistence)
+            Self.deleteStoreFiles(at: backupURL)
             return nil
         }
     }
 
     func deleteCorruptedFiles(at url: URL) {
-        let fileManager = FileManager.default
-
-        // Delete main database file
-        try? fileManager.removeItem(at: url)
-
-        // Delete related files
-        for ext in Self.sqliteSidecarExtensions {
-            let file = url.deletingPathExtension().appendingPathExtension(ext)
-            try? fileManager.removeItem(at: file)
-        }
-
+        Self.deleteStoreFiles(at: url)
         Log.info("[DatabaseRecovery] Deleted corrupted database files", category: .persistence)
     }
 
-    func restoreFromBackup(backupURL: URL, to targetURL: URL) {
+    @discardableResult
+    func restoreFromBackup(backupURL: URL, to targetURL: URL) -> Bool {
         do {
-            try? FileManager.default.removeItem(at: targetURL)
+            Self.deleteStoreFiles(at: targetURL)
             try FileManager.default.copyItem(at: backupURL, to: targetURL)
             Log.info("[DatabaseRecovery] Restored from backup", category: .persistence)
 
-            // Mirror createBackup: also restore -wal / -shm / -ck 兄弟文件。
-            // checkpoint 干净时它们可能不存在，所以全部 try?。
-            for ext in Self.sqliteSidecarExtensions {
-                let backupSibling = backupURL.deletingPathExtension().appendingPathExtension(ext)
-                let targetSibling = targetURL.deletingPathExtension().appendingPathExtension(ext)
-                try? FileManager.default.removeItem(at: targetSibling)
-                try? FileManager.default.copyItem(at: backupSibling, to: targetSibling)
-            }
+            // Mirror createBackup: also restore WAL/SHM/CK and Core Data external binary storage.
+            try Self.copyExistingStoreCompanions(from: backupURL, to: targetURL)
+            return true
         } catch {
             Log.error("[DatabaseRecovery] Failed to restore from backup: \(error)", category: .persistence)
+            Self.deleteStoreFiles(at: targetURL)
+            return false
         }
     }
     
@@ -305,16 +292,66 @@ final class DatabaseRecoveryService {
                     try FileManager.default.removeItem(at: backup)
 
                     // Also remove related files
-                    for ext in Self.sqliteSidecarExtensions {
-                        let file = backup.deletingPathExtension().appendingPathExtension(ext)
-                        try? FileManager.default.removeItem(at: file)
-                    }
+                    Self.deleteStoreCompanions(at: backup)
                 }
 
                 Log.info("[DatabaseRecovery] Cleaned up \(backups.count - keepLast) old backups", category: .persistence)
             }
         } catch {
             Log.error("[DatabaseRecovery] Failed to cleanup old backups: \(error)", category: .persistence)
+        }
+    }
+}
+
+extension DatabaseRecoveryService {
+    static func sidecarURL(for sqliteURL: URL, ext: String) -> URL {
+        sqliteURL.deletingPathExtension().appendingPathExtension(ext)
+    }
+
+    /// Core Data external binary storage is a sibling support directory. On current Apple stores
+    /// this is commonly `.Model_SUPPORT` for `Model.sqlite`; keep a couple of historical/spelled-out
+    /// candidates so backup/recovery remains conservative if the store basename ever changes.
+    static func externalStorageDirectoryCandidates(for sqliteURL: URL) -> [URL] {
+        let directory = sqliteURL.deletingLastPathComponent()
+        let basename = sqliteURL.deletingPathExtension().lastPathComponent
+        return [
+            directory.appendingPathComponent(".\(basename)_SUPPORT", isDirectory: true),
+            directory.appendingPathComponent("\(basename)_SUPPORT", isDirectory: true),
+            directory.appendingPathComponent("\(sqliteURL.lastPathComponent)_SUPPORT", isDirectory: true)
+        ]
+    }
+
+    static func copyExistingStoreCompanions(from sourceURL: URL, to targetURL: URL) throws {
+        let fm = FileManager.default
+        for ext in sqliteSidecarExtensions {
+            let source = sidecarURL(for: sourceURL, ext: ext)
+            guard fm.fileExists(atPath: source.path) else { continue }
+            let target = sidecarURL(for: targetURL, ext: ext)
+            try? fm.removeItem(at: target)
+            try fm.copyItem(at: source, to: target)
+        }
+
+        let sourceSupportCandidates = externalStorageDirectoryCandidates(for: sourceURL)
+        let targetSupportCandidates = externalStorageDirectoryCandidates(for: targetURL)
+        for (source, target) in zip(sourceSupportCandidates, targetSupportCandidates) {
+            guard fm.fileExists(atPath: source.path) else { continue }
+            try? fm.removeItem(at: target)
+            try fm.copyItem(at: source, to: target)
+        }
+    }
+
+    static func deleteStoreFiles(at sqliteURL: URL) {
+        try? FileManager.default.removeItem(at: sqliteURL)
+        deleteStoreCompanions(at: sqliteURL)
+    }
+
+    static func deleteStoreCompanions(at sqliteURL: URL) {
+        let fm = FileManager.default
+        for ext in sqliteSidecarExtensions {
+            try? fm.removeItem(at: sidecarURL(for: sqliteURL, ext: ext))
+        }
+        for directory in externalStorageDirectoryCandidates(for: sqliteURL) {
+            try? fm.removeItem(at: directory)
         }
     }
 }

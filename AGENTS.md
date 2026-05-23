@@ -60,7 +60,6 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,主 App ta
 - `server/` — Node 后端。代码主体集中在 [index.js](server/index.js)(Express 5 + pino + pino-http + express-rate-limit + axios + cors + dotenv),目录内还有 `package.json` / `package-lock.json` / `eslint.config.js`。
 - `ecosystem.config.js` — PM2 配置(`lumory-server`,fork 模式,`max_memory_restart: 512M`)。
 - `Scripts/reset-database.sh`、根目录 `clean-build.sh` / `deep-clean.sh` / `clean-corrupted-db.sh` — 维护脚本。
-- `Scripts/generate-screenshots.sh` — 自动跑 `ChronoteUITests/ScreenshotTests` 出 6 张 1320×2868 的 App Store 截图到 `Screenshots/zh-Hans/`。流程:boot iPhone 17 Pro Max → `simctl status_bar override`(9:41 / 满电) → `xcodebuild test -only-testing ... -parallel-testing-enabled NO` → `xcresulttool export attachments`。
 - `.codex/` — Codex 本地配置:agents(`*.toml`) + hooks(`hooks.json` / `hooks/server-lint.sh`)。
 - `.claude/` — Claude 侧 agents / skills / rules / hooks。`rules/ios-codebase.md` 管 `Chronote/**` / `LumoryWidgets/**` / `LumoryWidgetShared/**`,`rules/views-design-tokens.md` 管 `Chronote/Views/**`,`rules/backend-server.md` 管 `server/**` / `ecosystem.config.js`,`rules/testing.md` 管 `ChronoteTests/**` / `ChronoteUITests/**` / `Scripts/**`;这些 rule file 是 Claude 的 path-scoped 详细规则,Codex 需要时也应主动查。`skills/screenshot/SKILL.md` 封装截图流水线;`agents/coredata-migration-reviewer.md` / `agents/sse-pipeline-reviewer.md` 是 Claude Code 端自定义 agent 提示。`settings.local.json` 是个人权限 allowlist,别把它 check 进 git。
 - `CHANGELOG.md` — **内容不可信,不要据此推断版本/日期/功能状态**。
@@ -91,12 +90,6 @@ iOS:
 - 跑测试:`xcodebuild test -project Lumory.xcodeproj -scheme Lumory -destination 'platform=iOS Simulator,name=iPhone 17' -parallel-testing-enabled NO -disable-concurrent-destination-testing`
 - 清理:`./clean-build.sh`;彻底清(含 DerivedData / ModuleCache / .swiftpm):`./deep-clean.sh`
 - 本地 DB 损坏恢复:`./clean-corrupted-db.sh` 或 `Scripts/reset-database.sh`
-- 生成 App Store 截图:
-  - iPhone(默认,1320×2868):`./Scripts/generate-screenshots.sh` → `Screenshots/zh-Hans/`
-  - iPad(2064×2752):`./Scripts/generate-screenshots.sh ipad` → `Screenshots/zh-Hans-iPad/`
-  - 任意机型:`LUMORY_SIM="iPhone 13 Pro Max - Lumory" ./Scripts/generate-screenshots.sh`
-  - 注意 iPad 上 `.sheet` 是中心 formSheet,Insights / AskPast 截图会显示成浮在 Home 上的小卡 —— 这是 SwiftUI 默认行为,要 full-screen 得改成 `.fullScreenCover` 或加 `.presentationSizing(.fitted/.full)`。
-
 后端(`server/`):
 - 启动:`npm start`;开发:`npm run dev`(nodemon)
 - Lint:`npm run lint`;Format:`npm run format`
@@ -126,7 +119,7 @@ iOS:
 - **`@Environment` 只能在 instance scope 访问**。SwiftUI `private static func` / 属性初始化器里用 `@Environment` 会报 "instance member cannot be used on type"。静态辅助方法需要 AIService 时,在调用点 `let ai = aiService` 捕获后作参数传进去(参见 `DiaryDetailView.refreshAIIndex(... ai:)`)。
 - **SwiftUI `@FetchRequest(animation:)` 不要用**。和 List 原生 row-removal 动画 + `withAnimation { delete }` 三层叠加会错位。当前用 `@FetchRequest(sortDescriptors:)` 无 animation + `ForEach(Array(entries.enumerated()), id: \.element.objectID)` 组合,动画由 `withAnimation` 单层控制,identity 由 objectID 稳定。
 - **SwiftUI `.sheet` 必须挂在比"sheet 触发条件"**更稳定**的视图上**。`Group { if let x = optional, !busy { content().sheet(isPresented: $showing) {...} } }` 这种结构 —— sheet 打开期间 `optional` 变 nil 或 `busy` 翻 true,**整个 content 子树被 SwiftUI 拆掉,sheet 跟着死**,用户搜索/选择被无声打断。修法:把 `.sheet(item: $subject)` 挂到 `Group` 之上(条件渲染外层),`@State var subject: ItemType?` 在 trigger 时 set,picker 自己 `dismiss()` 时 SwiftUI 自动回 nil。`ThemeAliasBanner.body` 是参考实现 —— 之前历史踩过两遍同一坑(从 `expandedCard` 内挪到 `content` 内仍不够,得挪到 `Group` 之上)。
-- **bash `cmd1 | cmd2 || true` 会覆盖 `PIPESTATUS`**。`|| true` 之后 `${PIPESTATUS[0]}` 只剩 `true` 的 exit code,原 pipeline 状态丢光。需要真实 exit code 时改用 `set +e` + 直接 pipeline(不加 `|| true`),然后读 `PIPESTATUS[0]`,最后 `set -e`(参见 `Scripts/generate-screenshots.sh`)。
+- **bash `cmd1 | cmd2 || true` 会覆盖 `PIPESTATUS`**。`|| true` 之后 `${PIPESTATUS[0]}` 只剩 `true` 的 exit code,原 pipeline 状态丢光。需要真实 exit code 时改用 `set +e` + 直接 pipeline(不加 `|| true`),然后读 `PIPESTATUS[0]`,最后 `set -e`。
 - **xcconfig 注入自定义 Info.plist key 的三个坑**:
   (1) `INFOPLIST_KEY_*` build setting 只对 Apple 已知 plist key(NS*UsageDescription / CFBundle*)有效,自定义 key 必须直接在 `Lumory-Info.plist` 写 `<string>$(VAR_NAME)</string>` 让 Xcode 在 build 时变量替换。
   (2) Run Script PBXShellScriptBuildPhase 默认 `showEnvVarsInLog = 1`,会把所有 build setting `export VAR=value` echo 到 xcodebuild 日志(包括 secret)。涉及 secret 时 pbxproj 里手动加 `showEnvVarsInLog = 0;`。

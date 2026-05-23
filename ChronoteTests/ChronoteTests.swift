@@ -920,6 +920,36 @@ struct ContextPromptStreakTests {
     }
 }
 
+@MainActor
+struct ContextPromptFutureDateTests {
+    @Test func generate_excludesFutureDatedEntriesFromThemePrompts() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let now = Date()
+        let futureTheme = "未来主题-\(UUID().uuidString)"
+
+        insertDiaryEntry(
+            context: context,
+            date: now.addingTimeInterval(86_400),
+            themes: [futureTheme],
+            text: "future one"
+        )
+        insertDiaryEntry(
+            context: context,
+            date: now.addingTimeInterval(172_800),
+            themes: [futureTheme],
+            text: "future two"
+        )
+        try context.save()
+
+        let generator = ContextPromptGenerator(persistence: persistence)
+        let prompts = await generator.generate()
+
+        #expect(!prompts.contains { $0.text.contains(futureTheme) },
+                "未来日期 entry 不应进入 yesterday/lapse/topTheme prompt 输入")
+    }
+}
+
 // MARK: - DiaryEntry embedding codec
 
 struct EmbeddingCodecTests {
@@ -4135,6 +4165,67 @@ struct EmbeddingBackfillServiceTests {
         let after = await service.pendingCount()
         #expect(after == 1, "empty vectors must not be written as successful embeddings")
     }
+
+    @Test func backfillAll_repairsInvalidAndWrongDimensionEmbeddingsWhenExpectedDimensionIsKnown() async {
+        let pc = makePersistence()
+        let ctx = pc.container.viewContext
+        let invalid = insertDiaryEntry(
+            context: ctx,
+            id: UUID(),
+            date: makeDate(year: 2024, month: 8, day: 1),
+            themes: [],
+            text: "invalid embedding"
+        )
+        invalid.embedding = Data("not-an-embedding".utf8)
+        let wrongDimension = insertDiaryEntry(
+            context: ctx,
+            id: UUID(),
+            date: makeDate(year: 2024, month: 8, day: 2),
+            themes: [],
+            text: "wrong dimension"
+        )
+        wrongDimension.setEmbedding([0.1, 0.2, 0.3])
+        let valid = insertDiaryEntry(
+            context: ctx,
+            id: UUID(),
+            date: makeDate(year: 2024, month: 8, day: 3),
+            themes: [],
+            text: "valid dimension"
+        )
+        valid.setEmbedding(Array(repeating: Float(0.1), count: 16))
+        try? ctx.save()
+
+        let service = EmbeddingBackfillService(
+            persistence: pc,
+            ai: MockAIService(),
+            batchSize: 2,
+            throttleMs: 0,
+            expectedDimensions: [16]
+        )
+
+        #expect(await service.pendingCount() == 2)
+        let progress = await service.backfillAll()
+        #expect(progress.processed == 2)
+        #expect(progress.failed == 0)
+        #expect(await service.pendingCount() == 0)
+    }
+
+    @Test func backfillAll_rejectsNewEmbeddingWithWrongExpectedDimension() async {
+        let (pc, _) = seed(missing: 1, withVector: 0)
+        let service = EmbeddingBackfillService(
+            persistence: pc,
+            ai: WrongDimensionEmbeddingAIService(),
+            batchSize: 1,
+            throttleMs: 0,
+            expectedDimensions: [16]
+        )
+
+        let progress = await service.backfillAll()
+
+        #expect(progress.processed == 0)
+        #expect(progress.failed == 1)
+        #expect(await service.pendingCount() == 1, "错维度向量不应写盘伪装成成功")
+    }
 }
 
 private struct EmptyEmbeddingAIService: AIServiceProtocol {
@@ -4155,6 +4246,30 @@ private struct EmptyEmbeddingAIService: AIServiceProtocol {
     @available(iOS 15.0, macOS 12.0, *)
     func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
         AsyncStream { continuation in continuation.finish() }
+    }
+
+    func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? { nil }
+    func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] { [] }
+}
+
+private struct WrongDimensionEmbeddingAIService: AIServiceProtocol {
+    private let base = MockAIService()
+
+    func summarize(text: String) async -> String? { await base.summarize(text: text) }
+    func analyzeMood(text: String) async -> Double { await base.analyzeMood(text: text) }
+    func extractThemes(text: String) async -> [String] { await base.extractThemes(text: text) }
+    func judgeThemeAliases(newTags: [String], inventory: [ThemeAliasJudgeCandidate]) async -> [ThemeAliasJudgeMatch] { [] }
+    func scanThemeAliasGroups(candidates: [ThemeAliasJudgeCandidate]) async throws -> [ThemeAliasJudgeGroup] { [] }
+    func embed(text: String) async -> [Float]? { [Float](repeating: 0.25, count: 8) }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        base.askEvents(question: question, context: entries)
+    }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        base.streamReportEvents(entries: entries)
     }
 
     func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? { nil }

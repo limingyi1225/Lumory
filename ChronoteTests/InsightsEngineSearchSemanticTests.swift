@@ -297,11 +297,11 @@ struct InsightsEngineSearchSemanticTests {
         let persistence = PersistenceController(inMemory: true)
         let context = persistence.container.viewContext
         let now = Date()
-        let valid = makeEntry(in: context, text: "alpha bravo", date: now, withEmbedding: true)
+        let valid = makeEntry(in: context, text: "alpha bravo", date: now.addingTimeInterval(-120), withEmbedding: true)
         let mismatched = makeEntry(
             in: context,
             text: "newer but wrong dimension",
-            date: now.addingTimeInterval(60),
+            date: now.addingTimeInterval(-60),
             withEmbedding: false
         )
         mismatched.setEmbedding([Float](repeating: 0.5, count: 8))

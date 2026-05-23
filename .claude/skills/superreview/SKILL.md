@@ -98,17 +98,19 @@ git log <RANGE> --oneline                            # 仅 commit range 模式
 
 **如果用户说"跳过 codex / skip codex":跳过本 Step + Step 5,并在 Reviewer 矩阵记 `codex | skipped (user request)`。**
 
-否则和 Step 2 同一条消息里 trigger。**codex 调用优先级**(同 megareview / CLAUDE.md 约定):
-1. **会话起点的可用 skill 列表里有 `codex:*`** → 用 skill(superreview 审 diff,`codex:review` 正合用):
+否则紧接 Step 2 trigger。**codex 走插件优先,`codex exec` CLI 只是兜底**:
+
+1. **首选:codex 插件的 `codex:rescue` skill**(会话起点的可用 skill 列表里有 `codex:rescue` 才用)。它是 codex 插件里**唯一能被主 agent 程序化调用**的入口;喂它 diff range + review 焦点,read-only(底层 `task` 默认就是 `--sandbox read-only`,**别传 `--write`**),后台跑:
    ```
-   Skill({ skill: "codex:review", args: "--background" })
+   Skill({ skill: "codex:rescue", args: "--background --fresh 「Read-only review of the <RANGE> diff in this repo. Do NOT edit any files. Find correctness / concurrency / security / data / API-contract bugs. Output P0/P1/P2 + file:line + 一句话问题 + 一句话修复.」" })
    ```
-   之后用 `/codex:status` / `/codex:result` 取结果。
-2. **skill 当前会话不可用**(codex 插件没 `/reload-plugins` / scope 没启用)→ 用 standalone `codex` CLI 兜底(`/opt/homebrew/bin/codex`),Bash `run_in_background`:
+   `--background` → 它起一个后台 task,完成时主 agent 收到通知,届时读它返回的 findings(`codex:rescue` 结果**回到对话、不落文件**;要留档自己 Write 到 `CodeReview/.superreview-codex-review.md`)。
+   > ⚠️ **不要用 `/codex:review` / `/codex:adversarial-review`,也别去 poll `/codex:status` / `/codex:result`**:这些命令 frontmatter 全是 `disable-model-invocation: true` —— **只有用户手敲 slash command 才触发,主 agent 用 Skill 工具调不动**(它们不在会话 skill 列表里,硬调会 fail)。原生 reviewer 虽然结构化输出更好,但只能用户自己跑;自动化流水线里 codex 的唯一程序化入口就是 `codex:rescue`。
+2. **兜底:`codex:rescue` skill 当前会话不可用**(codex 插件没 `/reload-plugins` / scope 没启用,会话 skill 列表里没有 `codex:rescue`)→ 用 standalone `codex` CLI(`/opt/homebrew/bin/codex`),Bash `run_in_background`:
    ```bash
    codex exec review --base <base-ref> > CodeReview/.superreview-codex-review.md 2>&1   # working tree 审就去掉 --base
    ```
-3. **codex CLI 也没有 / 未登录** → 跳过本 Step + Step 5,Reviewer 矩阵记 `codex | skipped (codex unavailable)`。codex 是增强不是硬依赖。
+3. **两者都没有 / codex 未登录** → 跳过本 Step + Step 5,Reviewer 矩阵记 `codex | skipped (codex unavailable)`。codex 是增强不是硬依赖。
 
 ### Step 4 — 主 agent 核对(最关键 — 不要跳)
 
@@ -180,7 +182,7 @@ git log <RANGE> --oneline                            # 仅 commit range 模式
 |---|---|---|---|
 | correctness | general-purpose (Opus) | 8 | 6/8 |
 | security | general-purpose (Opus, security focus in prompt) | 4 | 3/4 |
-| codex | codex:review | 5 | 4/5 |
+| codex | codex:rescue (review-framed) | 5 | 4/5 |
 | ...
 ```
 
@@ -267,7 +269,7 @@ Step 4 报告草稿落盘后，跑一次 Codex 的 **read-only 终审**，完整
 1. **锁定 range**(默认 working tree / "未 push 到 main" → `origin/main..HEAD` / "vs main" → `main..HEAD`)+ 检测"跳过 codex"开关
 2. 跑 git status/diff/log(并行,按选定 range)
 3. 看规模选视角
-4. 单条消息内 N 个 Agent tool call(每个 `model: "opus"`,prompt 里带 range)+ 1 个 codex review skill 调用(用户没跳过才有)
+4. 单条消息内 N 个 Agent tool call(每个 `model: "opus"`,prompt 里带 range);Opus 批次发完紧接着发 codex review(首选 `codex:rescue` skill / 兜底 `codex exec review` CLI,用户没跳过才有 —— Skill 调用没法跟 Agent 批次塞进同一个并行 tool-batch,所以单独紧跟着发)
 5. 收齐结果
 6. 跑核对(grep + Read + context7)
 7. 写报告草稿到 `CodeReview/superreview-*.md`

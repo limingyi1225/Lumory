@@ -1,6 +1,6 @@
 ---
 name: megareview
-description: 不计成本对**整个 repo**(不是 uncommitted diff)做最严的 bug + 优化 + **新功能机会**审计 —— 运行前先问用户本次关注点(全面 / 纯 UIUX / 不含 FEAT / 自定义),然后**一次性并行派发**多个 Opus subagent(各写文件、只回摘要)+ 跑 codex 仓库级 read-only audit(`codex` CLI 或 codex skill,缺则降级跳过),全部回收后主 agent 交叉核对量化事实并产出分级报告;subagent 可发 ESCALATION 信号让主 agent **动态追派** follow-up agent;**报告写完再让 codex 做一遍最终复审(有 codex 就做)**。用户说"megareview / 整库审查 / 全仓审计 / repo audit / 整个仓库找 bug 和优化点 / 找新功能机会"时触发。
+description: 不计成本对**整个 repo**(不是 uncommitted diff)做最严的 bug + 优化 + **新功能机会**审计 —— 运行前先问用户本次关注点(全面 / 纯 UIUX / 不含 FEAT / 自定义),然后**一次性并行派发**多个 Opus subagent(各写文件、只回摘要)+ 跑 codex 仓库级 read-only audit(首选 `codex:rescue` skill,缺则 `codex` CLI 兜底,都没有才降级跳过),全部回收后主 agent 交叉核对量化事实并产出分级报告;subagent 可发 ESCALATION 信号让主 agent **动态追派** follow-up agent;**报告写完再让 codex 做一遍最终复审(有 codex 就做)**。用户说"megareview / 整库审查 / 全仓审计 / repo audit / 整个仓库找 bug 和优化点 / 找新功能机会"时触发。
 ---
 
 # Megareview - 不计成本的整仓审计
@@ -199,8 +199,11 @@ grep -nE 'P1|backlog|TODO' CLAUDE.md 2>/dev/null | head -30
   Agent { subagent_type: "general-purpose", model: "opus", description: "FEAT: UI consistency (visual/layout/liquidGlass/暗色/iPad)", ... }
   Agent { subagent_type: "general-purpose", model: "opus", description: "FEAT: UX polish (loading/empty/error/haptic/动效/一致性)", ... }
   Agent { subagent_type: "general-purpose", model: "opus", description: "FEAT: new feature opportunities", ... }
-  Bash (run_in_background) { codex exec --sandbox read-only "<bug audit ...>" > CodeReview/.megareview-raw/codex-bug.md 2>&1 }   # 默认 CLI;装了 codex:rescue skill 才改用 Skill()
-  Bash (run_in_background) { codex exec --sandbox read-only "<UX audit ...>" > CodeReview/.megareview-raw/codex-ux.md 2>&1 }     # 全面 / 纯 UIUX 才发
+  # codex 紧跟 Opus 批次后台发(见下面"Codex 任务"小节)—— 首选 codex:rescue skill / CLI 兜底,后台跑不阻塞核对:
+  Skill({ skill: "codex:rescue", args: "--background --fresh 「<bug audit prompt>」" })    # 首选:read-only(别传 --write),结果回对话
+  Skill({ skill: "codex:rescue", args: "--background --fresh 「<UX audit prompt>」" })     # 全面 / 纯 UIUX 才发
+  # 兜底(会话没 codex:rescue skill 时,这条可跟上面 Agent 批次同一条消息并行发):
+  #   Bash (run_in_background) { codex exec --sandbox read-only "<同一段 prompt>" > CodeReview/.megareview-raw/codex-bug.md 2>&1 }
 ```
 
 **每个 Opus subagent prompt 必须包含**:
@@ -233,36 +236,45 @@ FEAT 视角的 prompt 要写清楚**不要的东西**:
 - ✅ "Insights 的 ThemeCardList 长按缺 haptic feedback,其他 list 都有 — 体验不一致"
 - ✅ "Reminder Settings 的 hour:minute picker 没有'下次将于 X 触发'的预览 — 用户拨完没确认感"
 
-#### Codex 任务(跨模型交叉校验 —— 跟主批次一起发,后台跑)
+#### Codex 任务(跨模型交叉校验 —— 紧跟主批次后台发)
 
-⚠️ **先确认 codex 怎么调,别盲发 `Skill({ skill: "codex:rescue" })`**。codex 插件(`codex@openai-codex` marketplace,2026-05-20 装上)正常会提供 `/codex:*` skill + `codex:codex-rescue` subagent;但**别假设它一定在当前会话可用** —— 可能某 project scope 没启用、或装完没 `/reload-plugins`,这时直接调会 "skill not found" 硬失败。所以调用前先看会话起点的可用 skill 列表。调用优先级:
-1. **会话起点的"可用 skill 列表"里真有 `codex:*`** → 才用 `Skill({ skill: "codex:rescue", args: "--background --fresh <prompt>" })`。
-2. **否则用 `codex` CLI**(本机在 `/opt/homebrew/bin/codex`):走 **Bash + `run_in_background`**,`--sandbox read-only`,输出重定向到 raw 文件。**这是本环境的默认路径。**
+⚠️ **codex 走插件优先,`codex exec` CLI 只是兜底**。codex 插件(`codex@openai-codex` marketplace,2026-05-20 装上)提供 `/codex:*` slash command + `codex:codex-rescue` subagent,但其中 **`/codex:review` / `/codex:adversarial-review` / `/codex:status` / `/codex:result` / `/codex:cancel` 全是 `disable-model-invocation: true`,主 agent 用 Skill 工具调不动**(只有用户手敲才触发,不在会话 skill 列表里)。**`codex:rescue` 是 codex 插件里唯一能被主 agent 程序化调用的入口**,megareview 的仓库级 audit 正好走它(自由 prompt,不是 diff review)。调用优先级:
+1. **首选:`codex:rescue` skill**(会话起点的可用 skill 列表里有 `codex:rescue` 才用 —— 没 `/reload-plugins` / scope 没启用时它不在列表,盲发会 "skill not found" 硬失败,所以**调用前先看会话 skill 列表**):
+   ```
+   Skill({ skill: "codex:rescue", args: "--background --fresh 「<audit prompt>」" })
+   ```
+   底层 `task` 默认 `--sandbox read-only`(**别传 `--write`**)。结果**回到对话、不落文件**;主 agent 在核对阶段直接读它返回的 findings(要留档自己 Write 到 `CodeReview/.megareview-raw/codex-*.md`)。**Skill 调用没法跟 Opus 的 Agent 批次塞进同一个并行 tool-batch**,所以 Opus 批次发完紧接着发 codex:rescue(仍 `--background`,仍在核对前)。
+2. **兜底:`codex` CLI**(本机 `/opt/homebrew/bin/codex`,会话没有 `codex:rescue` skill 时):走 **Bash + `run_in_background`**,`--sandbox read-only`,输出重定向到 raw 文件 —— 这条 CLI 命令**可以**跟 Opus Agent 批次同一条消息并行发。
 3. **两者都没有 / codex 未登录** → **跳过 codex**,在报告里注明"本次缺跨模型交叉校验"。**codex 是增强,不是出报告的硬依赖**,绝不能因为 codex 调不动就让整个 megareview 卡死。
 
-**不要**用 `/codex:review` 或 `codex exec review` —— 它们只看 git diff,megareview 场景 diff 通常是空的,会回 "nothing to review"。要用 `codex exec "<自由 prompt>"`(不是 review 子命令)。两个 task 跟 Opus 主批次**同一条消息发**(后台跑,不占阻塞时间)。
+**不要**用 `/codex:review` / `/codex:adversarial-review` / `codex exec review` 跑整仓 audit —— 它们只看 git diff,megareview 场景 diff 通常是空的,会回 "nothing to review"。要用**自由 prompt**:`codex:rescue` skill(首选)或 `codex exec "<自由 prompt>"`(CLI 兜底,**不是** review 子命令)。
 
-Bug-focused codex(选了全面 / 不含 FEAT 时发,CLI 默认路径):
+两段 audit prompt 如下(prompt 文本与调用方式无关 —— 首选塞进 `codex:rescue --fresh`,兜底塞进 `codex exec`)。
 
-```bash
-# Bash run_in_background;完成后 Read CodeReview/.megareview-raw/codex-bug.md
-codex exec --sandbox read-only "Audit the entire Lumory repository read-only. Do NOT edit any files. Find: latent bugs (concurrency, error handling, edge cases, data integrity) and high-ROI optimizations (perf hot paths, dead code, repeated logic). Focus on Chronote/Services and server/index.js first. Skip security/OWASP analysis — only flag obvious things like hardcoded secrets or fail-open auth regressions. Output a prioritized list with file:line evidence. Do not run builds or tests." > CodeReview/.megareview-raw/codex-bug.md 2>&1
+Bug-focused(选了全面 / 不含 FEAT 时发):
+> Audit the entire Lumory repository read-only. Do NOT edit any files. Find: latent bugs (concurrency, error handling, edge cases, data integrity) and high-ROI optimizations (perf hot paths, dead code, repeated logic). Focus on Chronote/Services and server/index.js first. Skip security/OWASP analysis — only flag obvious things like hardcoded secrets or fail-open auth regressions. Output a prioritized list with file:line evidence. Do not run builds or tests.
+
+UX-focused(选了全面 / 纯 UIUX 时发):
+> Audit Lumory read-only for UI consistency + UX polish opportunities. UI: visual / spacing / liquidGlass / 暗色模式 / iPad layout / 跨 view 风格漂移. UX: empty states, error toasts, loading states, missing haptic feedback, animation gaps or inconsistencies, i18n string gaps. Skip accessibility entirely — no VoiceOver, no Dynamic Type, no ARIA. Output as FEAT-HIGH/MID/LOW with file:line and a one-sentence user-benefit rationale.
+
+**首选(插件,结果回对话;读它返回的 findings,需要留档就自己 Write 到 raw 文件)**:
+
+```
+Skill({ skill: "codex:rescue", args: "--background --fresh 「<上面对应那段 prompt>」" })
 ```
 
-UX-focused codex(选了全面 / 纯 UIUX 时发,CLI 默认路径):
+**兜底(CLI,结果落 raw 文件,完成后 Read 它)**:
 
 ```bash
-# Bash run_in_background;完成后 Read CodeReview/.megareview-raw/codex-ux.md
-codex exec --sandbox read-only "Audit Lumory read-only for UI consistency + UX polish opportunities. UI: visual / spacing / liquidGlass / 暗色模式 / iPad layout / 跨 view 风格漂移. UX: empty states, error toasts, loading states, missing haptic feedback, animation gaps or inconsistencies, i18n string gaps. Skip accessibility entirely — no VoiceOver, no Dynamic Type, no ARIA. Output as FEAT-HIGH/MID/LOW with file:line and a one-sentence user-benefit rationale." > CodeReview/.megareview-raw/codex-ux.md 2>&1
+# Bash run_in_background
+codex exec --sandbox read-only "<上面对应那段 prompt>" > CodeReview/.megareview-raw/codex-bug.md 2>&1   # UX 那条改成 codex-ux.md
 ```
-
-(装了 `codex:rescue` skill 的环境就把上面整条 `codex exec ...` 换成 `Skill({ skill: "codex:rescue", args: "--background --fresh <同一段 prompt>" })`,prompt 文本不变。)
 
 ### Step 5 — 全部回收 + 动态追派 + 主 agent 核对(最关键 — 不要跳)
 
 所有 Opus subagent 同步回完后,主 agent 拿到的是一堆**摘要 + raw 文件路径 + ESCALATION**。Codex 是后台跑的,按 Step 4 用的路径收结果:
-- **CLI 路径(默认)**:`codex exec` 走 Bash `run_in_background`,完成时你会被通知,然后 Read `CodeReview/.megareview-raw/codex-bug.md` / `codex-ux.md` 拿结果。
-- **codex:rescue skill 路径(仅装了的环境)**:由该 skill 自己管 lifecycle,返回内容含 task 状态;没回完就再调一次问进度。(别假设有 `/codex:status` / `codex:result` 这类独立 skill —— 没有。)
+- **codex:rescue skill 路径(首选)**:`--background` 的 codex:rescue 完成时主 agent 收到后台 task 通知,直接读它返回的 findings(结果回对话、不落文件);要留档就自己 Write 一份到 `CodeReview/.megareview-raw/codex-*.md`。`/codex:status` / `/codex:result` 是 `disable-model-invocation`,主 agent **调不动**,别去 poll —— 等通知即可。
+- **CLI 兜底路径**:`codex exec` 走 Bash `run_in_background`,完成时你会被通知,然后 Read `CodeReview/.megareview-raw/codex-bug.md` / `codex-ux.md` 拿结果。
 - **codex 跳过了**(没 CLI 没 skill / 未登录):直接进核对,报告里注明缺跨模型校验。
 
 **Codex 还在跑就等**(不计成本),但**别为了等 codex 阻塞核对** —— 先把 Opus findings 的核对做了,codex 结果回来再并进去。
@@ -389,21 +401,23 @@ codex exec --sandbox read-only "Audit Lumory read-only for UI consistency + UX p
 |---|---|---|---|---|---|
 | Models/Persistence | data | coredata-migration-reviewer | 5 | 4/5 | — |
 | AI/SSE | sse-pipeline | sse-pipeline-reviewer | 3 | 3/3 | — |
-| 整仓 | bug audit | codex (CLI) | 12 | 9/12 | — |
+| 整仓 | bug audit | codex (rescue) | 12 | 9/12 | — |
 | Insights | UX/polish | general-purpose | 8 | 7/8 | followup×1 (COVERAGE) |
 ```
 
 ### Step 7 — codex 复审报告(有 codex 就做,没有就降级)
 
-主 agent **不能信任自己**(Opus 系统性偏弱也适用于自己整合的报告 —— 可能漏 angle、误判等级、重复条目没发现)。报告 `megareview-YYYYMMDD-HHmm.md` 写完后,**若 codex 可用**(优先级同 Step 4:有 `codex:rescue` skill 用 skill,否则用 `codex` CLI),起一个 codex 二审。
+主 agent **不能信任自己**(Opus 系统性偏弱也适用于自己整合的报告 —— 可能漏 angle、误判等级、重复条目没发现)。报告 `megareview-YYYYMMDD-HHmm.md` 写完后,**若 codex 可用**(优先级同 Step 4:首选 `codex:rescue` skill,兜底 `codex` CLI),起一个 codex 二审。
 
-CLI 默认路径(Bash `run_in_background`,完成后 Read `CodeReview/.megareview-raw/codex-review.md`):
+**首选(插件)**:`Skill({ skill: "codex:rescue", args: "--background --fresh 「<下面 bash 块里那段英文 prompt>」" })`,read-only(别传 `--write`),完成后读它返回的 verdict。
+
+**兜底(CLI)**(Bash `run_in_background`,完成后 Read `CodeReview/.megareview-raw/codex-review.md`):
 
 ```bash
 codex exec --sandbox read-only "Read the megareview report at CodeReview/megareview-<YYYYMMDD-HHmm>.md. Do NOT edit any files. Critique it: (1) Are any P0/P1/OPT-HIGH/FEAT-HIGH items mis-prioritized (too high or too low) given the actual codebase impact? (2) Are there obvious BUG / OPT / FEAT angles the report missed entirely (do a sanity grep across Chronote/ and server/ for things like force-unwraps, retained-cycle risks, unused public APIs, hardcoded English in zh-Hans paths, UI/UX inconsistencies across views)? (3) Any duplicate findings that should be merged? (4) Any '已否决' items that were actually correct and should be reinstated? Skip accessibility entirely (no VoiceOver / Dynamic Type / ARIA — user explicitly excluded this scope). Skip OWASP-style security analysis — only flag if you see hardcoded secrets or fail-open auth. Output verdict per existing finding (KEEP / DOWNGRADE / UPGRADE / DROP) plus a list of missed findings. Read-only — do not modify the report file." > CodeReview/.megareview-raw/codex-review.md 2>&1
 ```
 
-(装了 `codex:rescue` skill 的环境改用 `Skill({ skill: "codex:rescue", args: "--background --fresh <同一段 prompt>" })`,完成后由该 skill 自身机制返回结果。)
+> 同一段 prompt 既可塞进上面"首选"的 `codex:rescue`,也可塞进"兜底"的 `codex exec`。
 
 > 二审范围跟着 Step 1 关注点走:纯 UIUX 就让 codex 只复审 FEAT 部分;不含 FEAT 就把上面 prompt 里的 FEAT 字样删掉。
 > **codex 完全不可用时**(没 CLI 没 skill / 未登录):**跳过本步**,在报告头部注明"未做 codex 二审(环境无 codex)",自己再扫一遍 Step 5-C 的高风险条目当兜底 —— 但要诚实标注**这不是跨模型校验**,只是 Opus 自查。
@@ -469,10 +483,10 @@ codex exec --sandbox read-only "Read the megareview report at CodeReview/megarev
 2. 跑摸底 Bash(并行命令)+ `mkdir -p CodeReview/.megareview-raw`
 3. 看仓库规模 + 关注点定 slice × angle 矩阵(Lumory 中等 + 全面 → 8-10 Opus + 2 Codex;纯 UIUX → 3-5 Opus + 1 Codex)
 4. **一次性并行派发**:一条消息里把所有 Opus subagent + Codex task 全发出去(各写文件、只回摘要、带 ESCALATION 说明)
-5. 全部 Opus 同步回完 → **先处理 ESCALATION 动态追派**(COVERAGE / FRESH-EYE)→ 等 Codex 后台结果(CLI 路径回完读 raw 文件;codex 不可用就跳过并注明)
+5. 全部 Opus 同步回完 → **先处理 ESCALATION 动态追派**(COVERAGE / FRESH-EYE)→ 等 Codex 后台结果(codex:rescue 回完读它返回的 findings / CLI 兜底回完读 raw 文件;codex 不可用就跳过并注明)
 6. 跑核对(逐个 Read raw 文件 + grep + Read + context7 + Lumory 清单)
 7. 写 `CodeReview/megareview-*.md` 第一版(只出选了的档)
-8. **Step 7: codex 二审报告**(CLI 或 codex skill,缺则降级跳过 + 注明),根据 verdict 修订
+8. **Step 7: codex 二审报告**(首选 codex:rescue skill / 兜底 CLI,缺则降级跳过 + 注明),根据 verdict 修订
 9. 主对话回:关注点 + 报告路径 + P0 数 + OPT-HIGH top-3 + **FEAT-HIGH top-3(UI / UX / 新功能各 1)** + 追派情况 + codex 二审摘要 + 一句话总结
 
 ## 失败模式 / 别这么干
@@ -487,7 +501,7 @@ codex exec --sandbox read-only "Read the megareview report at CodeReview/megarev
 - ❌ reviewer 把"加 VoiceOver label / 支持 Dynamic Type / 增加色盲对比度"当 finding 写进 report → 必须在核对阶段 drop,user 明确不关注无障碍。
 - ❌ 把"安全"做成专项 slice / 派一个独立的 backend security audit subagent → 过度审计;让 `general-purpose` 正确性视角在扫的时候顺手扫硬编码 secret 和 SSE 错误关闭就够。
 - ❌ FEAT prompt 模糊("帮我想想还能加什么") → reviewer 会回一堆产品战略层级的空话。必须限定:小到中改动量 + 已存在功能的体验缺口 / 一致性补齐。
-- ❌ 用 `/codex:review` 或 `codex exec review` 跑整仓 audit:它们只看 git diff,megareview 场景 diff 通常是空的,会回 "nothing to review"。要用 `codex exec "<自由 prompt>"`。
+- ❌ 用 `/codex:review` / `/codex:adversarial-review` / `codex exec review` 跑整仓 audit:它们只看 git diff(megareview diff 通常是空的,回 "nothing to review"),且 `/codex:*` review 命令是 `disable-model-invocation`、主 agent 根本调不动。要用自由 prompt 走 `codex:rescue` skill(首选)/ `codex exec "<自由 prompt>"`(兜底)。
 - ❌ 把所有 subagent 输出原样拼起来当报告 → 量化错误会被原样保留。
 - ❌ subagent 数量缩水(为省钱跑 3 个) → 失去多视角互补的意义,这个 skill 就是不计成本(纯 UIUX 等裁剪场景天然就少,不算缩水)。
 - ❌ 跳过核对步骤 → 用户读到错的行号 / 错的"dead code"判断,修了反而引入 regression。

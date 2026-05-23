@@ -506,6 +506,7 @@ struct HomeView: View {
                 // 否则用户输入完立刻锁屏 / 切走,iOS 5s background grace 内 task 可能没跑完,丢草稿。
                 // 原来挂在 textInputArea 内部的 onChange,composer 拆出去后挪到 list 根上,作用范围一致。
                 if newPhase == .background {
+                    finalizeActiveRecordingForBackground()
                     draftSaveTask?.cancel()
                     Self.persistDraft(inputVM.inputText, date: draftEntryDate)
                 }

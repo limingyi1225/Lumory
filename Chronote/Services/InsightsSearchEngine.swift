@@ -64,6 +64,7 @@ final class InsightsSearchEngine {
         let qVec = await ai.embed(text: trimmed)
         let queryEmbedded = qVec != nil
 
+        let now = Date()
         return await persistence.container.performBackgroundTask { context -> InsightsEngine.SemanticSearchResult in
             // (megareview P1 #6)Phase A 改 `NSDictionaryResultType` 真投影 —— 之前的
             // `NSFetchRequest<DiaryEntry>` + `propertiesToFetch=["embedding","date"]` 只是 prefetch
@@ -80,7 +81,11 @@ final class InsightsSearchEngine {
             let scanRequest = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
             scanRequest.resultType = .dictionaryResultType
             scanRequest.propertiesToFetch = [objectIDExpr, "embedding", "date"]
-            scanRequest.predicate = NSPredicate(format: "text != nil AND text != %@", "")
+            scanRequest.predicate = NSPredicate(
+                format: "text != nil AND text != %@ AND date <= %@",
+                "",
+                now as NSDate
+            )
             scanRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
 
             guard let rows = try? context.fetch(scanRequest), !rows.isEmpty else {
@@ -249,6 +254,7 @@ final class InsightsSearchEngine {
         //
         // 无 query 向量 → 空结果。全无可比 embedding 但存在未索引语料时,走时间倒序兜底
         // (语义见 rankRetrieval 注释),这条路径在 Phase A 内完成。
+        let now = Date()
         return await persistence.container.performBackgroundTask { context -> [DiaryEntryData] in
             // (megareview P1 #6)Phase A 改 dict-fetch 真投影 —— 同 `searchSemantic` 改法,
             // 只读 objectID + embedding-blob + date,imagesData / text / summary 完全不进 RAM。
@@ -260,7 +266,11 @@ final class InsightsSearchEngine {
             let scanRequest = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
             scanRequest.resultType = .dictionaryResultType
             scanRequest.propertiesToFetch = [objectIDExpr, "embedding", "date"]
-            scanRequest.predicate = NSPredicate(format: "text != nil AND text != %@", "")
+            scanRequest.predicate = NSPredicate(
+                format: "text != nil AND text != %@ AND date <= %@",
+                "",
+                now as NSDate
+            )
             scanRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
 
             guard let rows = try? context.fetch(scanRequest), !rows.isEmpty else { return [] }
@@ -280,7 +290,6 @@ final class InsightsSearchEngine {
             topHeap.reserveCapacity(candidateLimit)
             // 同步收集"无 embedding"的 objectID + date,以便最后做"未索引语料保留槽"逻辑(对齐 rankRetrieval 行为)。
             var withoutVecIDs: [(id: NSManagedObjectID, date: Date)] = []
-            withoutVecIDs.reserveCapacity(rows.count)
             var mismatchedEmbeddingCount = 0
             var comparableVecCount = 0
 

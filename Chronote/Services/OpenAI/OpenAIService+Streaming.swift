@@ -320,6 +320,28 @@ Diary Entries:
         return output
     }
 
+    private static let askPastQuestionMaxUTF16Units = 2_000
+    private static let askPastContextBlockMaxUTF16Units = 26_000
+
+    private static func askPastContextBlock(from entries: [DiaryEntryData], isZh: Bool) -> String {
+        let separator = "\n---\n"
+        var blocks: [String] = []
+        var used = 0
+
+        for entry in entries {
+            let prefix = "[id:\(entry.id.uuidString.prefix(6)) date:\(Self.shortDate(entry.date)) mood:\(Self.qualitativeMoodLabel(entry.moodValue, isZh: isZh))]\n"
+            let separatorCost = blocks.isEmpty ? 0 : separator.utf16.count
+            let remaining = askPastContextBlockMaxUTF16Units - used - separatorCost - prefix.utf16.count
+            guard remaining > 0 else { break }
+
+            let body = trimToUTF16Limit(entry.text, remaining)
+            blocks.append(prefix + body)
+            used += separatorCost + prefix.utf16.count + body.utf16.count
+        }
+
+        return blocks.joined(separator: separator)
+    }
+
     // MARK: - Ask Past (RAG)
 
     /// 结构化事件版 RAG 问答流。UI 想区分"中断 / 失败 / 正常"直接消费这个。
@@ -327,9 +349,8 @@ Diary Entries:
         AsyncStream { continuation in
             let task = Task {
                 let isZh = question.containsChinese
-                let contextBlock = entries.map { entry in
-                    "[id:\(entry.id.uuidString.prefix(6)) date:\(Self.shortDate(entry.date)) mood:\(Self.qualitativeMoodLabel(entry.moodValue, isZh: isZh))]\n\(entry.text)"
-                }.joined(separator: "\n---\n")
+                let questionForPrompt = Self.trimToUTF16Limit(question, Self.askPastQuestionMaxUTF16Units)
+                let contextBlock = Self.askPastContextBlock(from: entries, isZh: isZh)
 
                 let prompt: String
                 if isZh {
@@ -343,7 +364,7 @@ Diary Entries:
                     相关日记：
                     \(contextBlock)
 
-                    用户问题：\(question)
+                    用户问题：\(questionForPrompt)
                     """
                 } else {
                     prompt = """
@@ -358,7 +379,7 @@ Diary Entries:
                     Relevant entries:
                     \(contextBlock)
 
-                    Question: \(question)
+                    Question: \(questionForPrompt)
                     """
                 }
 

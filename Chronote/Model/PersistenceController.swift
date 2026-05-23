@@ -417,7 +417,7 @@ extension URL {
         }
     }
 
-    /// 从指定源目录拷 .sqlite + -wal/-shm/-ck 四件套到目标位置。
+    /// 从指定源目录拷 .sqlite + -wal/-shm/-ck + Core Data external binary storage 到目标位置。
     /// `archive=true` 时把源文件改名 `.legacy-<label>` 保留一份，失败可人工恢复。
     private static func migrateFromLegacyDirectory(sourceDir: URL, targetURL: URL, databaseName: String, label: String, archive: Bool) {
         let fm = FileManager.default
@@ -426,46 +426,83 @@ extension URL {
 
         Log.info("[PersistenceController] 检测到 \(label) 里的老 store，开始迁移", category: .persistence)
 
-        // SQLite 的三个兄弟文件都要搬：主库 + WAL + SHM。缺任一个都可能丢未提交事务。
-        let siblings = ["sqlite", "sqlite-wal", "sqlite-shm", "sqlite-ck"]
-        var migratedAll = true
-        for ext in siblings {
-            let src = sourceDir.appendingPathComponent("\(databaseName).\(ext)")
-            let dst = targetURL.deletingPathExtension().appendingPathExtension(ext)
-            guard fm.fileExists(atPath: src.path) else { continue }
+        let targetDirectory = targetURL.deletingLastPathComponent()
+        let tempDirectory = targetDirectory.appendingPathComponent(
+            ".\(databaseName)-migration-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let tempStoreURL = tempDirectory.appendingPathComponent(targetURL.lastPathComponent)
+
+        do {
+            try fm.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+            try fm.copyItem(at: legacyStoreURL, to: tempStoreURL)
+            try DatabaseRecoveryService.copyExistingStoreCompanions(from: legacyStoreURL, to: tempStoreURL)
+
+            // If a previous interrupted run left WAL/CK/support files without a main sqlite,
+            // remove them before promotion. The main sqlite is moved last so a future crash
+            // before that point still leaves targetURL absent and migration retryable.
+            DatabaseRecoveryService.deleteStoreCompanions(at: targetURL)
+            try promoteStoreFiles(from: tempStoreURL, to: targetURL)
+
+            if archive {
+                archiveLegacyStoreFiles(storeURL: legacyStoreURL, label: label)
+            }
+            try? fm.removeItem(at: tempDirectory)
+            Log.info("[PersistenceController] \(label) → Application Support 迁移完成", category: .persistence)
+        } catch {
+            // 清掉部分已复制/已 promote 的目标文件，不让 Core Data 打开半路状态。
+            DatabaseRecoveryService.deleteStoreFiles(at: tempStoreURL)
+            try? fm.removeItem(at: tempDirectory)
+            DatabaseRecoveryService.deleteStoreFiles(at: targetURL)
+            Log.error("[PersistenceController] 迁移失败，保留 \(label) 原位，下次启动重试：\(error)", category: .persistence)
+        }
+    }
+
+    private static func promoteStoreFiles(from tempStoreURL: URL, to targetURL: URL) throws {
+        let fm = FileManager.default
+        let tempSupportCandidates = DatabaseRecoveryService.externalStorageDirectoryCandidates(for: tempStoreURL)
+        let targetSupportCandidates = DatabaseRecoveryService.externalStorageDirectoryCandidates(for: targetURL)
+        for (source, target) in zip(tempSupportCandidates, targetSupportCandidates) where fm.fileExists(atPath: source.path) {
+            try? fm.removeItem(at: target)
+            try fm.moveItem(at: source, to: target)
+        }
+
+        for ext in DatabaseRecoveryService.sqliteSidecarExtensions {
+            let source = DatabaseRecoveryService.sidecarURL(for: tempStoreURL, ext: ext)
+            guard fm.fileExists(atPath: source.path) else { continue }
+            let target = DatabaseRecoveryService.sidecarURL(for: targetURL, ext: ext)
+            try? fm.removeItem(at: target)
+            try fm.moveItem(at: source, to: target)
+        }
+
+        try? fm.removeItem(at: targetURL)
+        try fm.moveItem(at: tempStoreURL, to: targetURL)
+    }
+
+    private static func archiveLegacyStoreFiles(storeURL: URL, label: String) {
+        let fm = FileManager.default
+        let files = [storeURL] + DatabaseRecoveryService.sqliteSidecarExtensions.map {
+            DatabaseRecoveryService.sidecarURL(for: storeURL, ext: $0)
+        }
+        for file in files where fm.fileExists(atPath: file.path) {
+            let archived = URL(fileURLWithPath: "\(file.path).legacy-\(label)")
             do {
-                try fm.copyItem(at: src, to: dst)
-                Log.info("[PersistenceController] 已复制 \(ext)", category: .persistence)
+                try? fm.removeItem(at: archived)
+                try fm.moveItem(at: file, to: archived)
             } catch {
-                Log.error("[PersistenceController] 复制 \(ext) 失败：\(error)", category: .persistence)
-                migratedAll = false
+                Log.error("[PersistenceController] 归档 \(file.lastPathComponent) 失败：\(error)", category: .persistence)
             }
         }
 
-        // 只有全部复制成功才把老文件改名归档；有失败就保留原位，等下次启动再试一次
-        if migratedAll {
-            if archive {
-                for ext in siblings {
-                    let src = sourceDir.appendingPathComponent("\(databaseName).\(ext)")
-                    let archived = sourceDir.appendingPathComponent("\(databaseName).\(ext).legacy-\(label)")
-                    guard fm.fileExists(atPath: src.path) else { continue }
-                    do {
-                        // 已经有归档副本就先删掉（防止多次搬迁冲突）
-                        try? fm.removeItem(at: archived)
-                        try fm.moveItem(at: src, to: archived)
-                    } catch {
-                        Log.error("[PersistenceController] 归档 \(ext) 失败：\(error)", category: .persistence)
-                    }
-                }
+        let supportDirectories = DatabaseRecoveryService.externalStorageDirectoryCandidates(for: storeURL)
+        for directory in supportDirectories where fm.fileExists(atPath: directory.path) {
+            let archived = URL(fileURLWithPath: "\(directory.path).legacy-\(label)", isDirectory: true)
+            do {
+                try? fm.removeItem(at: archived)
+                try fm.moveItem(at: directory, to: archived)
+            } catch {
+                Log.error("[PersistenceController] 归档 \(directory.lastPathComponent) 失败：\(error)", category: .persistence)
             }
-            Log.info("[PersistenceController] \(label) → Application Support 迁移完成", category: .persistence)
-        } else {
-            // 清掉部分已复制的目标文件，不让 Core Data 打开半路状态
-            for ext in siblings {
-                let dst = targetURL.deletingPathExtension().appendingPathExtension(ext)
-                try? fm.removeItem(at: dst)
-            }
-            Log.error("[PersistenceController] 迁移部分失败，保留 \(label) 原位，下次启动重试", category: .persistence)
         }
     }
 

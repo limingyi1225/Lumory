@@ -224,10 +224,15 @@ final class ContextPromptGenerator {
         // yesterdayPrompt / lapsePrompt / topThemePrompt 共用同一个 token,跨别名"消失" / "高频"
         // 才能正确判定。同一篇 entry 内多 alias 重复也在这里去重。
         let aliasMap = await MainActor.run { ThemeAliasResolver.shared.snapshotIndex() }
+        let now = Date()
         return await persistence.container.performBackgroundTask { context in
             let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
             request.resultType = .dictionaryResultType
-            request.predicate = NSPredicate(format: "date >= %@", lapseStart as NSDate)
+            request.predicate = NSPredicate(
+                format: "date >= %@ AND date <= %@",
+                lapseStart as NSDate,
+                now as NSDate
+            )
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
             request.propertiesToFetch = ["date", "themes", "moodValue"]
             guard let entries = try? context.fetch(request) else { return ([], []) }

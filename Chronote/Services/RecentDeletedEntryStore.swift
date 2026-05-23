@@ -118,10 +118,16 @@ enum RecentDeletedEntryStore {
         }.value
         guard let loaded else { return false }
 
+        let metadata = loaded.metadata
+        let restoredID = existingEntryCount(id: metadata.entryID, in: viewContext) == 0
+            ? metadata.entryID
+            : UUID()
+        let attachmentPlan = restoreAttachmentPlan(metadata: metadata, restoredID: restoredID)
+
         let attachmentsRestored = await Task.detached(priority: .utility) {
             withFileLock {
                 do {
-                    try restoreAttachmentFilesSync(loaded: loaded)
+                    try restoreAttachmentFilesSync(loaded: loaded, plan: attachmentPlan)
                     return true
                 } catch {
                     Log.error("[RecentDeleted] restore attachments failed: \(error.localizedDescription)", category: .persistence)
@@ -131,15 +137,10 @@ enum RecentDeletedEntryStore {
         }.value
         guard attachmentsRestored else { return false }
 
-        let metadata = loaded.metadata
         guard let entity = NSEntityDescription.entity(forEntityName: "DiaryEntry", in: viewContext) else {
             Log.error("[RecentDeleted] DiaryEntry entity not found", category: .persistence)
             return false
         }
-
-        let restoredID = existingEntryCount(id: metadata.entryID, in: viewContext) == 0
-            ? metadata.entryID
-            : UUID()
 
         let entry = DiaryEntry(entity: entity, insertInto: viewContext)
         entry.id = restoredID
@@ -147,8 +148,8 @@ enum RecentDeletedEntryStore {
         entry.text = metadata.text
         entry.moodValue = metadata.moodValue
         entry.summary = metadata.summary
-        entry.audioFileName = metadata.audioFileName
-        entry.imageFileNames = metadata.imageFileNames.isEmpty ? nil : metadata.imageFileNames.joined(separator: ",")
+        entry.audioFileName = attachmentPlan.audioFileName
+        entry.imageFileNames = attachmentPlan.imageFileNames.isEmpty ? nil : attachmentPlan.imageFileNames.joined(separator: ",")
         entry.imagesData = loaded.imagesData
         entry.themes = metadata.themes
         entry.embedding = metadata.embedding
@@ -161,7 +162,10 @@ enum RecentDeletedEntryStore {
             viewContext.rollback()
             await Task.detached(priority: .utility) {
                 withFileLock {
-                    removeRestoredAttachmentFilesSync(metadata: metadata)
+                    removeRestoredAttachmentFilesSync(
+                        imageFileNames: attachmentPlan.imageFileNames,
+                        audioFileName: attachmentPlan.audioFileName
+                    )
                 }
             }.value
             return false
@@ -207,6 +211,11 @@ enum RecentDeletedEntryStore {
         let metadata: Metadata
         let folder: URL
         let imagesData: Data?
+    }
+
+    private struct RestoreAttachmentPlan: Sendable {
+        let imageFileNames: [String]
+        let audioFileName: String?
     }
 
     private static func archiveSync(snapshot: EntryDeletionSnapshot) throws {
@@ -284,19 +293,44 @@ enum RecentDeletedEntryStore {
         return LoadedArchive(metadata: metadata, folder: folder, imagesData: imagesData)
     }
 
-    private static func restoreAttachmentFilesSync(loaded: LoadedArchive) throws {
+    private static func restoreAttachmentPlan(metadata: Metadata, restoredID: UUID) -> RestoreAttachmentPlan {
+        guard restoredID != metadata.entryID else {
+            return RestoreAttachmentPlan(
+                imageFileNames: metadata.imageFileNames,
+                audioFileName: metadata.audioFileName
+            )
+        }
+
+        return RestoreAttachmentPlan(
+            imageFileNames: metadata.imageFileNames.map {
+                regeneratedAttachmentFileName(original: $0, restoredID: restoredID)
+            },
+            audioFileName: metadata.audioFileName.map {
+                regeneratedAttachmentFileName(original: $0, restoredID: restoredID)
+            }
+        )
+    }
+
+    private static func regeneratedAttachmentFileName(original: String, restoredID: UUID) -> String {
+        let extensionPart = URL(fileURLWithPath: original).pathExtension
+        let suffix = extensionPart.isEmpty ? "" : ".\(extensionPart)"
+        return "\(restoredID.uuidString)-\(UUID().uuidString)\(suffix)"
+    }
+
+    private static func restoreAttachmentFilesSync(loaded: LoadedArchive, plan: RestoreAttachmentPlan) throws {
         let imageFolder = loaded.folder.appendingPathComponent(imageFolderName, isDirectory: true)
         var missingImageFile = false
-        for fileName in loaded.metadata.imageFileNames {
+        for (sourceFileName, targetFileName) in zip(loaded.metadata.imageFileNames, plan.imageFileNames) {
+            let fileName = sourceFileName
             let sourceURL = imageFolder.appendingPathComponent(fileName)
             guard let data = try? Data(contentsOf: sourceURL) else {
                 missingImageFile = true
                 continue
             }
             do {
-                _ = try DiaryEntry.saveImageToDocuments(data, fileName: fileName)
+                _ = try DiaryEntry.saveImageToDocuments(data, fileName: targetFileName)
             } catch {
-                Log.error("[RecentDeleted] restore image failed \(fileName): \(error)", category: .persistence)
+                Log.error("[RecentDeleted] restore image failed \(sourceFileName): \(error)", category: .persistence)
                 throw error
             }
         }
@@ -304,11 +338,12 @@ enum RecentDeletedEntryStore {
             throw CocoaError(.fileReadNoSuchFile)
         }
 
-        guard let audioFileName = loaded.metadata.audioFileName else { return }
+        guard let sourceAudioFileName = loaded.metadata.audioFileName,
+              let targetAudioFileName = plan.audioFileName else { return }
         let audioURL = loaded.folder
             .appendingPathComponent(audioFolderName, isDirectory: true)
-            .appendingPathComponent(audioFileName)
-        guard let safeName = LumoryAttachmentPaths.normalizedFileName(audioFileName) else {
+            .appendingPathComponent(sourceAudioFileName)
+        guard let safeName = LumoryAttachmentPaths.normalizedFileName(targetAudioFileName) else {
             throw CocoaError(.fileReadNoSuchFile)
         }
         let audioData = try Data(contentsOf: audioURL)
@@ -319,16 +354,16 @@ enum RecentDeletedEntryStore {
                 try? audioData.write(to: iCloudDir.appendingPathComponent(safeName), options: .atomic)
             }
         } catch {
-            Log.error("[RecentDeleted] restore audio failed \(audioFileName): \(error)", category: .persistence)
+            Log.error("[RecentDeleted] restore audio failed \(sourceAudioFileName): \(error)", category: .persistence)
             throw error
         }
     }
 
-    private static func removeRestoredAttachmentFilesSync(metadata: Metadata) {
-        for fileName in metadata.imageFileNames {
+    private static func removeRestoredAttachmentFilesSync(imageFileNames: [String], audioFileName: String?) {
+        for fileName in imageFileNames {
             try? DiaryEntry.deleteImageFromDocuments(fileName)
         }
-        if let audioFileName = metadata.audioFileName {
+        if let audioFileName {
             DiaryEntry.deleteAudioFromDocuments(audioFileName)
         }
     }

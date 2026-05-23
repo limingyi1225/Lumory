@@ -4,9 +4,8 @@
 //
 //  自动化生成 App Store Connect 用的 iPhone 截图。
 //
-//  运行方式:走 `Scripts/generate-screenshots.sh` —— 它会先 boot 模拟器、override 状态栏
-//  (9:41 / 满电 / 满信号),再调 `xcodebuild test -only-testing` 跑这个文件,
-//  最后把 .xcresult 里的 PNG 提取到 `Screenshots/zh-Hans/`。
+//  运行方式:手动用 `xcodebuild test -only-testing:ChronoteUITests/ScreenshotTests`
+//  跑这个文件,再从 .xcresult 导出需要的截图附件。
 //
 //  也可以单独从 Xcode IDE 里跑(注意状态栏不会自动覆盖,会带"测试中"的红条)。
 //

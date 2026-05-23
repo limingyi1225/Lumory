@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/isaac/Code/Lumory/.codex/hooks/server-lint.sh"
+            "command": "\"$(git rev-parse --show-toplevel)/.codex/hooks/server-lint.sh\""
           }
         ]
       }

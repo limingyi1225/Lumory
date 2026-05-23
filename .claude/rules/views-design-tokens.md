@@ -13,7 +13,7 @@ paths:
 
 ## 圆角
 
-用 `LumoryCornerRadius.card` (16) / `.chip` (22) / `.inline` (12)。规则:**内容卡 16,toast / overlay 22,inline banner 12**。2026-05-17 audit:`Chronote/Views` 共 45 处硬编码 `cornerRadius:`,top values 14(×10)/ 8(×8)/ 4(×7)/ 12(×5)/ 16(×3);说明 `.thumbnail`(8)在 view 层确实有需要,要做一致性 sweep 时再加这个 token(2026-05 删除时全仓 0 caller,现在 8(×8)说明用例长出来了)。
+用 `LumoryCornerRadius.card` (16) / `.nestedRow` (14) / `.chip` (22) / `.inline` (12)。规则:**内容卡 16,卡内候选 row / citation row / message bubble 14,toast / overlay 22,inline banner 12**。2026-05-23 audit:`Chronote/Views` 共 86 处 `cornerRadius:` 参数,其中 numeric literal 25 处(14 已 token 化为 0 处 literal;8 仍有 8 处,多为 thumbnail / code block / diagnostics 这种局部形态)。需要一致性 sweep 时优先看 numeric literal,不要把已 token 化的 `cornerRadius:` 使用也算成硬编码。
 
 ## 动画
 
@@ -42,7 +42,7 @@ token 化的:`AnimationConfig.toast`(0.34/0.86)/ `.bannerAppear`(0.42/0.86)/ `.b
 
 ## DateFormatter
 
-用 `LumoryDateFormatters.timeShort / .monthDay / .weekdayShort / .weekdayFull / .fullDateTime / .isoDate / .monthDayWeekday / .twentyFourHourTime / .mediumDate / .longDateShortTime / .monthShort` + 语言感知 accessor `.monthDay(language:) / .weekdayFull(language:) / .dayNumber(language:) / .monthShortLocalized(language:) / .timeShortLocalized(language:) / .longDate(language:)`。**不要**在 view 里 `let f = DateFormatter()` 局部 cache(reviewer 历史数到 5 处)。`DateFormatter` 自身线程安全 since iOS 7,共享实例没问题。
+用 `LumoryDateFormatters.timeShort / .monthDay / .weekdayShort / .weekdayFull / .fullDateTime / .isoDate / .monthDayWeekday / .twentyFourHourTime / .mediumDate / .longDateShortTime / .monthShort` + 语言感知 accessor `.monthDay(language:) / .weekdayFull(language:) / .dayNumber(language:) / .monthShortLocalized(language:) / .timeShortLocalized(language:) / .longDate(language:) / .fullDateTime(language:)`。**不要**在 view 里 `let f = DateFormatter()` 局部 cache(reviewer 历史数到 5 处)。`DateFormatter` 自身线程安全 since iOS 7,共享实例没问题。
 
 **POSIX-locked token 不归 view 层**但同库:`fileTimestamp`(文件名)/ `isoDatePOSIX`(LLM prompt)/ `httpDate`(RFC 7231)走 service 用,绕过 `Locale.current` 防本地数字系。详见 `ios-codebase.md` "本地化字符串" 段。
 
@@ -56,7 +56,7 @@ token 化的:`AnimationConfig.toast`(0.34/0.86)/ `.bannerAppear`(0.42/0.86)/ `.b
 
 统一用 `LumoryToastCenter.shared.show(message, severity:)`,**不要**再写 local `@State toastMessage` + 自定义 overlay。带 action 的 toast(撤销 / 重试)用 `LumoryToastCenter.Action(label:perform:)`。
 
-如果 view 是 sheet 内容根 + 触发自身 toast,在 root 加 `.lumoryToastOverlay()`(已挂 5 处:InsightsView / ThemeAliasManagementView / DiaryDetailView / PointDetailSheet / ThemeFilteredEntriesView)。`ChronoteApp` body 已挂 root overlay,sheet 内层重挂是因为 sheet 把 root overlay 压住看不见。同 singleton 多层渲染同一条 toast,系统 z-order 保证只一条可见。
+如果 view 是 sheet 内容根 + 触发自身 toast,在 root 加 `.lumoryToastOverlay()`(已挂 8 处:InsightsView / ThemeAliasManagementView / DiaryDetailView / PointDetailSheet / ThemeFilteredEntriesView / DiaryExportView / SettingsView / RecentlyDeletedView)。`ChronoteApp` body 已挂 root overlay,sheet 内层重挂是因为 sheet 把 root overlay 压住看不见。同 singleton 多层渲染同一条 toast,系统 z-order 保证只一条可见。
 
 **Toast 整条 capsule 都是 hit area** —— 有 action 时 tap 任意位置 = 触发 action(等同 Apple Photos 删除 toast),没 action 时 tap = dismiss。距底部 52pt(原 36 太近,user 拇指从右下伸过去容易穿透到下方 timeline row 进 detail)。
 

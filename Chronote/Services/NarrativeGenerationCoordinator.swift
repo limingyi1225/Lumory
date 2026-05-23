@@ -39,6 +39,19 @@ final class NarrativeGenerationCoordinator {
         let occurredAt: Date
     }
 
+    private struct PersistRequest {
+        let range: TimeRange
+        let dateInterval: DateInterval
+        let entryCount: Int
+        let mostRecentEntryDate: Date?
+        let generation: Int
+        let streamStartTime: Date
+        let rawOutput: String
+        let isIncomplete: Bool
+        let truncatedReason: String?
+        let citedEntryIds: [UUID]
+    }
+
     static let shared = NarrativeGenerationCoordinator(
         engine: .shared,
         persistence: .shared
@@ -130,7 +143,7 @@ final class NarrativeGenerationCoordinator {
         precomputing.remove(range)
     }
 
-    /// §2.1 (2026-05-19) — 用户主动 stop 按钮入口。只 cancel 当前 range 的 user-initiated
+    /// 用户主动 stop 按钮入口。只 cancel 当前 range 的 user-initiated
     /// 生成(不动其他 range / 不动 precomputing,跟 cancelAll 区分语义)。Card 的 stop button
     /// 调这条,await task.value 让 runStream 体内 `Task.checkCancellation` / `URLSession` cancel
     /// 抛出后清干净再返回 —— 防止 user 按完 stop 立刻又 startGeneration 时 race。幂等。
@@ -221,7 +234,7 @@ final class NarrativeGenerationCoordinator {
         }
         guard isCurrent(range, generation), !Task.isCancelled else { return }
 
-        await persistIfNeeded(
+        await persistIfNeeded(PersistRequest(
             range: range,
             dateInterval: dateInterval,
             entryCount: entryCount,
@@ -232,30 +245,19 @@ final class NarrativeGenerationCoordinator {
             isIncomplete: acc.isIncomplete,
             truncatedReason: acc.truncatedReason,
             citedEntryIds: narrativeInput.sourceEntryIds
-        )
+        ))
     }
 
     /// 流结束写盘 v3 record。跟原 `NarrativeSummaryCard.persistNarrativeIfNeeded` 同逻辑,
     /// 只是改写主 viewContext(本类 @MainActor)而非卡片的 @Environment context。失败仅 Log。
-    private func persistIfNeeded(
-        range: TimeRange,
-        dateInterval: DateInterval,
-        entryCount: Int,
-        mostRecentEntryDate: Date?,
-        generation: Int,
-        streamStartTime: Date,
-        rawOutput: String,
-        isIncomplete: Bool,
-        truncatedReason: String?,
-        citedEntryIds: [UUID]
-    ) async {
-        let (headline, body) = NarrativeStreamSplitter.split(rawOutput: rawOutput)
+    private func persistIfNeeded(_ request: PersistRequest) async {
+        let (headline, body) = NarrativeStreamSplitter.split(rawOutput: request.rawOutput)
 
         // body 空 = stream 失败 / 在 [BODY] marker 前被截 → 不写盘。把失败原因挂 streamFailure
         // 让卡片显 streamFailedView / 重试;无失败原因(纯空 .done)→ 不挂,卡片回落 notGenerated。
         guard !body.isEmpty else {
-            if isCurrent(range, generation) {
-                streamFailure[range] = truncatedReason.map {
+            if isCurrent(request.range, request.generation) {
+                streamFailure[request.range] = request.truncatedReason.map {
                     StreamFailure(reason: $0, occurredAt: Date())
                 }
             }
@@ -265,45 +267,45 @@ final class NarrativeGenerationCoordinator {
         // 写盘前 cancel 在飞的后台 precompute,避免「用户手动生成」+「后台预生成」同 range
         // 各写一条。`cancelPendingAndBumpGeneration` 内含 await,返回后须重新比对世代号。
         await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
-        guard isCurrent(range, generation), !Task.isCancelled else { return }
+        guard isCurrent(request.range, request.generation), !Task.isCancelled else { return }
 
         // stream 跑了几十秒,期间用户删/编辑 entry → markInvalidatedForEntryChange 推进
         // marker。marker 晚于 streamStartTime → 本次 body 基于过期快照,丢弃不写盘,否则旧
         // 正文配新 createdAt 会重新成为 fresh cache,用户看到引用已删/旧文字的 ghost 回顾。
         if let invalidated = NarrativeCacheService.invalidatedBeforeDate(),
-           invalidated >= streamStartTime {
-            Log.info("[NarrativeGen] entry set changed during stream, discard stale narrative for \(range.rawValue)", category: .ai)
+           invalidated >= request.streamStartTime {
+            Log.info("[NarrativeGen] entry set changed during stream, discard stale narrative for \(request.range.rawValue)", category: .ai)
             return
         }
 
         let viewContext = persistence.container.viewContext
         let payload = AIConversation.NarrativePayload(
-            rangeStart: dateInterval.start,
-            rangeEnd: dateInterval.end,
+            rangeStart: request.dateInterval.start,
+            rangeEnd: request.dateInterval.end,
             body: body,
-            isIncomplete: isIncomplete,
-            truncatedReason: truncatedReason,
-            rangeKind: range.rawValue,
-            entryCount: entryCount,
-            sourceLatestEntryDate: mostRecentEntryDate,
+            isIncomplete: request.isIncomplete,
+            truncatedReason: request.truncatedReason,
+            rangeKind: request.range.rawValue,
+            entryCount: request.entryCount,
+            sourceLatestEntryDate: request.mostRecentEntryDate,
             generatedAt: Date(),
             headline: headline
         )
         do {
             _ = try AIConversation.insertNarrative(
                 in: viewContext,
-                title: range.narrativeTitleLabel,
+                title: request.range.narrativeTitleLabel,
                 payload: payload,
-                citedEntryIds: citedEntryIds
+                citedEntryIds: request.citedEntryIds
             )
             try viewContext.save()
             // persist 成功 → 清失败标记;incomplete-ness 由 payload.isIncomplete 携带。
-            if isCurrent(range, generation) {
-                streamFailure[range] = nil
+            if isCurrent(request.range, request.generation) {
+                streamFailure[request.range] = nil
             }
         } catch {
             viewContext.rollback()
-            Log.error("[NarrativeGen] persist failed for \(range.rawValue): \(error)", category: .persistence)
+            Log.error("[NarrativeGen] persist failed for \(request.range.rawValue): \(error)", category: .persistence)
         }
     }
 }

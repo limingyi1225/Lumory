@@ -29,9 +29,12 @@ final class OpenAITranscriber: TranscriberProtocol {
     /// 这些是开发者个人 dogfooding 时加的术语,ship 给所有用户会让转写在含混音频上 1% 偏向这几个
     /// token,对完全不说理科词的用户是噪音。保留 zh/en 语言约束 + App 通用术语;后续若要做用户级
     /// 自适应可读 `ThemeAliasResolver.snapshotIndex` top-N 主题动态拼接。
-    nonisolated private static let transcriptionPrompt = """
-    Audio language: 中文或 English only. Transcribe exactly in the spoken language; do not translate. If the clip is brief or noisy, prefer Chinese or English and do not output other languages. Context words may include Lumory, diary, journal, mood, theme.
-    """
+    nonisolated private static let transcriptionPrompt = [
+        "Audio language: 中文或 English only.",
+        "Transcribe exactly in the spoken language; do not translate.",
+        "If the clip is brief or noisy, prefer Chinese or English and do not output other languages.",
+        "Context words may include Lumory, diary, journal, mood, theme."
+    ].joined(separator: " ")
 
     private let backendURL: URL
     private let jsonDecoder = JSONDecoder()

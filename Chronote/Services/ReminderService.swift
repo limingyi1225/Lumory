@@ -317,8 +317,8 @@ final class ReminderService: ObservableObject {
         defer { releaseMutationSlot() }
         #if canImport(UserNotifications)
         // Screenshot mode 早返:任何 UI test / 截图流程意外触发 reminder toggle,
-        // 系统通知权限弹窗会盖在 Home 上把首屏截烂。跟 ChronoteApp.requestPermissions()
-        // 同样的守卫。
+        // 系统通知权限弹窗会盖在 Home 上把首屏截烂。启动时不主动请求权限,
+        // 所以授权入口自己的 screenshot guard 必须留在这里。
         #if DEBUG
         if UITestSampleData.isActive { return false }
         #endif

@@ -271,12 +271,9 @@ struct NarrativeSummaryCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // (B-04 / B-03 superreview 2026-05-19, **二次修复** —— 这个 overlay 之前被某次编辑丢了,
-        //  只剩 headlineView 里那条"已挪到 overlay"的注释在说谎)stop button 挂卡片顶层 overlay,
-        //  这样 streaming 时不管 displayHeadline 是不是空,用户都能看到停止按钮。老实现把它放在
-        //  headlineView 内,第一次生成(无 cache → displayHeadline 空)走 skeleton 分支 headlineView
-        //  不渲染,停止按钮跟着不显,用户 30-60 秒被锁住没法中断。overlay 永远可见 + hit-test 高于
-        //  整卡 onTapGesture(Button 默认优先级高于 sibling onTapGesture)。
+        // Stop button 挂卡片顶层 overlay,这样 streaming 时不管 displayHeadline
+        // 是不是空,用户都能中断主动生成。老实现把它放在 headlineView 内,第一次生成
+        // 无 cache 时 headlineView 不渲染,停止按钮跟着不显,用户会被锁住等完整轮流。
         .overlay(alignment: .topTrailing) {
             if blocksUserTap {
                 Button {
@@ -372,9 +369,8 @@ struct NarrativeSummaryCard: View {
                 .textSelection(.enabled)
                 .animation(.smooth(duration: 0.4), value: displayHeadline)
 
-            // §2.1 (2026-05-19) — `arrow.up.right` 只在"有 headline 可点开沉浸阅读"时显;
-            // streaming + stop button 已挪到 `contentCard` 的 overlay 层(见 B-04 fix),
-            // 这里只剩 idle 状态下的箭头 affordance。
+            // `arrow.up.right` 只在"有 headline 可点开沉浸阅读"时显;streaming + stop
+            // button 在 contentCard overlay 层,这里只剩 idle 状态下的箭头 affordance。
             if !isStreaming {
                 Image(systemName: "arrow.up.right")
                     .font(LumoryFonts.narrativeMeta)

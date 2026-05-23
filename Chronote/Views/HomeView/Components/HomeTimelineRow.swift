@@ -2,7 +2,7 @@ import SwiftUI
 import CoreData
 
 /// 主时间线单行容器。包 `HomeTimelineCard` 加 tap / contextMenu / swipe + list-row 修饰。
-/// **不**复用 Insights / ThemeFiltered 用的 `DiaryEntryRow` —— 视觉结构不同。
+/// **不**复用旧 `DiaryEntryRow` —— 视觉结构不同;`DiaryEntryRow` 当前只保留作参考/Preview。
 @available(iOS 17.0, *)
 struct HomeTimelineRow: View {
     let entry: DiaryEntry

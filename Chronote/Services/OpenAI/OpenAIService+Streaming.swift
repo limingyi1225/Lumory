@@ -81,11 +81,11 @@ Diary Entries:
             // 不总守。同 endpoint 的 streamChatEvents 设了 4096 cap,narrative 这里漏 → 偶发 leak
             // 4k+ token,客户端 rawOutput 累 string concat + split 成本随之上涨。给 1500 硬 cap
             // 对 ~400 字预期留 3x 余量,既挡住失控 leak 又不切到正常输出。
-            let max_completion_tokens: Int?
+            let maxCompletionTokens: Int?
 
             enum CodingKeys: String, CodingKey {
                 case model, messages, stream, reasoning_effort
-                case max_completion_tokens = "max_completion_tokens"
+                case maxCompletionTokens = "max_completion_tokens"
             }
         }
         let requestBody = RequestBody(
@@ -93,7 +93,7 @@ Diary Entries:
             messages: [Message(role: "user", content: prompt)],
             stream: true,
             reasoning_effort: "low",
-            max_completion_tokens: 1500
+            maxCompletionTokens: 1500
         )
 
         guard !appSharedSecret.isEmpty else {

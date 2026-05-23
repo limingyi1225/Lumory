@@ -84,8 +84,8 @@ final class AudioRecorder: NSObject, ObservableObject {
         switch AVAudioApplication.shared.recordPermission {
         case .undetermined:
             // (2026-05-19 superreview P1-2)Screenshot 自动化模式:跳过权限弹窗,否则
-            // iOS 系统 alert 会盖到 Home 上把首屏截烂。原先 ChronoteApp.requestPermissions
-            // 启动时跳的 guard 已删,要在这里补 — startRecording 是新的唯一权限请求入口。
+            // iOS 系统 alert 会盖到 Home 上把首屏截烂。启动时已不主动请求麦克风权限,
+            // startRecording 是新的唯一权限请求入口,所以 guard 必须留在这里。
             #if DEBUG
             if UITestSampleData.isActive {
                 Log.info("[AudioRecorder] startRecording: skipping permission prompt in screenshot mode", category: .audio)

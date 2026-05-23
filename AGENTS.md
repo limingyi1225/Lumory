@@ -1,13 +1,24 @@
 # Lumory
 
-iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,主 App target/scheme/productName 都是 **`Lumory`**,源码目录仍是 `Chronote/`(历史遗留,rename 成本大故不动),bundle id `Mingyi.Lumory`。tests target 仍叫 `ChronoteTests` / `ChronoteUITests`;Widget target 是 `LumoryWidgets`。仓库里同时包含一个 Node.js OpenAI 代理后端(`server/`)。
+iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,主 App target/scheme/productName 都是 **`Lumory`**,源码目录仍是 `Chronote/`(历史遗留,rename 成本大故不动),bundle id `Mingyi.Lumory`。tests target 仍叫 `ChronoteTests` / `ChronoteUITests`;Widget extension 单列 target `LumoryWidgets`(.appex,bundle id `Mingyi.Lumory.Widgets`,源码 `LumoryWidgets/` + 双 target 共享 `LumoryWidgetShared/`)。仓库里同时包含一个 Node.js OpenAI 代理后端(`server/`)。
+
+## Claude 侧详细规则
+
+`AGENTS.md` 是 Codex 入口,但 Claude 侧已经把很多细规则拆进 path-scoped rule files。Codex 做对应路径的活儿时也要主动读这些文件,避免两边记忆漂移:
+
+- [`.claude/rules/ios-codebase.md`](.claude/rules/ios-codebase.md) — 改 `Chronote/**` / `LumoryWidgets/**` / `LumoryWidgetShared/**` 时读。包含 iOS 启动序列、Service catalog、Model 字段、Views 树、Swift/SwiftUI/CoreData/Concurrency 踩坑、通知/转写/SSE 客户端约定。
+- [`.claude/rules/views-design-tokens.md`](.claude/rules/views-design-tokens.md) — 改 `Chronote/Views/**` 时读。包含字号、圆角、动画、Haptic、PressableScaleButtonStyle、sheet 文案、DateFormatter、toast、Form/liquidGlass 等 UI token。
+- [`.claude/rules/backend-server.md`](.claude/rules/backend-server.md) — 改 `server/**` / `ecosystem.config.js` 时读。包含鉴权、速率限制、请求体限制、转写 model hardcode、SSE 错误处理、部署流程。
+- [`.claude/rules/testing.md`](.claude/rules/testing.md) — 改 `ChronoteTests/**` / `ChronoteUITests/**` / `Scripts/**` 时读。包含 xcodebuild 串行 flag、SIGABRT 诊断、xcresulttool 提取、Screenshot 模式 early-return、bash PIPESTATUS。
+
+新加长期规则优先放对应 `.claude/rules/*.md`,这里只同步所有任务都需要知道的入口级事实。
 
 ## 技术栈
 - **iOS 客户端**:SwiftUI + CoreData + `NSPersistentCloudKitContainer`(CloudKit 同步)。App 入口 `Chronote/ChronoteApp.swift`;`WindowGroup` 挂一个 `ZStack`,启动先走 `SplashView`(约 1s)再淡出到主内容视图 `HomeView`(见 [ChronoteApp.swift:175-188](Chronote/ChronoteApp.swift:175))。
 - **后端**:Node.js + Express 5,部署在 `https://lumory.isaabby.com`(Cloudflare → nginx:443 → node:3000),PM2 进程管理。
 - **AI**:走自建后端代理 OpenAI(`/api/openai/chat/completions`、`/api/openai/embeddings`、`/api/openai/audio/transcriptions`)。Chat 走 SSE 流,模型目前是 `gpt-5.5` / `gpt-5.4-mini`(reasoning effort 分档)。
 - **语音**:`AVAudio` 本地录音(`AAC m4a / 16kHz mono`,见 [AudioRecorder.swift](Chronote/Services/AudioRecorder.swift)),转写走后端代理 `gpt-4o-mini-transcribe`(见 [OpenAITranscriber.swift](Chronote/Services/OpenAITranscriber.swift) + [Transcriber.swift](Chronote/Services/Transcriber.swift) 协议 + [BackendErrorMapper.swift](Chronote/Services/BackendErrorMapper.swift) 共享错误映射)。失败 UX 用 inline banner + 重试按钮(`recordingVM.transcriptionError`),不再用 alert。**没有** Apple `SFSpeechRecognizer` fallback。
-- **本地化**:中(`zh-Hans.lproj`)/ 英(`en.lproj`),由 `@AppStorage("appLanguage")` 切换。
+- **本地化**:中(`zh-Hans.lproj`)/ 英(`en.lproj`),由 `@AppStorage("appLanguage", store: AppGroup.userDefaults)` 切换 —— 主 App + widget extension 共用 App Group `group.Mingyi.Lumory` 这个 UserDefaults suite。
 
 ## 目录
 - `Chronote/`
@@ -43,14 +54,15 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,主 App ta
   - `Extensions/` — `Color+MoodSpectrum`、`Image+Compression`
   - `Utils/` — `AnimationConfig`、`LiquidGlass`、`LocalizationHelper`、`Log`、`PerformanceOptimization`
 - `ChronoteTests/` · `ChronoteUITests/` — 单测 / UI 测试
-- `LumoryWidgets/` · `LumoryWidgetShared/` — Widget extension target 与 App Group 共享快照/上下文代码。
-- `Lumory.xcodeproj` · `Lumory-Info.plist` · `Lumory.entitlements` · `Lumory.icon`
+- `LumoryWidgets/` — Widget extension target(QuickWriteWidget + LockStreakWidget)。
+- `LumoryWidgetShared/` — 主 App + LumoryWidgets extension 双 target 共编共享 sources,只 import Foundation。
+- `Lumory.xcodeproj` · `Lumory-Info.plist` · `Lumory.entitlements` · `Lumory.icon` · `LumoryWidgets-Info.plist` · `LumoryWidgets.entitlements` — widget plist / entitlement **放项目根目录**,不放 `LumoryWidgets/`(那是 PBXFileSystemSynchronizedRootGroup,扔进去会被自动塞进 Resources copy phase)。
 - `server/` — Node 后端。代码主体集中在 [index.js](server/index.js)(Express 5 + pino + pino-http + express-rate-limit + axios + cors + dotenv),目录内还有 `package.json` / `package-lock.json` / `eslint.config.js`。
 - `ecosystem.config.js` — PM2 配置(`lumory-server`,fork 模式,`max_memory_restart: 512M`)。
 - `Scripts/reset-database.sh`、根目录 `clean-build.sh` / `deep-clean.sh` / `clean-corrupted-db.sh` — 维护脚本。
 - `Scripts/generate-screenshots.sh` — 自动跑 `ChronoteUITests/ScreenshotTests` 出 6 张 1320×2868 的 App Store 截图到 `Screenshots/zh-Hans/`。流程:boot iPhone 17 Pro Max → `simctl status_bar override`(9:41 / 满电) → `xcodebuild test -only-testing ... -parallel-testing-enabled NO` → `xcresulttool export attachments`。
 - `.codex/` — Codex 本地配置:agents(`*.toml`) + hooks(`hooks.json` / `hooks/server-lint.sh`)。
-- `.claude/` — Claude 侧 agents / skills / rules / hooks。`skills/screenshot/SKILL.md` 封装截图流水线;`agents/coredata-migration-reviewer.md` / `agents/sse-pipeline-reviewer.md` 是 Claude Code 端自定义 agent 提示。`settings.local.json` 是个人权限 allowlist,别把它 check 进 git。
+- `.claude/` — Claude 侧 agents / skills / rules / hooks。`rules/ios-codebase.md` 管 `Chronote/**` / `LumoryWidgets/**` / `LumoryWidgetShared/**`,`rules/views-design-tokens.md` 管 `Chronote/Views/**`,`rules/backend-server.md` 管 `server/**` / `ecosystem.config.js`,`rules/testing.md` 管 `ChronoteTests/**` / `ChronoteUITests/**` / `Scripts/**`;这些 rule file 是 Claude 的 path-scoped 详细规则,Codex 需要时也应主动查。`skills/screenshot/SKILL.md` 封装截图流水线;`agents/coredata-migration-reviewer.md` / `agents/sse-pipeline-reviewer.md` 是 Claude Code 端自定义 agent 提示。`settings.local.json` 是个人权限 allowlist,别把它 check 进 git。
 - `CHANGELOG.md` — **内容不可信,不要据此推断版本/日期/功能状态**。
 
 ## iOS 架构要点
@@ -155,8 +167,8 @@ iOS:
 
 ### 测试覆盖缺口
 
-- **`parseImportedDiaries` 错误路径 + `StreamEvent.truncated` 端到端消费侧测试** —— 现在 `MockAIService` / `ThemeAliasAITestDouble` 能注入 throw / `.truncated` 事件,但 `NarrativeReader` / `AskPastView` 消费侧无单测断言 `isIncomplete` flag 翻 true。需要给 view-state 观察建一个测试基础设施(可能引入 ViewInspector 或自己写 binding-tap helper),先把这条测试基建落地再补具体用例。
-- **`ReminderService.currentRescheduleGen` race stale 场景测试** —— `ThemeAliasJudgeService.scanGen` 的 race 测试已覆盖(`scanGen_staleCompletionDoesNotClearNewerTaskHandle`,通过 `simulateConcurrentScanStartForTesting` 注入),但 `ReminderService` 没装 race test seam(强耦 UN center,要 mock UN 才能干净测)。下次拆 ReminderService 时一并解决。
+- **`StreamEvent.truncated` view-side 端到端测试** —— Service-side(`NarrativePrecomputeService` 消费 `.truncated` 写 `payload.isIncomplete=true / truncatedReason`)已补完单测;`parseImportedDiaries` 错误路径也已通过 MockURLProtocol + `OpenAIServiceImportTests` 补完。剩余缺口只在 view-side:`NarrativeSummaryCard` / `AskPastView` 消费侧让 `isIncomplete` flag 翻 true + 渲染 incompleteFooter,仍需 ViewInspector 或自写 binding-tap helper 才能断言。
+- ~~**`ReminderService.currentRescheduleGen` race stale 场景测试**~~ —— 已覆盖:`ChronoteTests/ReminderServiceImperativeTests.swift` 通过 `MockReminderNotificationCenter` + `requestReschedule_staleGenerationRemovesOldPendingRequests` 锁住 stale generation 清旧 pending 的行为。
 
 ### 隐私 hardening
 
@@ -166,7 +178,7 @@ iOS:
 
 > 历史 backlog(2026-04-29 至 2026-05-01 写的 3 条:`ThemeAliasResolver` 拆 `ThemeAliasStore` / `OpenAIService.swift:1633` 的 structured JSON payload TODO / `CloudKitSyncMonitor` 8 处 `DispatchQueue.main.async` 迁 `@MainActor`)**已全部在 2026-05-16 wave 完成**:Resolver 拆 Store+Resolver 见超长文件段;Import payload 走 `OpenAIService+Import.swift` 的 `encodeImportPayload` 结构化 JSON;CloudKitSyncMonitor 全文件已 0 处 `DispatchQueue.main.async`,全部 `Task { @MainActor [weak self] in ... }`。所以本段当前只剩下面这一条。
 
-- **超长文件**(SwiftLint 阈值 600 行,2026-05-23 重测):ThemeAliasResolver 869 / AskPastView 861 / ReminderService 787 / ThemeAliasManagementView 752 / InsightsView 708 / SettingsView 679 / HomeView 668。near-threshold:InsightsEngine 551。**已大幅拆下来的**(2026-05 多波 refactor):HomeView 曾从 1700+ 拆到多 extension + service,OpenAIService 已拆成主入口 + `OpenAI/SSEParser` + `+Streaming` + `+OneShotAI` + `+Suggestions` + `+ThemeAlias` + `+Import`,DiaryDetailView 已拆 `+Display` / `+Edit` / `+Audio` extension + `AsyncPhotoThumbnail`,InsightsEngine 已拆 `InsightsSearchEngine` Search/RAG 子系统。重构机会但都不算 bug。
+- **超长文件**(SwiftLint 阈值 600 行;具体行数会随业务漂,2026-05-23 重测):ThemeAliasResolver 869 / AskPastView 861 / ReminderService 787 / ThemeAliasManagementView 752 / InsightsView 708 / SettingsView 679 / HomeView 668。near-threshold:InsightsEngine 551。**已大幅拆下来的**(2026-05 多波 refactor):HomeView 曾从 1700+ 拆到多 extension + service,OpenAIService 已拆成主入口 + `OpenAI/SSEParser` + `+Streaming` + `+OneShotAI` + `+Suggestions` + `+ThemeAlias` + `+Import`,DiaryDetailView 已拆 `+Display` / `+Edit` / `+Audio` extension + `AsyncPhotoThumbnail`,InsightsEngine 已拆 `InsightsSearchEngine` Search/RAG 子系统。重构机会但都不算 bug。
 
 ## Codex 自动化(本地,非生产)
 - **MCP servers / tools**(以当前 Codex/Claude 会话实际暴露为准):
@@ -181,4 +193,4 @@ iOS:
   - 兜底:`general-purpose` / `Explore`(只读搜索)/ `Plan`(设计实现)/ `claude-code-guide` / `statusline-setup` / `claude`
 - **历史上常被瞎猜、今天 Claude Code 端 spawn 仍 hard error**:裸名 `code-reviewer` / `debugger` / `security-auditor` / `architect-review` / `test-automator` / `performance-engineer` / `database-optimizer` / `api-design-principles` / `backend-security-coder`;前缀 `codex:*` / `feature-dev:*` / `superpowers:*`。**注意**:`codex:codex-rescue` / `codex:review` 在 Claude Code 端**不是**有效 `subagent_type`,要跑 Codex rescue 走 `codex-companion.mjs task` Bash / 对应 Skill,不要当 `Agent` 工具的 subagent 派。
 - **不确定时**:走 `general-purpose` + 把视角焦点写进 prompt;`.claude/agents/*.md` 内容可抄进 prompt 当 system 提示,等价手贴。superreview / megareview 流水线历史上踩过 3/8 agent 派失败的坑,现在统一表述后不再触发。
-- **Hook** `.codex/hooks/server-lint.sh` / `.claude/hooks/server-lint.sh`(PostToolUse):编辑 `server/*.js` 后自动 `eslint --fix` + `prettier --write`,失败不阻塞对话。改了 hook 脚本记得 `chmod +x`。
+- **Hook** `.codex/hooks/server-lint.sh` / `.claude/hooks/*.sh`(PostToolUse):Codex 入口 `.codex/hooks/server-lint.sh` 保留旧文件名但实际 fan-out 到 Claude 共享 hook,避免两套逻辑漂移;Claude 入口在 `.claude/settings.json` 里逐条配置。编辑 `server/*.js` 后自动 `eslint --fix` + `prettier --write`;编辑 `Chronote/` / `LumoryWidgets/` / `LumoryWidgetShared/` 下 Swift 文件后,若本机已安装 `swiftlint`,自动 `swiftlint lint --fix` 并回声剩余 warning;编辑 `Chronote/*/Localizable.strings` 后检查中英文 key 同步与重复 key。失败均不阻塞对话。改了 hook 脚本记得 `chmod +x`。

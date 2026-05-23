@@ -40,7 +40,7 @@ print('passed=',d['passedTests'],'failed=',d['failedTests'])
 
 `-LumoryUITestSampleData YES` 启动参数让 `PersistenceController.shared` 自动构造 in-memory store + `seedIfNeeded` 种 ~90 条样例(主角"林子衿")。
 
-**`requestPermissions()` 必须 early return**(`if UITestSampleData.isActive { return }`),否则 SFSpeech / Mic 弹窗盖在 Home 上把首屏截烂。**`ReminderService.enable()` 同样要早返**(防 toggle 被意外触发时通知权限弹窗盖住截图);任何"主动 requestAuthorization"路径都得过这道闸。
+截图模式下任何主动系统授权都必须 early return,否则权限弹窗会盖住首屏:`AudioRecorder.startRecording()` 在 `UITestSampleData.isActive` 时跳过麦克风弹窗;`ReminderService.enable()` 同样早返(防 toggle 被意外触发时通知权限弹窗盖住截图)。旧 `ChronoteApp.requestPermissions()` 已删除,启动不再主动请求麦克风权限;任何新加的 `requestRecordPermission` / `requestAuthorization` 路径都得过这道闸。
 
 `Scripts/generate-screenshots.sh` 默认 iPhone 17 Pro Max → `simctl status_bar override`(9:41 / 满电) → `xcodebuild test -only-testing ... -parallel-testing-enabled NO` → `xcresulttool export attachments`。
 

@@ -9,6 +9,8 @@
 
 included:
   - Chronote
+  - LumoryWidgets
+  - LumoryWidgetShared
 
 excluded:
   - Chronote/Assets.xcassets

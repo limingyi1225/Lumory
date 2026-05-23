@@ -378,7 +378,7 @@ struct EditableMoodSpectrumBar: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard isEnabled else { return }
-                        let newValue = Double(value.location.x / width)
+                        let newValue = Double(value.location.x / max(width, 1))
                         moodValue = min(max(0, newValue), 1)
                     }
             )

@@ -28,7 +28,9 @@ extension HomeView {
         let audioDuration: TimeInterval
         let images: [Data]
         let photos: [PhotosPickerItem]
+        let compressionFailureCount: Int
         let mood: Double
+        let dateOverride: Date?
     }
 
     @MainActor
@@ -66,7 +68,9 @@ extension HomeView {
                     audioDuration: recordingVM.audioRecordings.first?.duration ?? 0,
                     images: photoVM.selectedImages,
                     photos: photoVM.selectedPhotos,
-                    mood: inputVM.moodValue
+                    compressionFailureCount: photoVM.compressionFailureCount,
+                    mood: inputVM.moodValue,
+                    dateOverride: draftEntryDate
                 )
 
                 Log.info("[HomeView SendButton] Starting send action", category: .ui)
@@ -106,6 +110,8 @@ extension HomeView {
             let audioDurationToRestore = snapshot.audioDuration
             let imagesToSend = snapshot.images
             let photosToSend = snapshot.photos
+            let compressionFailureCountToRestore = snapshot.compressionFailureCount
+            let entryDateToSend = Self.composerEntryDate(from: snapshot.dateOverride)
             var finalMoodValue = snapshot.mood
 
             // 2. 执行AI情绪分析（基于 snapshot 的文本，只调用一次）
@@ -143,7 +149,8 @@ extension HomeView {
                         text: textToSend,
                         audioFileName: audioToSend,
                         images: imagesToSend,
-                        moodValue: initialMoodForSave
+                        moodValue: initialMoodForSave,
+                        date: entryDateToSend
                     ),
                     in: PersistenceController.shared,
                     viewContext: viewContext,
@@ -197,7 +204,9 @@ extension HomeView {
                     // 新打的字。改成 prepend:把发送时的 snapshot 文本放回最前,新输入留在
                     // 末尾,空行分隔。
                     let pendingDuringWindow = inputVM.inputText
-                    let restored: String = pendingDuringWindow.isEmpty || pendingDuringWindow == textToSend
+                    let pendingTrimmed = pendingDuringWindow.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let sentTrimmed = textToSend.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let restored: String = pendingDuringWindow.isEmpty || pendingTrimmed == sentTrimmed
                         ? textToSend
                         : "\(textToSend)\n\n\(pendingDuringWindow)"
                     withAnimation(AnimationConfig.smoothTransition) {
@@ -220,11 +229,12 @@ extension HomeView {
                         photoVM.selectedImageItems = imagesToSend.map { HomePhotoViewModel.SelectedImage(data: $0) }
                         photoVM.photoSelectionGeneration &+= 1
                         photoVM.isProcessingSelection = false
-                        photoVM.compressionFailureCount = 0
+                        photoVM.compressionFailureCount = compressionFailureCountToRestore
                         if photoVM.selectedPhotos != photosToSend {
                             photoVM.suppressNextPhotoSelectionReload = true
                             photoVM.selectedPhotos = photosToSend
                         }
+                        draftEntryDate = snapshot.dateOverride
                     }
                     // (megareview P1 #5)发送失败彻底静默 → user 只看到内容神秘出现,不知何故。
                     // 加 error haptic + warning toast(Toast.Severity 只有 success/info/warning),
@@ -251,7 +261,7 @@ extension HomeView {
                 }
                 // P0-2 send 完成成功反馈 — 之前完全没 haptic,跟"删 / 存"高频动作统一。
                 #if canImport(UIKit)
-                HapticManager.shared.notification(.success)
+                HapticManager.shared.complete()
                 #endif
                 // (A-04 superreview 2026-05-19) 如果发送时转写还在飞,我们刚 cancel 掉了它,
                 // 录音文件本身存进去了但对应文字没拼上。toast 文案 +1 行让用户知道这件事,
@@ -263,6 +273,7 @@ extension HomeView {
                     NSLocalizedString(toastKey, comment: "Toast after diary entry saved"),
                     severity: .success
                 )
+                draftEntryDate = nil
             }
 
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -323,6 +334,24 @@ extension HomeView {
 
             try? await Task.sleep(nanoseconds: pollInterval)
         }
+    }
+
+    private static func composerEntryDate(from override: Date?) -> Date {
+        guard let override else { return Date() }
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let selectedDate = min(calendar.startOfDay(for: override), today)
+        let selectedDay = calendar.dateComponents([.year, .month, .day], from: selectedDate)
+        let currentTime = calendar.dateComponents([.hour, .minute, .second, .nanosecond], from: Date())
+        var components = DateComponents()
+        components.year = selectedDay.year
+        components.month = selectedDay.month
+        components.day = selectedDay.day
+        components.hour = currentTime.hour
+        components.minute = currentTime.minute
+        components.second = currentTime.second
+        components.nanosecond = currentTime.nanosecond
+        return calendar.date(from: components) ?? override
     }
 
     private static func sendFailureMessage(error: Error?) -> String {

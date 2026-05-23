@@ -22,6 +22,10 @@ import Accelerate
 // `ask()` 返 AsyncStream 不引新边界。
 final class InsightsSearchEngine {
     private static let maxAskContextEntries = 8
+    private static let minAskContextEntries = 3
+    private static let askContextCandidateMultiplier = 2
+    private static let askScoreRelativeFloor: Float = 0.82
+    private static let askScoreDeltaFloor: Float = 0.08
 
     // MARK: Dependencies
 
@@ -84,7 +88,15 @@ final class InsightsSearchEngine {
             }
             let totalCount = rows.count
             guard topK > 0 else {
-                return InsightsEngine.SemanticSearchResult(ids: [], indexCoverage: 0.0, totalCount: totalCount, queryEmbedded: queryEmbedded)
+                let withVecCount = rows.filter { row in
+                    guard let blob = row["embedding"] as? Data,
+                          let vec = DiaryEntry.decodeEmbeddingVector(blob) else {
+                        return false
+                    }
+                    return qVec.map { vec.count == $0.count } ?? true
+                }.count
+                let coverage = Double(withVecCount) / Double(max(1, totalCount))
+                return InsightsEngine.SemanticSearchResult(ids: [], indexCoverage: coverage, totalCount: totalCount, queryEmbedded: queryEmbedded)
             }
 
             // 无 query 向量 → 直接返空(让 UI 决定 fallback 策略,不偷偷返"最近 K 条"假装是相关结果)
@@ -98,12 +110,17 @@ final class InsightsSearchEngine {
             var topHeap: [(id: NSManagedObjectID, score: Float)] = []
             topHeap.reserveCapacity(topK)
             var withoutVecCount = 0
+            var mismatchedVecCount = 0
             var maxScore: Float = -.infinity
             for row in rows {
                 guard let oid = row["objectID"] as? NSManagedObjectID else { continue }
                 guard let blob = row["embedding"] as? Data,
                       let vec = DiaryEntry.decodeEmbeddingVector(blob) else {
                     withoutVecCount += 1
+                    continue
+                }
+                guard vec.count == qVec.count else {
+                    mismatchedVecCount += 1
                     continue
                 }
                 let score = Self.cosineSimilarity(qVec, vec)
@@ -118,7 +135,7 @@ final class InsightsSearchEngine {
                 }
             }
 
-            let withVecCount = totalCount - withoutVecCount
+            let withVecCount = totalCount - withoutVecCount - mismatchedVecCount
             let coverage = Double(withVecCount) / Double(max(1, totalCount))
 
             // **P1 fix (2026-05-15 megareview, refined by 2026-05-15 superreview P2)**:
@@ -176,7 +193,7 @@ final class InsightsSearchEngine {
                 }
 
                 let contextLimit = min(Self.maxAskContextEntries, max(0, topK))
-                let context = await self.retrieve(query: trimmedQuestion, queryVector: qVec, topK: contextLimit)
+                let context = await self.retrieve(query: trimmedQuestion, queryVector: qVec, requestedLimit: contextLimit)
 
                 guard !context.isEmpty else {
                     continuation.yield(InsightsEngine.AnswerChunk(
@@ -222,7 +239,7 @@ final class InsightsSearchEngine {
 
     // MARK: - Private
 
-    private func retrieve(query: String, queryVector: [Float]?, topK: Int) async -> [DiaryEntryData] {
+    private func retrieve(query: String, queryVector: [Float]?, requestedLimit: Int) async -> [DiaryEntryData] {
         // **两阶段检索**(Fix #20):
         //  Phase A —— 轻量扫:只 prefetch `embedding` + `date`,**不**触发 text/summary/themes/imagesData
         //             的 fault。1000 条 × 6KB embedding ≈ 6MB,vs 旧实现 15-30MB 全量物化。
@@ -247,18 +264,20 @@ final class InsightsSearchEngine {
             scanRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
 
             guard let rows = try? context.fetch(scanRequest), !rows.isEmpty else { return [] }
-            guard topK > 0 else { return [] }
+            guard requestedLimit > 0 else { return [] }
+            let maxContextCount = min(Self.maxAskContextEntries, requestedLimit)
+            let candidateLimit = max(maxContextCount, min(maxContextCount * Self.askContextCandidateMultiplier, rows.count))
 
             // 无 query 向量时不能回退到最近日记,否则 Ask Past 会把"无法理解问题"伪装成有依据的回答。
             guard let qVec = queryVector else {
                 return []
             }
 
-            // 收集 (objectID, score),用 bounded min-heap 维护当前 top-K(K 通常 8-20):
+            // 收集 (objectID, score),用 bounded min-heap 维护当前候选池(K 通常 6-16):
             // 用 sorted insertion 模拟 —— `topHeap` 始终按 score 降序;新候选 < heap 末尾(最小值)直接丢,
-            // 否则 insertion-sort 进去并把溢出末尾踢掉。K=20 时每次 insertion 最差 20 次比较。
+            // 否则 insertion-sort 进去并把溢出末尾踢掉。K=16 时每次 insertion 最差 16 次比较。
             var topHeap: [(id: NSManagedObjectID, score: Float)] = []
-            topHeap.reserveCapacity(topK)
+            topHeap.reserveCapacity(candidateLimit)
             // 同步收集"无 embedding"的 objectID + date,以便最后做"未索引语料保留槽"逻辑(对齐 rankRetrieval 行为)。
             var withoutVecIDs: [(id: NSManagedObjectID, date: Date)] = []
             withoutVecIDs.reserveCapacity(rows.count)
@@ -279,7 +298,7 @@ final class InsightsSearchEngine {
                 }
                 comparableVecCount += 1
                 let score = Self.cosineSimilarity(qVec, vec)
-                if topHeap.count < topK {
+                if topHeap.count < candidateLimit {
                     // 插入并保持降序
                     let insertAt = topHeap.firstIndex(where: { $0.score < score }) ?? topHeap.count
                     topHeap.insert((oid, score), at: insertAt)
@@ -298,11 +317,12 @@ final class InsightsSearchEngine {
 
             // 全语料无 embedding → 走时间兜底(rows 已按 date desc)
             guard !topHeap.isEmpty else {
-                let ids = rows.prefix(topK).compactMap { $0["objectID"] as? NSManagedObjectID }
+                let fallbackCount = min(maxContextCount, max(Self.minAskContextEntries, min(5, rows.count)))
+                let ids = rows.prefix(fallbackCount).compactMap { $0["objectID"] as? NSManagedObjectID }
                 return Self.materialize(objectIDs: Array(ids), in: context)
             }
 
-            // 计算"未索引保留槽":覆盖率不到 95% 或有 5 分钟内新条目时,留 max(2, topK/3) 给最近未索引。
+            // 计算"未索引保留槽":覆盖率不到 95% 或有 5 分钟内新条目时,留 max(2, max/3) 给最近未索引。
             // 与 rankRetrieval 的策略一致,只是这里直接对 objectID 操作,不必回填 DiaryEntryData。
             let totalCount = rows.count
             let withVecCount = comparableVecCount
@@ -311,14 +331,14 @@ final class InsightsSearchEngine {
             let hasFreshUnindexed = withoutVecIDs.contains { now.timeIntervalSince($0.date) < 300 }
             let minRecencyReserve: Int
             if !withoutVecIDs.isEmpty, indexCoverage < 0.95 || hasFreshUnindexed {
-                minRecencyReserve = min(max(2, topK / 3), withoutVecIDs.count)
+                minRecencyReserve = min(max(2, maxContextCount / 3), withoutVecIDs.count)
             } else {
                 minRecencyReserve = 0
             }
 
-            let maxSemanticSlots = max(0, topK - minRecencyReserve)
-            let semanticIDs = topHeap.prefix(maxSemanticSlots).map { $0.id }
-            let remainingSlots = max(0, topK - semanticIDs.count)
+            let maxSemanticSlots = max(0, maxContextCount - minRecencyReserve)
+            let semanticIDs = Self.trimSemanticCandidates(topHeap, maxCount: maxSemanticSlots).map { $0.id }
+            let remainingSlots = max(0, maxContextCount - semanticIDs.count)
             // withoutVecIDs 来自按 date desc 的 scanned,所以它本身已按 date desc
             let recentUnindexed = withoutVecIDs.prefix(min(remainingSlots, withoutVecIDs.count)).map { $0.id }
 
@@ -326,6 +346,23 @@ final class InsightsSearchEngine {
 
             // Phase B: 物化
             return Self.materialize(objectIDs: finalIDs, in: context)
+        }
+    }
+
+    private static func trimSemanticCandidates(
+        _ candidates: [(id: NSManagedObjectID, score: Float)],
+        maxCount: Int
+    ) -> [(id: NSManagedObjectID, score: Float)] {
+        guard maxCount > 0, let topScore = candidates.first?.score else { return [] }
+        let capped = Array(candidates.prefix(maxCount))
+        let minimumCount = min(Self.minAskContextEntries, capped.count)
+        guard topScore > 0 else {
+            return Array(capped.prefix(minimumCount))
+        }
+
+        let cutoff = max(topScore * Self.askScoreRelativeFloor, topScore - Self.askScoreDeltaFloor)
+        return capped.enumerated().compactMap { index, candidate in
+            index < minimumCount || candidate.score >= cutoff ? candidate : nil
         }
     }
 

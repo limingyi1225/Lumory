@@ -1,14 +1,18 @@
 import Foundation
 import CoreData
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// **P1-Home-6 删除 undo(4 秒撤销)**
 ///
 /// 设计原则:
-/// - **不动 schema**(soft delete + 30 天回收站是 P3 epic),只在内存维持 4 秒"待清理"快照。
+/// - **不动 schema**,先在内存维持 4 秒"待清理"快照;窗口过期后写入本地最近删除归档。
 /// - **乐观删除**:CoreData entry 立即 `delete + save`(用户看到 row 消失),attachment 文件
-///   **延迟 4 秒**才真删。这 4 秒里如果用户点了撤销,从快照重新 insert entry,attachment 文件还在原位。
-/// - **快照只在内存**:进程被杀 = 撤销窗口失效,attachment 文件成孤儿,下次启动磁盘清理脚本捡。
-///   不写盘是为了避免引入持久化的"已删除待清理"状态(那本质就是 soft delete schema)。
+///   **延迟 4 秒**才归档并真删。这 4 秒里如果用户点了撤销,从快照重新 insert entry,
+///   attachment 文件还在原位。
+/// - **撤销快照只在内存**:4 秒内撤销仍是即时重建;窗口过期后再写本地 30 天归档,
+///   避免引入 Core Data soft-delete schema。
 /// - **多次删除**:新删除会触发上一条的 commit(立即清掉那条的 attachment),保证最多只有一个待撤销。
 ///
 /// **接入点**(2026-05-05 实测):4 处单 entry 删除全部走撤销 toast,跟 CLAUDE.md 一致 ——
@@ -193,6 +197,38 @@ final class EntryDeletionUndoService {
 
         let imageFiles = snapshot.attachmentImageFileNames
         let audioFile = snapshot.audioFileName
+        #if canImport(UIKit)
+        let backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "LumoryRecentDeletedArchive")
+        #endif
+        Task.detached(priority: .utility) {
+            #if canImport(UIKit)
+            defer {
+                Task { @MainActor in
+                    Self.endArchiveBackgroundTask(backgroundTaskID)
+                }
+            }
+            #endif
+            let didArchive = await RecentDeletedEntryStore.archive(snapshot: snapshot)
+            if !didArchive {
+                Log.warning("[EntryDeletionUndo] recent-deleted archive failed; deleting orphaned attachments after undo window", category: .persistence)
+            }
+            await deleteAttachmentFiles(imageFileNames: imageFiles, audioFileName: audioFile)
+        }
+    }
+
+    /// 批量清空 / 数据库重建时取消当前单条删除的撤销窗口。
+    ///
+    /// 这里不写入最近删除:用户选择的是 destructive bulk wipe,旧的单条 pending 不应在
+    /// "最近删除"里复活。attachment 仍要清,否则 pending entry 已从 CoreData 消失但文件会泄漏。
+    func discardPendingForBulkWipe() {
+        commitTask?.cancel()
+        commitTask = nil
+        guard let snapshot = pending else { return }
+        pending = nil
+        LumoryToastCenter.shared.dismissActionToast()
+
+        let imageFiles = snapshot.attachmentImageFileNames
+        let audioFile = snapshot.audioFileName
         Task.detached(priority: .utility) {
             await deleteAttachmentFiles(imageFileNames: imageFiles, audioFileName: audioFile)
         }
@@ -200,6 +236,13 @@ final class EntryDeletionUndoService {
 
     /// 是否当前有 pending(给 caller 判断要不要弹 toast 等)。
     var hasPending: Bool { pending != nil }
+
+    #if canImport(UIKit)
+    private static func endArchiveBackgroundTask(_ taskID: UIBackgroundTaskIdentifier) {
+        guard taskID != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(taskID)
+    }
+    #endif
 }
 
 /// 删除磁盘上的 attachment 文件。**必须**走 `DiaryEntry.delete{Image,Audio}FromDocuments` —

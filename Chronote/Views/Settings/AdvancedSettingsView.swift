@@ -305,6 +305,7 @@ struct AdvancedSettingsView: View {
     }
 
     private func performDatabaseRecovery() {
+        guard !isRecoveringDatabase else { return }
         isRecoveringDatabase = true
         DatabaseRecoveryService.shared.performRecovery(for: PersistenceController.shared.container) { result in
             Task { @MainActor in

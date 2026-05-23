@@ -69,6 +69,11 @@ final class InsightsEngine {
         init(failureReason reason: String) { self.kind = .failed; self.text = reason; self.citedEntryIds = [] }
     }
 
+    struct NarrativeInput: Sendable {
+        let entries: [DiaryEntryData]
+        let sourceEntryIds: [UUID]
+    }
+
     // MARK: Dependencies
 
     private let persistence: PersistenceController
@@ -164,12 +169,14 @@ final class InsightsEngine {
         // 时区漂移的边界秒内可能落在不同的自然日，导致 streak 漏算一天。
         // 在调用者所在线程先快照 "now / today"，传进 background 做纯计算，时间锚定得很死。
         let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
+        let now = Date()
+        let today = calendar.startOfDay(for: now)
         return await persistence.container.performBackgroundTask { context -> WritingStats in
             let request = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
             request.resultType = .dictionaryResultType
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
             request.propertiesToFetch = ["date", "moodValue", "wordCount"]
+            request.predicate = NSPredicate(format: "date <= %@", now as NSDate)
             guard let dicts = try? context.fetch(request), !dicts.isEmpty else {
                 return WritingStats(totalEntries: 0, currentStreak: 0, longestStreak: 0, totalWords: 0, avgMood: 0.5)
             }
@@ -238,6 +245,28 @@ final class InsightsEngine {
         let entries = await fetchEntryData(in: range)
         let aliasMap = await aliasMapAsync
         return Self.aggregateThemes(entries: entries, range: range, limit: limit, aliasMap: aliasMap)
+    }
+
+    func themeFilterContext(
+        for rawName: String,
+        in range: DateInterval = TimeRange.all.dateInterval,
+        visibleThemeLimit: Int = 200
+    ) async -> (selected: Theme?, allThemes: [Theme]) {
+        async let aliasMapAsync = MainActor.run { ThemeAliasResolver.shared.snapshotIndex() }
+        let entries = await fetchEntryData(in: range)
+        let aliasMap = await aliasMapAsync
+        let themes = Self.aggregateThemes(
+            entries: entries,
+            range: range,
+            limit: Int.max,
+            aliasMap: aliasMap
+        )
+        let targetName = aliasMap[ThemeKey.make(rawName)] ?? rawName
+        let targetKey = ThemeKey.make(targetName)
+        return (
+            selected: themes.first { ThemeKey.make($0.name) == targetKey },
+            allThemes: Array(themes.prefix(visibleThemeLimit))
+        )
     }
 
     /// 纯函数版本，便于单元测试。
@@ -320,19 +349,44 @@ final class InsightsEngine {
     func streamNarrativeEvents(in range: DateInterval) -> AsyncStream<StreamEvent> {
         AsyncStream { continuation in
             let task = Task {
-                let entries = await self.fetchEntryData(in: range)
-                guard !entries.isEmpty else {
-                    continuation.finish()
-                    return
-                }
-                for await event in self.ai.streamReportEvents(entries: entries) {
-                    if Task.isCancelled { break }
-                    continuation.yield(event)
-                }
-                continuation.finish()
+                let input = await self.narrativeInput(in: range)
+                await self.streamNarrativeEvents(for: input, into: continuation)
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    func narrativeInput(in range: DateInterval) async -> NarrativeInput {
+        let entries = await fetchEntryData(in: range)
+        let textBlock = OpenAIService.narrativeTextBlock(from: entries)
+        return NarrativeInput(entries: entries, sourceEntryIds: textBlock.sourceEntryIds)
+    }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    func streamNarrativeEvents(for input: NarrativeInput) -> AsyncStream<StreamEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                await self.streamNarrativeEvents(for: input, into: continuation)
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    private func streamNarrativeEvents(
+        for input: NarrativeInput,
+        into continuation: AsyncStream<StreamEvent>.Continuation
+    ) async {
+        guard !input.entries.isEmpty else {
+            continuation.finish()
+            return
+        }
+        for await event in ai.streamReportEvents(entries: input.entries) {
+            if Task.isCancelled { break }
+            continuation.yield(event)
+        }
+        continuation.finish()
     }
 
     // MARK: - 5a. Semantic search(F1)— facade forwarder

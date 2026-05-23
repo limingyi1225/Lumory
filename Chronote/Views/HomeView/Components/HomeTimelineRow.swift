@@ -23,7 +23,7 @@ struct HomeTimelineRow: View {
             HomeTimelineCard(entry: entry, appLanguage: appLanguage)
                 .contentShape(
                     .contextMenuPreview,
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    RoundedRectangle(cornerRadius: LumoryCornerRadius.card, style: .continuous)
                 )
                 .padding(.bottom, 10)
                 .contentShape(Rectangle())

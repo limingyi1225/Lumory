@@ -168,8 +168,10 @@ actor NarrativePrecomputeService {
         // **P1 fix (2026-05-14 superreview round 3)**:记 stream 开始时间,完成后判断 entry
         // 集合是否在生成期间被改动(见下方 invalidatedBeforeDate 守卫)。
         let streamStartTime = Date()
+        let narrativeInput = await engine.narrativeInput(in: interval)
+        guard isCurrentGeneration(generation) else { return }
 
-        streamLoop: for await event in engine.streamNarrativeEvents(in: interval) {
+        streamLoop: for await event in engine.streamNarrativeEvents(for: narrativeInput) {
             if Task.isCancelled { return }
             // **P2 fix (2026-05-13 superreview)**:stream 期间(可能几十秒)旧 task 若已被
             // supersede,继续累 rawOutput 没意义且烧 API。每个 event 边界 check generation,
@@ -245,6 +247,16 @@ actor NarrativePrecomputeService {
         let finalIsIncomplete = acc.isIncomplete
         let finalTruncatedReason = acc.truncatedReason
         let title = range.narrativeTitleLabel
+        let finalCitedEntryIds = narrativeInput.sourceEntryIds
+        guard isCurrentGeneration(generation) else {
+            Log.info("[NarrativePrecompute] skip \(range.rawValue): superseded before persist", category: .ai)
+            return
+        }
+        if let invalidated = NarrativeCacheService.invalidatedBeforeDate(),
+           invalidated >= streamStartTime {
+            Log.info("[NarrativePrecompute] skip \(range.rawValue): entry set changed before persist", category: .ai)
+            return
+        }
 
         // (megareview P1 #4)`generationToken` capture 进闭包,bg.perform 跑到 persist 前最后
         // 一帧再 check 一次。actor 视角的 `isCurrentGeneration` 在 line 229 已经查过,但
@@ -273,7 +285,7 @@ actor NarrativePrecomputeService {
                     in: bg,
                     title: title,
                     payload: payload,
-                    citedEntryIds: []
+                    citedEntryIds: finalCitedEntryIds
                 )
                 // (megareview P1 #4 — codex review follow-up)`insertNarrative` 跑完到 `save` 之间
                 // 仍可能被另一线程 bump generation(prepare payload 是 in-RAM op,~µs;但闭包整段从

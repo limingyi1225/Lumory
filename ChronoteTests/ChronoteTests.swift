@@ -1099,6 +1099,15 @@ struct SSEParserTests {
         #expect(events[0].hasTruncatedFinish == true)
     }
 
+    @Test func doneLineAfterPayloadInSameEventFlushesPayloadThenFinishes() async throws {
+        let events = try await collectSSEEvents([
+            #"data: {"value":"hello"}"#,
+            "data: [DONE]"
+        ])
+
+        #expect(events == [Chunk(value: "hello")])
+    }
+
     private func collectSSEEvents(_ lines: [String]) async throws -> [Chunk] {
         var events: [Chunk] = []
         for try await event in SSEParser.parse(lines: lines, type: Chunk.self, decoder: JSONDecoder()) {
@@ -1144,6 +1153,8 @@ struct NarrativeTextBlockTests {
         #expect(block.text.utf16.count <= 210)
         #expect(block.text.contains("new"))
         #expect(!block.text.contains("old"))
+        #expect(block.sourceEntryIds.contains(newest.id))
+        #expect(!block.sourceEntryIds.contains(old.id))
     }
 
     @Test func trimsSingleOversizedLatestEntry() {
@@ -1153,7 +1164,18 @@ struct NarrativeTextBlockTests {
 
         #expect(block.truncated)
         #expect(block.includedEntries == 1)
+        #expect(block.sourceEntryIds == [entry.id])
         #expect(block.text.utf16.count <= 120)
+    }
+
+    @Test func sourceEntryIdsUseNewestFirstDisplayOrder() {
+        let old = narrativeEntry(day: 1, text: "old")
+        let mid = narrativeEntry(day: 2, text: "mid")
+        let newest = narrativeEntry(day: 3, text: "new")
+
+        let block = OpenAIService.narrativeTextBlock(from: [old, mid, newest], maxUTF16Units: 10_000)
+
+        #expect(block.sourceEntryIds == [newest.id, mid.id, old.id])
     }
 
     private func narrativeEntry(day: Int, text: String) -> DiaryEntryData {

@@ -35,7 +35,7 @@ enum NarrativeCacheService {
     static func latest(
         for range: TimeRange,
         in context: NSManagedObjectContext
-    ) -> (payload: AIConversation.NarrativePayload, createdAt: Date)? {
+    ) -> (payload: AIConversation.NarrativePayload, createdAt: Date, citedEntryIds: [UUID])? {
         let invalidatedBefore = invalidatedBeforeDate()
         let pageSize = 32
         var offset = 0
@@ -62,7 +62,7 @@ enum NarrativeCacheService {
                     continue
                 }
                 guard let kind = payload.rangeKind, kind == range.rawValue else { continue }
-                return (payload, createdAt)
+                return (payload, createdAt, conv.citedEntryUUIDs)
             }
             // rows 按 createdAt desc 排序:本页最后一条已 <= invalidatedBefore,则后续页
             // 全部更老,都会被 invalidation 守卫跳过 → 没有继续翻页的意义。

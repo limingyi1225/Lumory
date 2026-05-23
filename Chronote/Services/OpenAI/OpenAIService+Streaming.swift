@@ -185,6 +185,10 @@ Diary Entries:
                     }
                     Log.info("[OpenAIService] 字节流处理完成，总共收到 \(chunkCount) 个内容块", category: .ai)
                 } catch {
+                    if error is CancellationError {
+                        didEmitTerminalStreamEvent = true
+                        return
+                    }
                     // 中途断流：已发过 chunk 就不重试（避免叙事正文前缀重复）；发 truncated 事件后正常返回
                     if hasEmittedAnyChunk {
                         Log.error("[OpenAIService] 报告流式中断; emitting truncation event: \(error)", category: .ai)
@@ -200,6 +204,10 @@ Diary Entries:
                 await MainActor.run { onEvent(.done) }
             }
         } catch {
+            if error is CancellationError {
+                didEmitTerminalStreamEvent = true
+                return
+            }
             Log.error("[OpenAIService] 安全数据流式请求错误: \(error)", category: .ai)
             if hasEmittedAnyChunk {
                 // 已经吐过内容才断 —— 依然归到 truncated（不是致命 failure）
@@ -234,6 +242,7 @@ Diary Entries:
 
     struct NarrativeTextBlock: Equatable {
         let text: String
+        let sourceEntryIds: [UUID]
         let includedEntries: Int
         let totalEntries: Int
         let truncated: Bool
@@ -245,10 +254,17 @@ Diary Entries:
     ) -> NarrativeTextBlock {
         let separator = "\n---\n"
         guard maxUTF16Units > 0 else {
-            return NarrativeTextBlock(text: "", includedEntries: 0, totalEntries: entries.count, truncated: !entries.isEmpty)
+            return NarrativeTextBlock(
+                text: "",
+                sourceEntryIds: [],
+                includedEntries: 0,
+                totalEntries: entries.count,
+                truncated: !entries.isEmpty
+            )
         }
 
         var newestFirst: [String] = []
+        var newestFirstIds: [UUID] = []
         var usedUTF16 = 0
         var didTrimEntry = false
 
@@ -261,9 +277,11 @@ Diary Entries:
             let blockCost = block.utf16.count
             if blockCost <= remaining {
                 newestFirst.append(block)
+                newestFirstIds.append(entry.id)
                 usedUTF16 += separatorCost + blockCost
             } else if newestFirst.isEmpty {
                 newestFirst.append(trimToUTF16Limit(block, maxUTF16Units))
+                newestFirstIds.append(entry.id)
                 didTrimEntry = true
                 usedUTF16 = newestFirst[0].utf16.count
                 break
@@ -275,6 +293,7 @@ Diary Entries:
         let text = newestFirst.reversed().joined(separator: separator)
         return NarrativeTextBlock(
             text: text,
+            sourceEntryIds: newestFirstIds,
             includedEntries: newestFirst.count,
             totalEntries: entries.count,
             truncated: didTrimEntry || newestFirst.count < entries.count
@@ -308,7 +327,7 @@ Diary Entries:
         AsyncStream { continuation in
             let task = Task {
                 let isZh = question.containsChinese
-                let contextBlock = entries.prefix(8).map { entry in
+                let contextBlock = entries.map { entry in
                     "[id:\(entry.id.uuidString.prefix(6)) date:\(Self.shortDate(entry.date)) mood:\(Self.qualitativeMoodLabel(entry.moodValue, isZh: isZh))]\n\(entry.text)"
                 }.joined(separator: "\n---\n")
 
@@ -476,6 +495,10 @@ Diary Entries:
                                 }
                             }
                         } catch {
+                            if error is CancellationError {
+                                didEmitTerminalStreamEvent = true
+                                return
+                            }
                             if hasEmittedAnyChunk {
                                 Log.error("[OpenAIService] streamChat interrupted mid-stream; emitting truncated event: \(error)", category: .ai)
                                 let reason = NSLocalizedString("stream.truncated.answer", comment: "Answer truncated marker")
@@ -490,6 +513,11 @@ Diary Entries:
                         continuation.yield(.done)
                     }
                 } catch {
+                    if error is CancellationError {
+                        didEmitTerminalStreamEvent = true
+                        continuation.finish()
+                        return
+                    }
                     Log.error("[OpenAIService] streamChat error: \(error)", category: .ai)
                     if hasEmittedAnyChunk {
                         let reason = NSLocalizedString("stream.truncated.answer", comment: "Answer truncated marker")

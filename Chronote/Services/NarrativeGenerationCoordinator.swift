@@ -190,8 +190,10 @@ final class NarrativeGenerationCoordinator {
         // 跟 precompute 的"立刻 return + 记 backoff"语义有意识地不同(本侧不 backoff,
         // 让用户能在 UI 上手动 retry)。
         var acc = NarrativeStreamAccumulator()
+        let narrativeInput = await engine.narrativeInput(in: dateInterval)
+        guard isCurrent(range, generation), !Task.isCancelled else { return }
 
-        streamLoop: for await event in engine.streamNarrativeEvents(in: dateInterval) {
+        streamLoop: for await event in engine.streamNarrativeEvents(for: narrativeInput) {
             if Task.isCancelled { break }
             guard isCurrent(range, generation) else { return }
             switch event {
@@ -228,7 +230,8 @@ final class NarrativeGenerationCoordinator {
             streamStartTime: streamStartTime,
             rawOutput: acc.rawOutput,
             isIncomplete: acc.isIncomplete,
-            truncatedReason: acc.truncatedReason
+            truncatedReason: acc.truncatedReason,
+            citedEntryIds: narrativeInput.sourceEntryIds
         )
     }
 
@@ -243,7 +246,8 @@ final class NarrativeGenerationCoordinator {
         streamStartTime: Date,
         rawOutput: String,
         isIncomplete: Bool,
-        truncatedReason: String?
+        truncatedReason: String?,
+        citedEntryIds: [UUID]
     ) async {
         let (headline, body) = NarrativeStreamSplitter.split(rawOutput: rawOutput)
 
@@ -290,7 +294,7 @@ final class NarrativeGenerationCoordinator {
                 in: viewContext,
                 title: range.narrativeTitleLabel,
                 payload: payload,
-                citedEntryIds: []
+                citedEntryIds: citedEntryIds
             )
             try viewContext.save()
             // persist 成功 → 清失败标记;incomplete-ness 由 payload.isIncomplete 携带。

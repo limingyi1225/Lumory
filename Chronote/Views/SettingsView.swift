@@ -33,6 +33,7 @@ struct SettingsView: View {
     @State private var showDeleteAllAlert = false
     @State private var showDeleteCompleteAlert = false
     @State private var isDeletingAllEntries = false
+    @State private var recentlyDeletedCount = 0
     /// (2026-05-19 P1-09 audit)删除全部失败时弹这个 alert。原先 `deleteAllEntries() → false`
     /// 只 log 不告知用户,用户以为操作成功但日记还在,信任崩。
     @State private var deleteAllFailureMessage: String?
@@ -126,6 +127,7 @@ struct SettingsView: View {
             .task {
                 // Settings 进来同步一次系统通知权限(用户可能在 Settings.app 改了)。
                 await reminderService.refreshAuthorizationStatus()
+                await refreshRecentlyDeletedCount()
             }
         }
         // backgroundGradient 挂在 NavigationStack 外 — 不受 push/pop 影响,消除子页面回来"暗一闪"。
@@ -488,6 +490,31 @@ struct SettingsView: View {
                 settingsLabel(NSLocalizedString("导出日记", comment: "Export"), icon: "square.and.arrow.up", tint: .accentColor)
             }
 
+            NavigationLink {
+                RecentlyDeletedView()
+                    .environment(\.managedObjectContext, viewContext)
+                    .onDisappear {
+                        Task { await refreshRecentlyDeletedCount() }
+                    }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "trash")
+                        .foregroundStyle(Color.accentColor)
+                        .symbolRenderingMode(.hierarchical)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(NSLocalizedString("最近删除", comment: "Recently deleted"))
+                            .foregroundStyle(Color.primary)
+                        if recentlyDeletedCount > 0 {
+                            Text(String(format: NSLocalizedString("保留中 %d 条", comment: "Recently deleted count"), recentlyDeletedCount))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                }
+            }
+
             Button {
                 showDeleteAllAlert = true
             } label: {
@@ -515,7 +542,7 @@ struct SettingsView: View {
                 Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
                     // P1-Set-2 destructive 确认即时 warning haptic — 区别于普通 .medium impact。
                     #if canImport(UIKit)
-                    HapticManager.shared.notification(.warning)
+                    HapticManager.shared.destructive()
                     #endif
                     Task {
                         let didDelete = await deleteAllEntries()
@@ -543,6 +570,11 @@ struct SettingsView: View {
             // 「清除 AI 回顾缓存」已挪到 进阶 → AdvancedSettingsView(2026-05-14 用户决定):
             // 它是低频维护操作,跟主层的导入/导出/删除全部不同档,放进阶更合适。
         }
+    }
+
+    @MainActor
+    private func refreshRecentlyDeletedCount() async {
+        recentlyDeletedCount = await RecentDeletedEntryStore.count()
     }
 
     // MARK: - Language

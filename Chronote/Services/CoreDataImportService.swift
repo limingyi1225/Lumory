@@ -34,6 +34,9 @@ class CoreDataImportService: ObservableObject {
         Log.info("[CoreDataImportService] importEntries: rawText length = \(rawText.count)", category: .migration)
         isImporting = true
         importProgress = 0.0
+        defer {
+            isImporting = false
+        }
 
         let parsed: [ParsedDiaryEntry]
         do {
@@ -42,7 +45,6 @@ class CoreDataImportService: ObservableObject {
             parsed = try await aiService.parseImportedDiaries(rawText: rawText)
         } catch {
             Log.error("[CoreDataImportService] parse failed: \(error)", category: .migration)
-            isImporting = false
             importProgress = 0.0
             throw error
         }
@@ -50,7 +52,6 @@ class CoreDataImportService: ObservableObject {
 
         guard !parsed.isEmpty else {
             Log.info("[CoreDataImportService] importEntries: parsed isEmpty (no entries detected in paste)", category: .migration)
-            isImporting = false
             importProgress = 0.0
             return .empty
         }
@@ -66,13 +67,15 @@ class CoreDataImportService: ObservableObject {
         let chunkSize = 10
         var seenFingerprints = existingEntryFingerprints(in: context)
         for (index, entry) in parsed.enumerated() {
+            defer {
+                importProgress = Double(index + 1) / Double(total)
+            }
             let date = entry.date
             let text = entry.text
             let fingerprint = Self.fingerprint(date: date, text: text)
             guard seenFingerprints.insert(fingerprint).inserted else {
                 Log.info("[CoreDataImportService] 跳过重复导入条目: \(date)", category: .migration)
                 skipped += 1
-                importProgress = Double(index + 1) / Double(total)
                 continue
             }
             // 和 HomeView.addEntry 保持一致的四件套流水线：summary / mood / themes / embedding
@@ -108,8 +111,6 @@ class CoreDataImportService: ObservableObject {
             }
             pendingEntries.append(preparedEntry)
 
-            // 更新进度
-            importProgress = Double(index + 1) / Double(total)
             Log.info("[CoreDataImportService] importEntries: imported entry \(index + 1)/\(total)", category: .migration)
 
             // 凑够 chunkSize 条 save 一次。失败时 chunk 内逐条 retry,避免 1 条坏数据拖垮整组。
@@ -131,7 +132,6 @@ class CoreDataImportService: ObservableObject {
         }
 
         // 导入完成后
-        isImporting = false
         importProgress = 1.0
         Log.info("[CoreDataImportService] importEntries: import completed succeeded=\(succeeded) failed=\(failed) skipped=\(skipped)", category: .migration)
 

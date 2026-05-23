@@ -27,6 +27,9 @@ struct PointDetailSheet: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var hSizeClass
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
+        Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"
+    }()
     let onEntryDeleted: (() -> Void)?
 
     @State private var entries: [DiaryEntry] = []
@@ -58,12 +61,16 @@ struct PointDetailSheet: View {
                         HapticManager.shared.impact(.light)
                         selectedEntry = entry
                     } label: {
-                        DiaryEntryRow(entry: entry)
+                        HomeTimelineCard(entry: entry, appLanguage: appLanguage)
+                            .contentShape(
+                                .contextMenuPreview,
+                                RoundedRectangle(cornerRadius: LumoryCornerRadius.card, style: .continuous)
+                            )
+                            .padding(.bottom, 10)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(PressableScaleButtonStyle())
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    .lumoryGlassListRow(top: 6)
                     // 删除直接执行 — 4 秒撤销 toast 替代 confirmation alert。
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
@@ -86,8 +93,11 @@ struct PointDetailSheet: View {
             .accessibilityIdentifier("pointDetailEntryList")
             .overlay {
                 if entries.isEmpty {
-                    Text(NSLocalizedString("该时段没有日记", comment: "No entries for bucket"))
-                        .foregroundColor(.secondary)
+                    EmptyStateView(
+                        systemImage: "calendar",
+                        title: NSLocalizedString("该时段没有日记", comment: "No entries for bucket"),
+                        size: .compact
+                    )
                 }
             }
             .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.listContentMaxWidth)
@@ -221,7 +231,7 @@ struct PointDetailSheet: View {
         viewContext.delete(entry)
         do {
             try viewContext.save()
-            HapticManager.shared.impact(.medium)
+            HapticManager.shared.destructive()
             EntryWipeOrchestrator.performSingleDeleteCleanup()
             withAnimation { entries.removeAll { $0.objectID == entryObjectID } }
             // selectedEntry 可能指向被删 entry — DiaryDetailView 内部 swipe 删除完 pop 回来后
@@ -316,7 +326,8 @@ struct PointDetailSheet: View {
         }
         guard myGen == availableDaysGen else { return }
         availableDays = days
-        if !days.isEmpty, !days.contains(currentDate) {
+        let calendar = Calendar.current
+        if !days.isEmpty, !days.contains(where: { calendar.isDate($0, inSameDayAs: currentDate) }) {
             let previousDate = currentDate
             currentDate = days.min {
                 abs($0.timeIntervalSince(previousDate)) < abs($1.timeIntervalSince(previousDate))

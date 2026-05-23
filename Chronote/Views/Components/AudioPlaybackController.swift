@@ -83,6 +83,9 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
                 try AVAudioSession.sharedInstance().setActive(true)
             } catch {
                 Log.warning("[AudioPlaybackController] resume: session reactivate failed: \(error)", category: .ui)
+                onPlayError?(error)
+                stopPlayback(clearCurrentFile: true)
+                return
             }
             #endif
             guard player.play() else {

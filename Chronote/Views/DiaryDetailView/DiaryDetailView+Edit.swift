@@ -32,7 +32,7 @@ extension DiaryDetailView {
 
         do {
             try viewContext.save()
-            HapticManager.shared.impact(.medium)
+            HapticManager.shared.destructive()
             // 单删派生缓存清理统一走 EntryWipeOrchestrator。
             EntryWipeOrchestrator.performSingleDeleteCleanup()
             onDeleted?()
@@ -70,7 +70,10 @@ extension DiaryDetailView {
         editedSummary = entry.wrappedSummary ?? ""
         editedText = entry.wrappedText
         editedMoodValue = entry.moodValue
-        editedDate = entry.wrappedDate
+        editedDate = Self.dateRoundedToMinute(entry.wrappedDate)
+        removedImageFileNames = []
+        removedAudioFileName = nil
+        originalAudioFileNameAtEditStart = entry.audioFileName
         hasUnsavedChanges = false
 
         withAnimation(AnimationConfig.gentleSpring) {
@@ -84,6 +87,10 @@ extension DiaryDetailView {
         // 防御:用户在编辑模式开过日期 sheet 没关掉就点取消 → sheet 残留 / 下次进编辑闪一下。
         // cancelEditing 是退出编辑态的 single source of truth,在这里 reset 所有编辑专属 UI 状态。
         showDatePopover = false
+        removedImageFileNames = []
+        removedAudioFileName = nil
+        originalAudioFileNameAtEditStart = nil
+        Task { await refreshResolvedAudioURL() }
 
         withAnimation(AnimationConfig.gentleSpring) {
             isEditing = false
@@ -109,17 +116,36 @@ extension DiaryDetailView {
         // text 变化了就需要在后台重跑 themes + embedding（否则 Insight 主题聚合和
         // Ask Past 的语义检索会继续用旧内容的索引）。先捕获对比值，再写 Core Data。
         let textChanged = entry.wrappedText != editedText
-        let dateChanged = entry.date != editedDate
+        let normalizedEditedDate = Self.dateRoundedToMinute(min(editedDate, Date()))
+        let calendar = Calendar.current
+        let dateChanged = !calendar.isDate(entry.wrappedDate, equalTo: normalizedEditedDate, toGranularity: .minute)
         let moodChanged = entry.moodValue != editedMoodValue
         let normalizedSummary = editedSummary.trimmingCharacters(in: .whitespacesAndNewlines)
         let summaryChanged = (entry.summary ?? "") != normalizedSummary
+        let originalImageFileNames = entry.imageFileNameArray
+        let removedImages = Set(originalImageFileNames).intersection(removedImageFileNames)
+        let remainingImageFileNames = originalImageFileNames.filter { !removedImages.contains($0) }
+        let originalSyncedImages = !removedImages.isEmpty ? entry.loadImagesFromSync() : []
+        let removedAudio = removedAudioFileName == originalAudioFileNameAtEditStart ? removedAudioFileName : nil
+        let mediaChanged = !removedImages.isEmpty || removedAudio != nil
         let narrativeInputChanged = textChanged || dateChanged || moodChanged || summaryChanged
         let entryObjectID = entry.objectID
 
         entry.summary = normalizedSummary
         entry.text = editedText
         entry.moodValue = editedMoodValue
-        entry.date = editedDate
+        entry.date = dateChanged ? normalizedEditedDate : entry.wrappedDate
+        if !removedImages.isEmpty {
+            entry.imageFileNames = remainingImageFileNames.isEmpty ? nil : remainingImageFileNames.joined(separator: ",")
+            entry.imagesData = Self.encodedImagesData(
+                originalFileNames: originalImageFileNames,
+                remainingFileNames: remainingImageFileNames,
+                originalSyncedImages: originalSyncedImages
+            )
+        }
+        if removedAudio != nil {
+            entry.audioFileName = nil
+        }
         if textChanged {
             entry.recomputeWordCount()   // 本地算，免费，现在就更新
         }
@@ -163,9 +189,25 @@ extension DiaryDetailView {
                 isEditing = false
             }
             hasUnsavedChanges = false
+            removedImageFileNames = []
+            removedAudioFileName = nil
+            originalAudioFileNameAtEditStart = nil
+            if mediaChanged {
+                let imagesToDelete = Array(removedImages)
+                let audioToDelete = removedAudio
+                Task.detached(priority: .utility) {
+                    for fileName in imagesToDelete {
+                        try? DiaryEntry.deleteImageFromDocuments(fileName)
+                    }
+                    if let audioToDelete {
+                        DiaryEntry.deleteAudioFromDocuments(audioToDelete)
+                    }
+                }
+                Task { await refreshResolvedAudioURL() }
+            }
 
             #if canImport(UIKit)
-            HapticManager.shared.notification(.success)
+            HapticManager.shared.complete()
             #endif
             // P0-2 全局 toast —— Detail 保存原本只 haptic,新加 visual feedback。
             LumoryToastCenter.shared.show(
@@ -194,6 +236,9 @@ extension DiaryDetailView {
                 EntryWipeOrchestrator.markNarrativeChangedNow()
                 Task { await EntryWipeOrchestrator.finishNarrativeInvalidationAfterEntryChange() }
             }
+            if mediaChanged {
+                Task { await WidgetSnapshotService.shared.invalidateCaches() }
+            }
         } catch {
             Log.error("[DiaryDetailView] 保存更改失败: \(error)", category: .ui)
             // **P1 fix (2026-05-15 megareview + superreview)**:save 抛异常时,前面 line 638-644 已经
@@ -204,6 +249,10 @@ extension DiaryDetailView {
             // 不动 viewContext 里别的 entry。老用 `viewContext.rollback()` 会把整个共享 context
             // (包括 refreshAIIndex / 别处 sheet 在飞的 best-effort 写)的 in-memory 改动全洗掉。
             viewContext.refresh(entry, mergeChanges: false)
+            removedImageFileNames.removeAll()
+            removedAudioFileName = nil
+            originalAudioFileNameAtEditStart = entry.audioFileName
+            Task { await refreshResolvedAudioURL() }
             // **明确告知用户保存失败**——不能静默，否则用户以为改动已入库但下次打开还是旧内容。
             // 用人话 fallback 而不是 NSError.localizedDescription("Cocoa error 134200" 类技术码对终端用户毫无意义)。
             saveError = NSLocalizedString("保存失败,可能是磁盘空间不足或同步冲突。请稍后重试。", comment: "Generic save failure fallback")
@@ -298,5 +347,31 @@ extension DiaryDetailView {
                 newTags: postWrite.themes
             )
         }
+    }
+
+    private static func encodedImagesData(
+        originalFileNames: [String],
+        remainingFileNames: [String],
+        originalSyncedImages: [Data]
+    ) -> Data? {
+        guard !remainingFileNames.isEmpty else { return nil }
+        let remainingImages: [Data]
+        if originalSyncedImages.count == originalFileNames.count {
+            remainingImages = originalFileNames.enumerated().compactMap { index, fileName in
+                remainingFileNames.contains(fileName) ? originalSyncedImages[index] : nil
+            }
+        } else {
+            remainingImages = remainingFileNames.compactMap { DiaryEntry.loadImageData(fileName: $0) }
+        }
+        let images = remainingImages
+        guard images.count == remainingFileNames.count else { return nil }
+        guard !images.isEmpty else { return nil }
+        return try? NSKeyedArchiver.archivedData(withRootObject: images, requiringSecureCoding: true)
+    }
+
+    private static func dateRoundedToMinute(_ date: Date) -> Date {
+        let calendar = Calendar.current
+        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        return calendar.date(from: components) ?? date
     }
 }

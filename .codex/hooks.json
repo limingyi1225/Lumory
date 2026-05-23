@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR}/.codex/hooks/server-lint.sh"
+            "command": "/Users/isaac/Code/Lumory/.codex/hooks/server-lint.sh"
           }
         ]
       }

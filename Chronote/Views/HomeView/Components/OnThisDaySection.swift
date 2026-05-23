@@ -13,11 +13,17 @@ struct OnThisDaySection: View {
     let appLanguage: String
     let onTap: (DiaryEntry) -> Void
 
+    private var visibleHighlights: [OnThisDayHighlight] {
+        highlights.filter { highlight in
+            highlight.entry.managedObjectContext != nil && !highlight.entry.isDeleted
+        }
+    }
+
     var body: some View {
-        if !highlights.isEmpty {
+        if !visibleHighlights.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
-                    ForEach(highlights) { highlight in
+                    ForEach(visibleHighlights) { highlight in
                         OnThisDayCard(
                             title: highlight.title,
                             entry: highlight.entry,
@@ -50,50 +56,52 @@ private struct OnThisDayCard: View {
     }
 
     var body: some View {
-        Button {
-            #if canImport(UIKit)
-            HapticManager.shared.impact(.light)
-            #endif
-            onTap()
-        } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .center, spacing: 8) {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(entry.moodColor)
+        if entry.managedObjectContext != nil && !entry.isDeleted {
+            Button {
+                #if canImport(UIKit)
+                HapticManager.shared.impact(.light)
+                #endif
+                onTap()
+            } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .center, spacing: 8) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(entry.moodColor)
 
-                    Text(title)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        Text(title)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
 
-                    Spacer(minLength: 0)
+                        Spacer(minLength: 0)
 
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary.opacity(0.7))
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.secondary.opacity(0.7))
+                    }
+
+                    Text(LumoryDateFormatters.monthDay(language: appLanguage).string(from: entry.wrappedDate))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    if !previewText.isEmpty {
+                        Text(previewText)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                            .lineSpacing(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
-
-                Text(LumoryDateFormatters.monthDay(language: appLanguage).string(from: entry.wrappedDate))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
-                if !previewText.isEmpty {
-                    Text(previewText)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
-                        .lineSpacing(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .frame(width: 260, alignment: .leading)
+                .frame(minHeight: 104, alignment: .top)
+                // §4.6 (2026-05-19) — `.liquidGlassCard + .moodAccentBar` 配对走共享 modifier。
+                .lumoryAccentCard(mood: entry.moodColor, cornerRadius: LumoryCornerRadius.inline)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(width: 260, alignment: .leading)
-            .frame(minHeight: 104, alignment: .top)
-            // §4.6 (2026-05-19) — `.liquidGlassCard + .moodAccentBar` 配对走共享 modifier。
-            .lumoryAccentCard(mood: entry.moodColor, cornerRadius: LumoryCornerRadius.inline)
+            .buttonStyle(PressableScaleButtonStyle())
+            .accessibilityLabel("\(title), \(LumoryDateFormatters.monthDay(language: appLanguage).string(from: entry.wrappedDate))")
         }
-        .buttonStyle(PressableScaleButtonStyle())
-        .accessibilityLabel("\(title), \(LumoryDateFormatters.monthDay(language: appLanguage).string(from: entry.wrappedDate))")
     }
 }

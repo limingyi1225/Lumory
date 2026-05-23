@@ -25,10 +25,9 @@ import Foundation
 //
 // ## 关键不变量(继承自旧 Resolver)
 //
-//   - **NFC 归一**:`canonicalize(_:)` 用 `ThemeKey.make`(NFC + lowercased + trim),
-//     反向 index 也用 `ThemeKey.make` 作 key。`enqueue` / `confirm` / `mergeThemes` 等
-//     mutation 内部用 `.lowercased()`(不 NFC,沿用旧行为) — 因为 AI 返回的 tag 已经
-//     NFC 化,差异在 NFD 历史 entry 上(canonicalize 时一次 NFC 兜底)。
+    //   - **NFC 归一**:`canonicalize(_:)` 用 `ThemeKey.make`(NFC + lowercased + trim),
+    //     反向 index 也用 `ThemeKey.make` 作 key。`enqueue` / `confirm` / `mergeThemes` 等
+    //     mutation 内部也必须使用同一 key-space,否则 NFD 历史 entry 会在删除 / 合并后复活。
 //   - **decode 失败 → corrupted backup**:disk blob 解码失败时备份到
 //     `<key>.corrupted-<unix>` 后再走空状态,保留 2 个最新备份。
 //   - **persistence 不阻塞 UI**:UserDefaults 写入是同步的(plist 序列化),数据量 <200
@@ -134,7 +133,7 @@ final class ThemeAliasStore {
         var out: [String] = []
         for raw in rawTags {
             let canon = canonicalize(raw)
-            let key = canon.lowercased()
+            let key = ThemeKey.make(canon)
             if seen.insert(key).inserted {
                 out.append(canon)
             }
@@ -160,8 +159,10 @@ final class ThemeAliasStore {
     }
 
     func isNegative(_ a: String, _ b: String) -> Bool {
-        let legacyKey = Self.pairKey(a.lowercased(), b.lowercased())
-        let normalizedKey = Self.pairKey(ThemeKey.make(a), ThemeKey.make(b))
+        let legacyA = a.lowercased()
+        let legacyB = b.lowercased()
+        let legacyKey = legacyA < legacyB ? "\(legacyA)||\(legacyB)" : "\(legacyB)||\(legacyA)"
+        let normalizedKey = Self.pairKey(a, b)
         return negativePairs.contains(legacyKey) || negativePairs.contains(normalizedKey)
     }
 
@@ -193,10 +194,12 @@ final class ThemeAliasStore {
         return collateral
     }
 
-    /// `lowercased(a)||lowercased(b)` 的稳定 pair key,a < b 排序。negativePairs / pending dedup
+    /// `ThemeKey.make(a)||ThemeKey.make(b)` 的稳定 pair key,a < b 排序。negativePairs / pending dedup
     /// 都用这个。同对子的方向无关性保证 AI 在两次 scan 间 swap 顺序时不会双发。
     static func pairKey(_ a: String, _ b: String) -> String {
-        a < b ? "\(a)||\(b)" : "\(b)||\(a)"
+        let keyA = ThemeKey.make(a)
+        let keyB = ThemeKey.make(b)
+        return keyA < keyB ? "\(keyA)||\(keyB)" : "\(keyB)||\(keyA)"
     }
 
     // MARK: - For Resolver mutation logic
@@ -212,9 +215,11 @@ final class ThemeAliasStore {
         in groups: [String: [String]],
         key: String
     ) -> String? {
+        let lookupKey = ThemeKey.make(key)
         for (canonical, aliases) in groups {
-            if canonical.lowercased() == key { continue }
-            if aliases.contains(where: { $0.lowercased() == key }) { return canonical.lowercased() }
+            let canonicalKey = ThemeKey.make(canonical)
+            if canonicalKey == lookupKey { continue }
+            if aliases.contains(where: { ThemeKey.make($0) == lookupKey }) { return canonicalKey }
         }
         return nil
     }

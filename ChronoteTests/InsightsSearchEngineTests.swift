@@ -37,12 +37,21 @@ struct InsightsSearchEngineTests {
         return vector.map { $0 / norm }
     }
 
+    private func vector(cosine: Float) -> [Float] {
+        var vector = [Float](repeating: 0, count: 16)
+        let clamped = min(max(cosine, -1), 1)
+        vector[0] = clamped
+        vector[1] = sqrt(max(0, 1 - clamped * clamped))
+        return vector
+    }
+
     @discardableResult
     private func makeEntry(
         in context: NSManagedObjectContext,
         text: String,
         date: Date,
-        withEmbedding: Bool
+        withEmbedding: Bool,
+        embedding: [Float]? = nil
     ) -> DiaryEntry {
         let entry = DiaryEntry(context: context)
         entry.id = UUID()
@@ -52,7 +61,9 @@ struct InsightsSearchEngineTests {
         entry.themes = ""
         entry.moodValue = 0.5
         entry.wordCount = Int32(text.count)
-        if withEmbedding {
+        if let embedding {
+            entry.setEmbedding(embedding)
+        } else if withEmbedding {
             entry.setEmbedding(mockEmbed(text))
         }
         return entry
@@ -195,8 +206,46 @@ struct InsightsSearchEngineTests {
             }
         }
 
-        #expect(citationCount == 8, "引用数量必须和实际传给模型的 context 一致,不能暴露模型没看到的日记")
-        #expect(answerText.contains("基于 8 条日记"), "Mock 回答应证明 askEvents 只收到 8 条 context,实际: \(answerText)")
+        #expect((3...8).contains(citationCount), "Ask Past 应动态裁剪到 3-8 条 context,实际: \(citationCount)")
+        #expect(answerText.contains("基于 \(citationCount) 条日记"), "Mock 回答应证明 citation 数量等于 askEvents 实际 context,实际: \(answerText)")
+    }
+
+    @Test func ask_facade_dynamicallyTrimsWeakSemanticCandidates() async {
+        let persistence = PersistenceController(inMemory: true)
+        let ctx = persistence.container.viewContext
+        let now = Date()
+        let scores: [Float] = [1.0, 0.98, 0.95, 0.70, 0.60, 0.50, 0.40, 0.30]
+        for (index, score) in scores.enumerated() {
+            makeEntry(
+                in: ctx,
+                text: index < 3 ? "close semantic \(index)" : "weak semantic \(index)",
+                date: now.addingTimeInterval(TimeInterval(-index * 60)),
+                withEmbedding: true,
+                embedding: vector(cosine: score)
+            )
+        }
+        try? ctx.save()
+
+        let engine = InsightsEngine(persistence: persistence, ai: ContextEchoAI())
+
+        var citationCount = 0
+        var answerText = ""
+        for await chunk in engine.ask("公园", topK: 11) {
+            switch chunk.kind {
+            case .citation:
+                citationCount = chunk.citedEntryIds.count
+            case .text:
+                answerText += chunk.text
+            case .truncated, .failed:
+                Issue.record("ContextEchoAI 正常路径不该 yield \(chunk.kind)")
+            }
+        }
+
+        #expect(citationCount == 3, "只有前三条分数接近 top score,弱相关候选不应为凑满 8 而进入 context")
+        #expect(answerText.contains("close semantic 0"))
+        #expect(answerText.contains("close semantic 1"))
+        #expect(answerText.contains("close semantic 2"))
+        #expect(!answerText.contains("weak semantic 3"))
     }
 
     @Test func ask_facade_preservesRecentUnindexedInsideContextBudget() async {
@@ -230,7 +279,7 @@ struct InsightsSearchEngineTests {
             }
         }
 
-        #expect(citationCount == 8, "Ask Past context budget 仍应限制为 8 条")
+        #expect((3...8).contains(citationCount), "Ask Past context 应动态控制在 3-8 条,实际: \(citationCount)")
         #expect(answerText.contains("fresh unindexed one"))
         #expect(answerText.contains("fresh unindexed two"))
     }

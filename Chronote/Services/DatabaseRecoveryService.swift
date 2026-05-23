@@ -58,8 +58,11 @@ final class DatabaseRecoveryService {
     ) {
         let coordinator = container.persistentStoreCoordinator
         
-        // Create backup first
-        let backupURL = createBackup(of: storeURL)
+        // Create backup first. If this fails, do not delete the only local copy.
+        guard let backupURL = createBackup(of: storeURL) else {
+            completion(.failure(RecoveryError.backupFailed))
+            return
+        }
         
         // Remove all stores
         for store in coordinator.persistentStores {
@@ -68,6 +71,8 @@ final class DatabaseRecoveryService {
                 Log.info("[DatabaseRecovery] Removed store: \(store.url?.path ?? "unknown")", category: .persistence)
             } catch {
                 Log.error("[DatabaseRecovery] Failed to remove store: \(error)", category: .persistence)
+                completion(.failure(error))
+                return
             }
         }
         
@@ -80,18 +85,14 @@ final class DatabaseRecoveryService {
                 Log.error("[DatabaseRecovery] Failed to recreate store: \(error)", category: .persistence)
                 
                 // Try to restore from backup if recreation fails
-                if let backupURL = backupURL {
-                    self.restoreFromBackup(backupURL: backupURL, to: storeURL)
-                    container.loadPersistentStores { _, retryError in
-                        if let retryError = retryError {
-                            completion(.failure(retryError))
-                        } else {
-                            Log.info("[DatabaseRecovery] Successfully restored store from backup", category: .persistence)
-                            self.completeRestoreRecovery(container: container, completion: completion)
-                        }
+                self.restoreFromBackup(backupURL: backupURL, to: storeURL)
+                container.loadPersistentStores { _, retryError in
+                    if let retryError = retryError {
+                        completion(.failure(retryError))
+                    } else {
+                        Log.info("[DatabaseRecovery] Successfully restored store from backup", category: .persistence)
+                        self.completeRestoreRecovery(container: container, completion: completion)
                     }
-                } else {
-                    completion(.failure(error))
                 }
             } else {
                 Log.info("[DatabaseRecovery] Successfully recreated store", category: .persistence)
@@ -192,6 +193,7 @@ final class DatabaseRecoveryService {
 
     func restoreFromBackup(backupURL: URL, to targetURL: URL) {
         do {
+            try? FileManager.default.removeItem(at: targetURL)
             try FileManager.default.copyItem(at: backupURL, to: targetURL)
             Log.info("[DatabaseRecovery] Restored from backup", category: .persistence)
 
@@ -200,6 +202,7 @@ final class DatabaseRecoveryService {
             for ext in Self.sqliteSidecarExtensions {
                 let backupSibling = backupURL.deletingPathExtension().appendingPathExtension(ext)
                 let targetSibling = targetURL.deletingPathExtension().appendingPathExtension(ext)
+                try? FileManager.default.removeItem(at: targetSibling)
                 try? FileManager.default.copyItem(at: backupSibling, to: targetSibling)
             }
         } catch {

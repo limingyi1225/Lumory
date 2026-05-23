@@ -20,6 +20,7 @@ import Foundation
 ///
 /// 迁移原则: 字段初值、顺序、可见性 1:1 搬过来,不重命名。
 @available(iOS 17.0, *)
+@MainActor
 @Observable
 final class HomeRecordingViewModel {
     /// 正在转写中。按钮 disabled、动画切换靠这个。

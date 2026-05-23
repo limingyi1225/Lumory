@@ -64,6 +64,7 @@ struct HomeView: View {
     /// Theme alias 软提示。observed 让 pending 列表变化时 banner 自动显隐。
     @ObservedObject var aliasResolver = ThemeAliasResolver.shared
     @ObservedObject var reminderRouter = ReminderNotificationRouter.shared
+    @ObservedObject var appLockService = AppLockService.shared
     @State var photoVM = HomePhotoViewModel()
 
     @StateObject var recorder = AudioRecorder()
@@ -139,6 +140,8 @@ struct HomeView: View {
     /// List 顶部锚点 id,FAB 用 ScrollViewProxy.scrollTo 跳回这里。
     private let topAnchorID = "__lumory_top__"
     @State var composerFocusRequestID: UUID?
+    /// Optional composer date override. nil means "today / now"; set from the keyboard toolbar only.
+    @State var draftEntryDate: Date?
 
     // MARK: - Composer 回调粘合
     //
@@ -178,9 +181,8 @@ struct HomeView: View {
                 handleReminderComposeFocusIfNeeded()
                 // P1-Home-13 草稿 hydrate — 用户切微信回来 OK,但 App 被 OOM 杀掉就丢。
                 // hydrate 时只在输入框为空才填(防止 onChange 触发后被反填)。
-                if inputVM.inputText.isEmpty,
-                   let draft = AppGroup.userDefaults.string(forKey: "lumory.home.draft.text"),
-                   !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if inputVM.inputText.isEmpty, let draft = Self.persistedDraftText() {
+                    draftEntryDate = Self.persistedDraftDate()
                     inputVM.inputText = draft
                 }
             }
@@ -196,6 +198,11 @@ struct HomeView: View {
             }
             .onChange(of: reminderRouter.composeFocusRequestID) { _, requestID in
                 if requestID != nil {
+                    handleReminderComposeFocusIfNeeded()
+                }
+            }
+            .onChange(of: appLockService.isLocked) { _, isLocked in
+                if !isLocked {
                     handleReminderComposeFocusIfNeeded()
                 }
             }
@@ -217,7 +224,7 @@ struct HomeView: View {
                         NSLocalizedString("录音已到 10 分钟上限,已自动停止。", comment: "Recording auto-stopped after max duration"),
                         severity: .info
                     )
-                } else {
+                } else if !inputVM.isSending {
                     LumoryToastCenter.shared.show(
                         NSLocalizedString("录音已停止,但当前状态下未保存。", comment: "Recording auto-stopped but was not saved"),
                         severity: .warning
@@ -227,6 +234,12 @@ struct HomeView: View {
             .onReceive(NotificationCenter.default.publisher(for: .databaseRecreated)) { _ in
                 Log.info("[HomeView] Database recreated notification received", category: .ui)
                 handleDatabaseRecreation()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .lumoryReturnHomeRequested)) { _ in
+                isSettingsOpen = false
+                isInsightsPresented = false
+                selectedEntry = nil
+                shouldStartEditing = false
             }
             // 删除 confirmation 已移除 — 4 秒撤销 toast 替代。swipe / contextMenu 直接 deleteEntry。
     }
@@ -342,6 +355,13 @@ struct HomeView: View {
                     // 新增/删除日记 → recompute(targets 仍是同两个日子,但底层 entries 集合变了)。
                     refreshOnThisDayHighlights()
                 }
+                .onReceive(NotificationCenter.default.publisher(
+                    for: .NSManagedObjectContextObjectsDidChange,
+                    object: viewContext
+                )) { notification in
+                    guard Self.notificationTouchesDiaryEntries(notification) else { return }
+                    refreshOnThisDayHighlights()
+                }
             }
     }
     
@@ -405,6 +425,22 @@ struct HomeView: View {
         request.returnsObjectsAsFaults = true
         return try? viewContext.fetch(request).first
     }
+
+    private static func notificationTouchesDiaryEntries(_ notification: Notification) -> Bool {
+        let keys = [
+            NSInsertedObjectsKey,
+            NSUpdatedObjectsKey,
+            NSDeletedObjectsKey,
+            NSRefreshedObjectsKey,
+            NSInvalidatedObjectsKey
+        ]
+        return keys.contains { key in
+            guard let objects = notification.userInfo?[key] as? Set<NSManagedObject> else {
+                return false
+            }
+            return objects.contains { $0 is DiaryEntry }
+        }
+    }
     
     @ViewBuilder
     private var mainListContent: some View {
@@ -424,6 +460,7 @@ struct HomeView: View {
                     recorder: recorder,
                     audioPlaybackController: audioPlaybackController,
                     isInputFocused: $isInputFocused,
+                    draftEntryDate: $draftEntryDate,
                     inputPlaceholder: inputPlaceholder,
                     onInputTextChanged: handleInputTextChanged,
                     onSend: handleSendAction,
@@ -470,7 +507,7 @@ struct HomeView: View {
                 // 原来挂在 textInputArea 内部的 onChange,composer 拆出去后挪到 list 根上,作用范围一致。
                 if newPhase == .background {
                     draftSaveTask?.cancel()
-                    Self.persistDraft(inputVM.inputText)
+                    Self.persistDraft(inputVM.inputText, date: draftEntryDate)
                 }
                 // 跨午夜兜底:用户长时间挂着 app(锁屏 / 切走 → 再回来),"今天"已经变了,
                 // On This Day 的两个 target date 也跟着移一天。.active 时无脑 recompute 一次,
@@ -478,6 +515,9 @@ struct HomeView: View {
                 if newPhase == .active {
                     refreshOnThisDayHighlights()
                 }
+            }
+            .onChange(of: draftEntryDate) { _, newValue in
+                Self.persistDraftDate(newValue, draftText: inputVM.inputText)
             }
             .onChange(of: composerFocusRequestID) { _, requestID in
                 guard requestID != nil else { return }

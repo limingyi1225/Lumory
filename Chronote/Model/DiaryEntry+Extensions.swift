@@ -96,7 +96,7 @@ extension DiaryEntry {
             .map { String($0.prefix(maxThemeTagLength)) }  // per-tag 长度上限
             .filter { !$0.isEmpty }
         var seen = Set<String>()
-        let uniq = cleaned.filter { seen.insert($0.lowercased()).inserted }
+        let uniq = cleaned.filter { seen.insert(ThemeKey.make($0)).inserted }
         let capped = Array(uniq.prefix(6))
         return capped.isEmpty ? nil : capped.joined(separator: ",")
     }
@@ -187,7 +187,7 @@ extension DiaryEntry {
 
     /// 写入 embedding 向量（永远写 V1 格式）
     func setEmbedding(_ vector: [Float]) {
-        embedding = Self.encodeEmbeddingVector(vector)
+        embedding = vector.isEmpty ? nil : Self.encodeEmbeddingVector(vector)
     }
 
     static func encodeEmbeddingVector(_ vector: [Float]) -> Data {

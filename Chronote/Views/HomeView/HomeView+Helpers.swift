@@ -17,6 +17,11 @@
 import SwiftUI
 import PhotosUI
 
+private enum HomeDraftStorageKeys {
+    static let text = "lumory.home.draft.text"
+    static let date = "lumory.home.draft.date"
+}
+
 extension HomeView {
 
     // MARK: - 草稿持久化
@@ -27,13 +32,13 @@ extension HomeView {
         if trimmed.isEmpty {
             draftSaveTask?.cancel()
             draftSaveTask = nil
-            AppGroup.userDefaults.removeObject(forKey: "lumory.home.draft.text")
+            Self.persistDraft("", date: nil)
         } else {
             draftSaveTask?.cancel()
             draftSaveTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 guard !Task.isCancelled else { return }
-                Self.persistDraft(newValue)
+                Self.persistDraft(newValue, date: draftEntryDate)
             }
         }
     }
@@ -41,18 +46,55 @@ extension HomeView {
     /// 草稿写盘的单点入口。空白 → remove key,非空 → set。
     /// `HomeComposerCard.onInputTextChanged` 经 parent 内 debounce 调本函数;
     /// scenePhase=background 强 flush 也走这里。
-    static func persistDraft(_ value: String) {
+    static func persistDraft(_ value: String, date: Date?) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            AppGroup.userDefaults.removeObject(forKey: "lumory.home.draft.text")
+            AppGroup.userDefaults.removeObject(forKey: HomeDraftStorageKeys.text)
+            AppGroup.userDefaults.removeObject(forKey: HomeDraftStorageKeys.date)
         } else {
-            AppGroup.userDefaults.set(value, forKey: "lumory.home.draft.text")
+            AppGroup.userDefaults.set(value, forKey: HomeDraftStorageKeys.text)
+            persistDraftDate(date, draftText: value)
         }
+    }
+
+    static func persistDraftDate(_ date: Date?, draftText: String) {
+        guard !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            AppGroup.userDefaults.removeObject(forKey: HomeDraftStorageKeys.date)
+            return
+        }
+        let calendar = Calendar.current
+        guard let date else {
+            AppGroup.userDefaults.removeObject(forKey: HomeDraftStorageKeys.date)
+            return
+        }
+        let today = calendar.startOfDay(for: Date())
+        let day = calendar.startOfDay(for: date)
+        guard day < today else {
+            AppGroup.userDefaults.removeObject(forKey: HomeDraftStorageKeys.date)
+            return
+        }
+        AppGroup.userDefaults.set(day, forKey: HomeDraftStorageKeys.date)
+    }
+
+    static func persistedDraftText() -> String? {
+        guard let draft = AppGroup.userDefaults.string(forKey: HomeDraftStorageKeys.text),
+              !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return draft
+    }
+
+    static func persistedDraftDate() -> Date? {
+        guard let date = AppGroup.userDefaults.object(forKey: HomeDraftStorageKeys.date) as? Date else {
+            return nil
+        }
+        let calendar = Calendar.current
+        let day = calendar.startOfDay(for: date)
+        return day < calendar.startOfDay(for: Date()) ? day : nil
     }
 
     // MARK: - 通知点击 / 同步
 
     func handleReminderComposeFocusIfNeeded() {
+        guard !(appLockService.isEnabled && appLockService.isLocked) else { return }
         guard let requestID = reminderRouter.consumeComposeFocusRequest() else { return }
         isSettingsOpen = false
         isInsightsPresented = false
@@ -80,6 +122,7 @@ extension HomeView {
 
     // MARK: - 照片压缩
 
+    @MainActor
     func loadPhotosWithCompression(_ items: [PhotosPickerItem]) async {
         photoVM.photoSelectionGeneration &+= 1
         let generation = photoVM.photoSelectionGeneration

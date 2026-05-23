@@ -235,12 +235,11 @@ struct ThemeCardList: View {
     }
 
     private var emptyState: some View {
-        HStack {
-            Text(NSLocalizedString("暂无主题，或日记还太少", comment: "Empty themes"))
-                .font(.footnote)
-                .foregroundColor(.secondary)
-            Spacer()
-        }
+        EmptyStateView(
+            systemImage: "tag",
+            title: NSLocalizedString("暂无主题，或日记还太少", comment: "Empty themes"),
+            size: .inline
+        )
         .padding(.horizontal, 16)
     }
 }
@@ -287,13 +286,10 @@ private struct ThemeCardPreview: View {
             Divider().opacity(0.4)
 
             if isLoading {
-                HStack {
-                    ProgressView().controlSize(.small)
-                    Text(NSLocalizedString("加载中…", comment: "Loading"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                LoadingStateView(
+                    NSLocalizedString("加载中…", comment: "Loading"),
+                    size: .compact
+                )
                 .padding(.vertical, 8)
             } else if snippets.isEmpty {
                 Text(NSLocalizedString("没找到相关日记", comment: "No related entries"))

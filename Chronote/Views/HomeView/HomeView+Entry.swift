@@ -53,7 +53,7 @@ extension HomeView {
 
         guard didSucceed else { return }
         removeDeletedEntryFromSearchResults(entryObjectID)
-        HapticManager.shared.impact(.medium)
+        HapticManager.shared.destructive()
         // 单删派生缓存清理统一走 EntryWipeOrchestrator(Reminder + Prompt + Insights + alias 孤儿清理)。
         // 注意:这层是聚合刷新,不删 attachment 文件 — attachment 由 EntryDeletionUndoService 4s 后清。
         EntryWipeOrchestrator.performSingleDeleteCleanup()
@@ -99,6 +99,8 @@ extension HomeView {
         }
         photoVM.compressionFailureCount = 0
         inputVM.moodValue = 0.5
+        draftEntryDate = nil
+        Self.persistDraft("", date: nil)
 
         // Cancel any ongoing tasks
         transcriptionGeneration &+= 1

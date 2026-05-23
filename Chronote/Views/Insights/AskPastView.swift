@@ -106,7 +106,7 @@ struct AskPastView: View {
                 if !messages.isEmpty {
                     ToolbarItem(placement: .navigationBarTrailing) {
                         Button {
-                            HapticManager.shared.impact(.medium)
+                            HapticManager.shared.destructive()
                             reset()
                         } label: {
                             Image(systemName: "trash")
@@ -119,7 +119,7 @@ struct AskPastView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         #if canImport(UIKit)
-                        HapticManager.shared.impact(.light)
+                        HapticManager.shared.softNavigate()
                         #endif
                         showHistory = true
                     } label: {
@@ -258,17 +258,39 @@ struct AskPastView: View {
                 lastAutoScrollAt = now
                 proxy.scrollTo(id, anchor: .bottom)
             }
+            .onChange(of: messages.last?.isStreaming) { _, isStreaming in
+                guard isStreaming == false, let id = messages.last?.id else { return }
+                withAnimation(AnimationConfig.smoothTransition) {
+                    proxy.scrollTo(id, anchor: .bottom)
+                }
+            }
         }
     }
 
     @ViewBuilder
     private func bubble(for message: Message) -> some View {
+        let regenerateQuestion = previousUserQuestion(before: message.id)
         AskPastMessageRow(
             message: message,
             isCitationExpanded: expandedCitations.contains(message.id),
-            onToggleCitations: { toggleCitations(for: message.id) }
+            onToggleCitations: { toggleCitations(for: message.id) },
+            onRegenerate: regenerateQuestion.map { question in
+                { submit(question) }
+            }
         )
         .equatable()
+    }
+
+    private func previousUserQuestion(before messageID: UUID) -> String? {
+        guard let index = messages.firstIndex(where: { $0.id == messageID }),
+              messages[index].role == .ai,
+              index > messages.startIndex else {
+            return nil
+        }
+        let previous = messages[messages.index(before: index)]
+        guard previous.role == .user else { return nil }
+        let question = previous.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return question.isEmpty ? nil : question
     }
 
     // MARK: Citations — stacked fold
@@ -664,6 +686,7 @@ private struct AskPastMessageRow: View, Equatable {
     let message: AskPastView.Message
     let isCitationExpanded: Bool
     let onToggleCitations: () -> Void
+    let onRegenerate: (() -> Void)?
     @Environment(\.managedObjectContext) private var viewContext
 
     static func == (lhs: AskPastMessageRow, rhs: AskPastMessageRow) -> Bool {
@@ -691,7 +714,7 @@ private struct AskPastMessageRow: View, Equatable {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .liquidGlassCard(
-                    cornerRadius: 18,
+                    cornerRadius: LumoryCornerRadius.card,
                     tint: Color.accentColor,
                     tintStrength: 0.18
                 )
@@ -736,12 +759,11 @@ private struct AskPastMessageRow: View, Equatable {
     @ViewBuilder
     private var aiText: some View {
         if message.text.isEmpty && message.isStreaming {
-            HStack(spacing: 6) {
-                ProgressView().scaleEffect(0.7)
-                Text(NSLocalizedString("正在读你的日记…", comment: "Reading diary"))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
+            LoadingStateView(
+                NSLocalizedString("正在读你的日记…", comment: "Reading diary")
+            )
+        } else if message.text.isEmpty {
+            EmptyView()
         } else {
             MarkdownText(markdown: message.text)
                 .textSelection(.enabled)
@@ -771,10 +793,29 @@ private struct AskPastMessageRow: View, Equatable {
     /// §4.3 (2026-05-19) — 走共享 `InlineWarningBanner`(tintOpacity 0.12 跟 HomeComposer 三胞胎
     /// 的 0.08 略不同,用 init 参数传)。
     private var incompleteBanner: some View {
-        InlineWarningBanner(
-            message: NSLocalizedString("stream.incomplete.banner", comment: "Stream truncated hint"),
-            tintOpacity: 0.12
-        )
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.footnote)
+            Text(NSLocalizedString("stream.incomplete.banner", comment: "Stream truncated hint"))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            if let onRegenerate {
+                Button(action: onRegenerate) {
+                    Label(
+                        NSLocalizedString("stream.incomplete.regenerate", comment: "Regenerate incomplete Ask Past answer"),
+                        systemImage: "arrow.clockwise"
+                    )
+                    .labelStyle(.titleAndIcon)
+                    .font(.footnote.weight(.semibold))
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: LumoryCornerRadius.inline))
     }
 
     private var citationsFold: some View {

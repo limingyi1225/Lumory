@@ -29,6 +29,21 @@ enum EntryCreationService {
         let audioFileName: String?
         let images: [Data]
         let moodValue: Double
+        let date: Date
+
+        init(
+            text: String,
+            audioFileName: String?,
+            images: [Data],
+            moodValue: Double,
+            date: Date = Date()
+        ) {
+            self.text = text
+            self.audioFileName = audioFileName
+            self.images = images
+            self.moodValue = moodValue
+            self.date = date
+        }
     }
 
     enum Result {
@@ -51,6 +66,7 @@ enum EntryCreationService {
         }
     ) async -> Result {
         let entryID = UUID()
+        let trimmedText = input.text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // 把磁盘 I/O、CloudKit blob 编码全部挪到非主线程,主线程只做 Core Data 字段赋值 + save。
         // 之前这些都挤在 `await MainActor.run { ... }` 里,附件多一点 UI 就会卡。
@@ -63,8 +79,8 @@ enum EntryCreationService {
         // 函数本身 `@MainActor`,await 后回到 main,直接做 Core Data 写入,无需嵌套 `MainActor.run`。
         let newEntry = DiaryEntry(context: viewContext)
         newEntry.id = entryID
-        newEntry.date = Date()
-        newEntry.text = input.text
+        newEntry.date = input.date
+        newEntry.text = trimmedText
         newEntry.moodValue = input.moodValue
         newEntry.summary = nil  // 标题稍后异步生成
         newEntry.recomputeWordCount()  // 本地计算,供统计使用
@@ -126,8 +142,8 @@ enum EntryCreationService {
         // 时 OS 超时会直接 SIGKILL 整 App;挂上后 OS 在超时前几秒先调 expirationHandler 让我们
         // 主动 endBackgroundTask 清理,避免 App 被强杀。expirationHandler 在 main thread 跑,
         // 用 sendable class wrapper 让 closure 跟 defer 共享 task id 的 mutable 状态。
-        if !input.text.isEmpty {
-            let textSnapshot = input.text
+        if !trimmedText.isEmpty {
+            let textSnapshot = trimmedText
             Task { @MainActor in
                 #if canImport(UIKit)
                 let holder = BackgroundTaskHolder()

@@ -15,7 +15,14 @@
 //  view body 渲染链路内被同文件其他 view builder 互相调用,无跨文件 caller。
 //
 
+import CoreData
 import SwiftUI
+
+struct DiaryDetailThemeSubject: Identifiable {
+    let theme: InsightsEngine.Theme
+    let allThemes: [InsightsEngine.Theme]
+    var id: String { theme.id }
+}
 
 extension DiaryDetailView {
 
@@ -40,14 +47,19 @@ extension DiaryDetailView {
                 // 可能落入重复 theme → `id: \.element` ForEach 报 id collision warning + 渲染
                 // 不稳。`id: \.offset` 用位置作 id,renaming/reorder 不破坏。
                 ForEach(Array(themes.enumerated()), id: \.offset) { index, theme in
-                    Text(theme)
-                        .font(.footnote)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .liquidGlassCapsule(tint: moodTint)
-                        .accessibilityLabel(index == 0
-                            ? String(format: NSLocalizedString("AI 提取的主题:%@", comment: "First theme chip a11y label"), theme)
-                            : theme)
+                    Button {
+                        openThemeFilter(theme)
+                    } label: {
+                        Text(theme)
+                            .font(.footnote)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .liquidGlassCapsule(tint: moodTint)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(index == 0
+                        ? String(format: NSLocalizedString("AI 提取的主题:%@", comment: "First theme chip a11y label"), theme)
+                        : theme)
                 }
             }
         }
@@ -111,6 +123,7 @@ extension DiaryDetailView {
                     DatePicker(
                         NSLocalizedString("修改时间", comment: "Edit date sheet title"),
                         selection: $editedDate,
+                        in: ...Date(),
                         displayedComponents: [.date, .hourAndMinute]
                     )
                     .datePickerStyle(.graphical)
@@ -177,7 +190,7 @@ extension DiaryDetailView {
                     .font(.body)
                     .lineLimit(1...4)
                     .padding(12)
-                    .liquidGlassCard(cornerRadius: 12)
+                    .liquidGlassCard(cornerRadius: LumoryCornerRadius.inline)
                     .onChange(of: editedSummary) { _, _ in hasUnsavedChanges = true }
                 } else if let summary = entry.wrappedSummary, !summary.isEmpty {
                     HStack(alignment: .top, spacing: 12) {
@@ -232,7 +245,7 @@ extension DiaryDetailView {
     var photosBlock: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
-                ForEach(Array(entry.imageFileNameArray.enumerated()), id: \.offset) { index, fileName in
+                ForEach(Array(visibleImageFileNames.enumerated()), id: \.offset) { index, fileName in
                     photoThumbnail(fileName: fileName, index: index)
                 }
             }
@@ -242,13 +255,40 @@ extension DiaryDetailView {
         .accessibilityLabel(NSLocalizedString("照片", comment: "Photos a11y label"))
     }
 
+    var visibleImageFileNames: [String] {
+        entry.imageFileNameArray.filter { !removedImageFileNames.contains($0) }
+    }
+
     @ViewBuilder
     private func photoThumbnail(fileName: String, index: Int) -> some View {
         // 不再在 body 里 `entry.loadImageData(fileName:)`——那是磁盘 I/O + 可能的 iCloud 下载，
         // 播放进度 30fps 驱动 body 时主线程会被 I/O 连续卡顿。
         // 用一个小 view 持有 @State 并在 .task 里异步加载。
-        AsyncPhotoThumbnail(fileName: fileName, index: index) { idx in
-            presentImageViewer(at: idx)
+        ZStack(alignment: .topTrailing) {
+            AsyncPhotoThumbnail(fileName: fileName, index: index) { idx in
+                if !isEditing {
+                    presentImageViewer(at: idx)
+                }
+            }
+
+            if isEditing {
+                Button(role: .destructive) {
+                    #if canImport(UIKit)
+                    HapticManager.shared.impact(.light)
+                    #endif
+                    removedImageFileNames.insert(fileName)
+                    hasUnsavedChanges = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.white, Color.semanticDestructive)
+                        .padding(6)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(NSLocalizedString("移除照片", comment: "Remove photo"))
+            }
         }
     }
 
@@ -281,7 +321,7 @@ extension DiaryDetailView {
                     ZStack(alignment: .leading) {
                         Capsule().fill(Color.secondary.opacity(0.18))
                             .frame(height: 5)
-                        if isCurrentFile && displayableAudioDuration > 0 {
+                        if isCurrentFile && playbackDuration > 0 {
                             Capsule()
                                 .fill(entry.moodColor)
                                 .frame(width: geo.size.width * audioPlaybackController.progress, height: 5)
@@ -295,6 +335,26 @@ extension DiaryDetailView {
                 ))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
+            }
+
+            if isEditing {
+                Button(role: .destructive) {
+                    #if canImport(UIKit)
+                    HapticManager.shared.impact(.light)
+                    #endif
+                    audioPlaybackController.stopPlayback(clearCurrentFile: true)
+                    removedAudioFileName = audioFileName
+                    resolvedAudioURL = nil
+                    displayableAudioDuration = 0
+                    hasUnsavedChanges = true
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(Color.semanticDestructive)
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(NSLocalizedString("删除录音", comment: "Delete recording"))
             }
         }
         .padding(14)
@@ -330,6 +390,27 @@ extension DiaryDetailView {
             // 钳位避免 grid 上点最后一张但 loaded 不够长时,TabView 抓不到 tag 显示空白 + "5 / 3" 这种乱数。
             selectedImageIndex = min(max(index, 0), loaded.count - 1)
             showImageViewer = true
+        }
+    }
+
+    @MainActor
+    func openThemeFilter(_ rawTheme: String) {
+        #if canImport(UIKit)
+        HapticManager.shared.softNavigate()
+        #endif
+        Task { @MainActor in
+            let context = await InsightsEngine.shared.themeFilterContext(for: rawTheme)
+            guard let theme = context.selected else {
+                LumoryToastCenter.shared.show(
+                    NSLocalizedString("没找到这个主题的日记", comment: "Theme entries not found"),
+                    severity: .info
+                )
+                return
+            }
+            selectedThemeSubject = DiaryDetailThemeSubject(
+                theme: theme,
+                allThemes: context.allThemes
+            )
         }
     }
 }

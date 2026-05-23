@@ -32,19 +32,26 @@ enum SettingsEntryDeletionService {
             return false
         }
 
+        // DiaryEntry 删完后,AskPast citations / narrative 回顾都不再有可靠引用目标。
+        // 全删语义下把 AIConversation 一并清空,避免历史回答留下悬空引用。
+        let conversationRequest = NSFetchRequest<AIConversation>(entityName: "AIConversation")
+        let conversations: [AIConversation]
+        do {
+            conversations = try viewContext.fetch(conversationRequest)
+        } catch {
+            Log.error("[SettingsView] 删除 AI 会话前 fetch 失败: \(error)", category: .ui)
+            viewContext.rollback()
+            return false
+        }
+
         let attachmentSnapshots = entries.map {
             EntryAttachmentSnapshot(imageFileNames: $0.imageFileNameArray, audioFileName: $0.audioFileName)
         }
         for entry in entries {
             viewContext.delete(entry)
         }
-        // DiaryEntry 删完后,AskPast citations / narrative 回顾都不再有可靠引用目标。
-        // 全删语义下把 AIConversation 一并清空,避免历史回答留下悬空引用。
-        let conversationRequest = NSFetchRequest<AIConversation>(entityName: "AIConversation")
-        if let conversations = try? viewContext.fetch(conversationRequest) {
-            for conversation in conversations {
-                viewContext.delete(conversation)
-            }
+        for conversation in conversations {
+            viewContext.delete(conversation)
         }
         do {
             try viewContext.save()

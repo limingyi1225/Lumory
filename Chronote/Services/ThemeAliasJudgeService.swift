@@ -343,14 +343,15 @@ final class ThemeAliasJudgeService: ObservableObject {
 
     /// 给 PendingSuggestion 准备最多 N 条引文的 entry id —— management view 用 id 去 fetch 真 entry 显示卡片。
     private func sampleEntryIDs(forTag tag: String, limit: Int) async -> [UUID] {
-        await persistence.container.performBackgroundTask { context in
+        let tagKey = ThemeKey.make(tag)
+        return await persistence.container.performBackgroundTask { context in
             let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
             request.predicate = NSPredicate(format: "themes CONTAINS[c] %@", tag)
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
             request.fetchLimit = limit * 3   // CONTAINS 是子串匹配,可能误命中"Tokyo Japan" 找 "Tokyo",再用 themeArray 精确判断
             guard let entries = try? context.fetch(request) else { return [] }
             let exact = entries.filter { entry in
-                entry.themeArray.contains { $0.lowercased() == tag.lowercased() }
+                entry.themeArray.contains { ThemeKey.make($0) == tagKey }
             }
             return Array(exact.prefix(limit)).compactMap { $0.id }
         }
@@ -369,7 +370,7 @@ final class ThemeAliasJudgeService: ObservableObject {
     /// 失败回 [:](所有 tag 拿到空 array),caller 跟原版语义一致。
     private func sampleEntryIDs(forTags tags: [String], limit: Int) async -> [String: [UUID]] {
         guard !tags.isEmpty else { return [:] }
-        let lowercasedTags = tags.map { $0.lowercased() }
+        let tagKeys = tags.map { ThemeKey.make($0) }
         return await persistence.container.performBackgroundTask { context in
             let subPredicates = tags.map { tag in
                 NSPredicate(format: "themes CONTAINS[c] %@", tag)
@@ -390,8 +391,8 @@ final class ThemeAliasJudgeService: ObservableObject {
                 if openBuckets.isEmpty { break }
                 guard let id = row["id"] as? UUID,
                       let csv = row["themes"] as? String, !csv.isEmpty else { continue }
-                let entryTags = DiaryEntry.parseThemesCSV(csv).map { $0.lowercased() }
-                for (idx, lowerTag) in lowercasedTags.enumerated() where entryTags.contains(lowerTag) {
+                let entryTagKeys = Set(DiaryEntry.parseThemesCSV(csv).map { ThemeKey.make($0) })
+                for (idx, tagKey) in tagKeys.enumerated() where entryTagKeys.contains(tagKey) {
                     let originalTag = tags[idx]
                     let currentCount = buckets[originalTag, default: []].count
                     if currentCount < limit {

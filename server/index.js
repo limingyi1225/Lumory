@@ -34,6 +34,7 @@ const log = pino({
       'req.body.input',
       'req.body.prompt',
       'err.response.data',
+      'err.config.data',
       'err.config.headers.authorization',
       'err.config.headers.Authorization',
       'err.config.headers["x-app-secret"]',
@@ -87,6 +88,7 @@ const MAX_MESSAGES_CHARS = positiveNumberEnv('MAX_MESSAGES_CHARS', 32_000);
 const MAX_EMBEDDING_INPUT_CHARS = positiveNumberEnv('MAX_EMBEDDING_INPUT_CHARS', 8_192);
 const MAX_CHAT_COMPLETION_TOKENS = positiveNumberEnv('MAX_CHAT_COMPLETION_TOKENS', 16_384);
 const DEFAULT_CHAT_COMPLETION_TOKENS = positiveNumberEnv('DEFAULT_CHAT_COMPLETION_TOKENS', 4_096);
+const MAX_OPENAI_RESPONSE_BYTES = positiveNumberEnv('MAX_OPENAI_RESPONSE_BYTES', 8 * 1024 * 1024);
 const GLOBAL_IP_LIMIT_MAX = positiveNumberEnv('GLOBAL_IP_LIMIT_MAX', 600);
 const CHAT_MODEL_ALLOWLIST = new Set(
   modelAllowlistEnv('CHAT_MODEL_ALLOWLIST', ['gpt-5.5', 'gpt-5.4-mini'])
@@ -254,7 +256,7 @@ function ipv6Bytes(ip) {
 }
 
 function clientIPKey(req) {
-  const ip = req.ip || req.socket?.remoteAddress || '';
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
   if (net.isIP(ip) !== 6) return ip;
   const bytes = ipv6Bytes(ip);
   if (!bytes) return ip;
@@ -582,13 +584,14 @@ app.post('/api/openai/chat/completions', async (req, res) => {
           return;
         }
         const text = chunk.toString('utf8');
-        const frames = (sseBuffer + text).split(/\r?\n\r?\n/);
+        const combined = sseBuffer + text;
+        const frames = combined.split(/\r?\n\r?\n/);
         sseBuffer = frames.pop() || '';
+        if (!sawDone && (frames.some(sseFrameHasDone) || sseFrameHasDone(sseBuffer))) {
+          sawDone = true;
+        }
         if (sseBuffer.length > 8192) {
           sseBuffer = sseBuffer.slice(-8192);
-        }
-        if (!sawDone && frames.some(sseFrameHasDone)) {
-          sawDone = true;
         }
         if (!res.write(chunk)) {
           upstream.data.pause();
@@ -632,7 +635,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
           },
           timeout: REQUEST_TIMEOUT_MS,
           signal: nonStreamAbort.signal,
-          maxContentLength: 1024 * 1024,
+          maxContentLength: MAX_OPENAI_RESPONSE_BYTES,
           maxRedirects: 0,
         });
         res.json(upstream.data);
@@ -705,7 +708,7 @@ app.post('/api/openai/embeddings', async (req, res) => {
         },
         timeout: REQUEST_TIMEOUT_MS,
         signal: embeddingAbort.signal,
-        maxContentLength: 1024 * 1024,
+        maxContentLength: MAX_OPENAI_RESPONSE_BYTES,
         maxRedirects: 0,
       }
     );
@@ -821,7 +824,7 @@ app.post('/api/openai/audio/transcriptions', (req, res) => {
         // axios 默认会把 FormData 自动序列化并加 Content-Type: multipart/form-data; boundary=...
         // 不要手动设 Content-Type,会丢 boundary。
         maxBodyLength: MAX_TRANSCRIPTION_FILE_BYTES + 1024 * 1024, // 留 1 MB 余量给 multipart 头
-        maxContentLength: 1024 * 1024,
+        maxContentLength: MAX_OPENAI_RESPONSE_BYTES,
         maxRedirects: 0,
         signal: transcriptionAbort.signal,
       });

@@ -5,6 +5,7 @@ struct RecordingRow: View {
     let recording: Recording
     @ObservedObject var controller: AudioPlaybackController
     let isTranscribing: Bool
+    let isRecording: Bool
     let onPlay: () -> Void
     let onDelete: () -> Void
 
@@ -29,7 +30,7 @@ struct RecordingRow: View {
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.glass)
-            .disabled(isTranscribing)
+            .disabled(isTranscribing || isRecording)
             .accessibilityLabel(isPlayingThis
                 ? NSLocalizedString("暂停", comment: "Pause")
                 : NSLocalizedString("播放", comment: "Play"))

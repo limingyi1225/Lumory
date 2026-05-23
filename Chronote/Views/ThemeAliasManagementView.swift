@@ -186,22 +186,12 @@ struct ThemeAliasManagementView: View {
            resolver.pending.isEmpty,
            !judgeService.scanProgress.isRunning {
             Section {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "sparkles")
-                        .font(.title3)
-                        .foregroundStyle(Color.accentColor)
-                        .frame(width: 28)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(NSLocalizedString("还没有合并过的主题", comment: "Theme alias empty title"))
-                            .font(.callout.weight(.semibold))
-                            .foregroundStyle(Color.primary)
-                        Text(NSLocalizedString("AI 扫描会找出意思相近的主题,比如昵称、同义词或中英文写法。确认后,洞察和回顾会把它们当作同一个主题。", comment: "Theme alias empty body"))
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .padding(.vertical, 6)
+                EmptyStateView(
+                    systemImage: "sparkles",
+                    title: NSLocalizedString("还没有合并过的主题", comment: "Theme alias empty title"),
+                    message: NSLocalizedString("AI 扫描会找出意思相近的主题,比如昵称、同义词或中英文写法。确认后,洞察和回顾会把它们当作同一个主题。", comment: "Theme alias empty body"),
+                    size: .inline
+                )
             }
         }
     }
@@ -216,13 +206,18 @@ struct ThemeAliasManagementView: View {
     @ViewBuilder
     private var scanSection: some View {
         Section(
-            header: header(NSLocalizedString("AI 扫描", comment: "Scan section header"))
+            header: header(NSLocalizedString("AI 扫描", comment: "Scan section header")),
+            footer: Text(NSLocalizedString("扫描只会生成待审建议,不会自动改写日记内容。处理中可以随时停止。", comment: "Theme alias scan privacy footer"))
         ) {
             Button {
                 #if canImport(UIKit)
                 HapticManager.shared.click()
                 #endif
-                judgeService.scanAllHistory()
+                if judgeService.scanProgress.isRunning {
+                    judgeService.cancelScan()
+                } else {
+                    judgeService.scanAllHistory()
+                }
             } label: {
                 HStack(spacing: 12) {
                     Image(systemName: scanIconName)
@@ -241,6 +236,11 @@ struct ThemeAliasManagementView: View {
                                 .transition(.opacity)
                                 .id(phaseText)
                         }
+                        if judgeService.scanProgress.isRunning, resolver.pendingCount > 0 {
+                            Text(String(format: NSLocalizedString("当前待审 %d 条", comment: "Current pending count"), resolver.pendingCount))
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                     Spacer()
                     if judgeService.scanProgress.isRunning {
@@ -249,7 +249,6 @@ struct ThemeAliasManagementView: View {
                 }
                 .animation(AnimationConfig.smoothTransition, value: scanPhaseText)
             }
-            .disabled(judgeService.scanProgress.isRunning)
         }
     }
 
@@ -258,7 +257,7 @@ struct ThemeAliasManagementView: View {
         let hasState = !resolver.groups.isEmpty || !resolver.pending.isEmpty
             || judgeService.scanProgress.phase == .done
         if judgeService.scanProgress.isRunning {
-            return NSLocalizedString("扫描中…", comment: "Scanning")
+            return NSLocalizedString("停止扫描", comment: "Stop scanning")
         }
         return hasState
             ? NSLocalizedString("重新扫描", comment: "Re-scan themes")
@@ -266,7 +265,7 @@ struct ThemeAliasManagementView: View {
     }
 
     private var scanIconName: String {
-        if judgeService.scanProgress.isRunning { return "sparkles" }
+        if judgeService.scanProgress.isRunning { return "stop.circle" }
         let hasState = !resolver.groups.isEmpty || !resolver.pending.isEmpty
             || judgeService.scanProgress.phase == .done
         return hasState ? "arrow.clockwise.circle" : "wand.and.stars"
@@ -397,7 +396,7 @@ struct ThemeAliasManagementView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         // 中性 liquid glass —— 跟 picker / SuggestionTargetPickerSheet 设计一致,
         // 不再用 confidence color 给整张卡 tint(之前蓝色/橙色 tint 让 Settings 整页过载)。
-        .liquidGlassCard(cornerRadius: 16, interactive: false)
+        .liquidGlassCard(cornerRadius: LumoryCornerRadius.card, interactive: false)
     }
 
     @ViewBuilder

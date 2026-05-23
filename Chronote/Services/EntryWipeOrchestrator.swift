@@ -30,6 +30,9 @@ enum EntryWipeOrchestrator {
     ///
     /// `await` 直到所有清理完成 — 调用方应在 `viewContext.save()` 成功分支 await 它,失败分支 rollback 不调。
     static func performBulkWipeCleanup() async {
+        // Bulk wipe 和单条删除 undo 语义互斥。先取消 pending undo,避免用户"全部删除"后
+        // 还能点上一条单删 toast 把日记复活。
+        EntryDeletionUndoService.shared.discardPendingForBulkWipe()
         NarrativeCacheService.markInvalidatedForEntryChange()
         NotificationCenter.default.post(name: .lumoryNarrativeCacheInvalidated, object: nil)
         // **P1 fix (2026-05-13 superreview)**:写日记后触发 60s NarrativePrecompute debounce 窗口内
@@ -51,6 +54,8 @@ enum EntryWipeOrchestrator {
         // Widget.clear 是 actor sync body + 写 App Group 文件 + WidgetCenter.reload。
         // 几 ms 内完成,但用户立刻锁屏 / 杀 App 时 unstructured Task 会被截 → 必须 await 而非 fire-and-forget。
         await WidgetSnapshotService.shared.clear()
+        // "清空全部日记"语义上也要清掉本地最近删除归档,否则旧单删记录仍可恢复 30 天。
+        await RecentDeletedEntryStore.purgeAll()
     }
 
     /// 单条删除。比 bulkWipe 轻,但比"未抽 orchestrator 之前"严格:

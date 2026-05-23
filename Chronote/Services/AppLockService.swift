@@ -147,6 +147,7 @@ final class AppLockService: ObservableObject {
     /// LockScreenView 上"使用 Face ID 解锁"按钮调。成功 isLocked=false 进 App。
     @discardableResult
     func unlock() async -> Bool {
+        let myGen = enableGen
         // **关键 fail-safe**:如果设备的认证策略**已不可用**(用户在 iOS 设置里删了设备密码 /
         // Face ID 失效后没修),`canEvaluatePolicy` 返 false,`evaluatePolicy` 也必然 fail。
         // 这种情况下不能让用户**永久卡在锁屏**——继续锁着也不增加任何安全性(设备本来就没密码),
@@ -158,10 +159,10 @@ final class AppLockService: ObservableObject {
         }
         let ok = await authenticate(reason: NSLocalizedString("用 Face ID 解锁 Lumory。",
                                                               comment: "Reason for app lock unlock"))
-        if ok {
+        if ok, myGen == enableGen, isEnabled {
             isLocked = false
         }
-        return ok
+        return ok && myGen == enableGen && isEnabled
     }
 
     // MARK: - LAContext bridge

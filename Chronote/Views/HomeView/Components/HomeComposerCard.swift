@@ -18,6 +18,7 @@ struct HomeComposerCard: View {
     @ObservedObject var recorder: AudioRecorder
     @ObservedObject var audioPlaybackController: AudioPlaybackController
     @FocusState.Binding var isInputFocused: Bool
+    @Binding var draftEntryDate: Date?
 
     let inputPlaceholder: String
 
@@ -38,6 +39,12 @@ struct HomeComposerCard: View {
     let onDeleteRecordingConfirmed: (String) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
+        Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"
+    }()
+    @State private var draftDatePickerPresented = false
+    @State private var refocusInputAfterDatePicker = false
+    @State private var draftDateBeforePicker: Date?
 
     var body: some View {
         // GlassEffectContainer 包 outer card glass + inner send button(.glassProminent),
@@ -64,7 +71,28 @@ struct HomeComposerCard: View {
                 .padding(.top, 2)
             }
             .padding(16)
-            .liquidGlassCard(cornerRadius: 22)
+            .liquidGlassCard(cornerRadius: LumoryCornerRadius.chip)
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Button {
+                    openDraftDatePicker()
+                } label: {
+                    Label(draftDateDisplayLabel, systemImage: "calendar")
+                        .font(.footnote.weight(.medium))
+                }
+                .accessibilityLabel(draftDateAccessibilityLabel)
+                Spacer()
+                Button {
+                    isInputFocused = false
+                } label: {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                }
+                .accessibilityLabel(NSLocalizedString("收起键盘", comment: "Dismiss keyboard"))
+            }
+        }
+        .sheet(isPresented: $draftDatePickerPresented, onDismiss: handleDraftDatePickerDismiss) {
+            draftDatePicker
         }
     }
 
@@ -72,8 +100,8 @@ struct HomeComposerCard: View {
 
     @ViewBuilder
     private var textInputArea: some View {
-        // 原生 SwiftUI TextField(axis:.vertical),不再走 UIKit 桥也不挂 .toolbar(.keyboard) ——
-        // 工具栏挪进了输入卡内部(横线下方),始终可见,不再依赖 keyboard accessory 协商。
+        // 原生 SwiftUI TextField(axis:.vertical),不再走 UIKit 桥。底部 photo/mic/send 是稳定常驻工具栏;
+        // 日期放 keyboard accessory 里做辅助入口,避免常驻 chip 把输入卡变吵。
         // Prompt 颜色按色彩模式分:亮色 secondary 0.50(浅),暗色实 .secondary。
         let promptColor: Color = colorScheme == .dark
             ? Color.secondary
@@ -95,19 +123,6 @@ struct HomeComposerCard: View {
         // (2026-05-15 superreview-3 P1)显式 a11y id 让 UI test 能稳定锁定 composer,
         // 而不是 `app.textFields.firstMatch` 撞错搜索栏 / 别的 TextField。
         .accessibilityIdentifier("home.composer.text")
-        // P1-Home-12 键盘 toolbar 加"完成"按钮 — 中文拼音输入法 candidate bar 占额外 36pt,
-        // 用户要看下方滚动区必须先关键盘。"keyboard.chevron.compact.down" 是系统标准 dismiss 图标。
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button {
-                    isInputFocused = false
-                } label: {
-                    Image(systemName: "keyboard.chevron.compact.down")
-                }
-                .accessibilityLabel(NSLocalizedString("收起键盘", comment: "Dismiss keyboard"))
-            }
-        }
         .onChange(of: inputVM.inputText) { _, newValue in
             // spectrum state 切换是即时 UI 反馈,在 child 内本地处理(纯 VM 写,无外部副作用)。
             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -128,18 +143,138 @@ struct HomeComposerCard: View {
         }
     }
 
+    private var draftDateDisplayLabel: String {
+        guard let date = draftEntryDate else {
+            return NSLocalizedString("今天", comment: "Today")
+        }
+        if Calendar.current.isDateInToday(date) {
+            return NSLocalizedString("今天", comment: "Today")
+        }
+        if Calendar.current.isDateInYesterday(date) {
+            return NSLocalizedString("昨天", comment: "Yesterday")
+        }
+        return LumoryDateFormatters.monthDay(language: appLanguage).string(from: date)
+    }
+
+    private var draftDateAccessibilityLabel: String {
+        String(
+            format: NSLocalizedString("日记日期:%@", comment: "Composer selected entry date accessibility label"),
+            draftDateDisplayLabel
+        )
+    }
+
+    private func openDraftDatePicker() {
+        #if canImport(UIKit)
+        HapticManager.shared.softNavigate()
+        #endif
+        draftDateBeforePicker = draftEntryDate
+        refocusInputAfterDatePicker = isInputFocused
+        isInputFocused = false
+        draftDatePickerPresented = true
+    }
+
+    private func handleDraftDatePickerDismiss() {
+        let didChangeDate = draftDateBeforePicker != draftEntryDate
+        draftDateBeforePicker = nil
+        if didChangeDate {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(180))
+                #if canImport(UIKit)
+                HapticManager.shared.complete()
+                #endif
+                LumoryToastCenter.shared.show(
+                    String(
+                        format: NSLocalizedString("日记日期已设为 %@", comment: "Composer date changed toast"),
+                        draftDateDisplayLabel
+                    ),
+                    severity: .info
+                )
+            }
+        }
+        restoreInputFocusIfNeeded()
+    }
+
+    private func restoreInputFocusIfNeeded() {
+        guard refocusInputAfterDatePicker else { return }
+        refocusInputAfterDatePicker = false
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(220))
+            isInputFocused = true
+        }
+    }
+
+    private var draftDateBinding: Binding<Date> {
+        Binding(
+            get: { draftEntryDate ?? Date() },
+            set: { newValue in
+                let calendar = Calendar.current
+                let today = calendar.startOfDay(for: Date())
+                let selectedDay = calendar.startOfDay(for: newValue)
+                let day = min(selectedDay, today)
+                draftEntryDate = Calendar.current.isDateInToday(day) ? nil : day
+            }
+        )
+    }
+
+    private var draftDatePicker: some View {
+        NavigationStack {
+            DatePicker(
+                NSLocalizedString("日记日期", comment: "Composer date picker title"),
+                selection: draftDateBinding,
+                in: ...Date(),
+                displayedComponents: [.date]
+            )
+            .datePickerStyle(.graphical)
+            .padding()
+
+            Text(
+                String(
+                    format: NSLocalizedString("会保存为 %@", comment: "Composer date confirmation"),
+                    draftDateDisplayLabel
+                )
+            )
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal)
+            .padding(.bottom, 8)
+
+            .navigationTitle(NSLocalizedString("日记日期", comment: "Composer date picker title"))
+            #if canImport(UIKit)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(NSLocalizedString("今天", comment: "Today")) {
+                        draftEntryDate = nil
+                        draftDatePickerPresented = false
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(NSLocalizedString("完成", comment: "Done")) {
+                        draftDatePickerPresented = false
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.height(460), .large])
+        .presentationDragIndicator(.visible)
+        .lumorySheetDecoration()
+    }
+
     // MARK: - Recording row + error banners
 
     @ViewBuilder
     private var recordingsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let rec = recordingVM.audioRecordings.first {
-                RecordingRow(
-                    recording: rec,
-                    controller: audioPlaybackController,
-                    isTranscribing: recordingVM.isTranscribing,
-                    onPlay: { onPlayRecording(rec.fileName) },
-                    onDelete: {
+                    RecordingRow(
+                        recording: rec,
+                        controller: audioPlaybackController,
+                        isTranscribing: recordingVM.isTranscribing,
+                        isRecording: recorder.isRecording,
+                        onPlay: { onPlayRecording(rec.fileName) },
+                        onDelete: {
                         recordingVM.deleteTarget = rec.fileName
                         recordingVM.showingDeleteAlert = true
                     }
@@ -160,7 +295,7 @@ struct HomeComposerCard: View {
             Button(NSLocalizedString("删除", comment: "Delete button"), role: .destructive) {
                 if let target = recordingVM.deleteTarget {
                     #if canImport(UIKit)
-                    HapticManager.shared.impact(.medium)
+                    HapticManager.shared.destructive()
                     #endif
                     onDeleteRecordingConfirmed(target)
                 }
@@ -429,9 +564,9 @@ struct HomeComposerCard: View {
         // action 用的 Liquid Glass style。在 GlassEffectContainer 里 + 外层 liquidGlassCard 提供
         // surface 上下文。渲染成什么样交给 SwiftUI,不手绘装饰。
         Button {
-            // 点的瞬间用 .light 给"按到了"的轻反馈,完成时仍走 .success(parent handleSendAction 末尾)。
+            // 点下时给 soft submit 反馈,完成时仍由 parent 的 handleSendAction 发 success。
             #if canImport(UIKit)
-            HapticManager.shared.impact(.light)
+            HapticManager.shared.submit()
             #endif
             onSend()
         } label: {

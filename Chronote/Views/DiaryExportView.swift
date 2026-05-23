@@ -68,7 +68,7 @@ struct DiaryExportView: View {
                 }
                 .padding()
                 // P0-3 玻璃化 — 替 secondarySystemBackground 实色,跟主页玻璃语言一致。
-                .liquidGlassCard(cornerRadius: 12)
+                .liquidGlassCard(cornerRadius: LumoryCornerRadius.inline)
                 
                 // Description
                 Text(NSLocalizedString("导出后将生成一个文本文件，包含所有日记的日期、心情和内容。", comment: "Export description"))
@@ -87,7 +87,7 @@ struct DiaryExportView: View {
                     .padding()
                     .frame(maxWidth: .infinity, alignment: .center)
                     // P0-3 玻璃化 — 跟上方 info card 同语言。
-                    .liquidGlassCard(cornerRadius: 12)
+                    .liquidGlassCard(cornerRadius: LumoryCornerRadius.inline)
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
@@ -159,7 +159,6 @@ struct DiaryExportView: View {
                 let exportedCount = snapshots.count
                 await MainActor.run {
                     isExporting = false
-                    exportTask = nil
                     #if canImport(UIKit)
                     HapticManager.shared.notification(.success)
                     // §5.10 (2026-05-19) — 成功路径之前直接弹 share sheet 跳过 confirmation 反馈,
@@ -171,11 +170,19 @@ struct DiaryExportView: View {
                         ),
                         severity: .success
                     )
-                    // 让成功 toast 先有一拍可见,再弹系统分享菜单盖住当前 sheet。
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 600_000_000)
-                        presentShareSheet(for: fileURL)
-                    }
+                    #endif
+                }
+                // 让成功 toast 先有一拍可见,再弹系统分享菜单盖住当前 sheet。延迟仍挂在
+                // exportTask 上,用户若在这一拍里取消/关闭,不会再弹孤儿分享菜单。
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                if Task.isCancelled {
+                    try? FileManager.default.removeItem(at: fileURL)
+                    return
+                }
+                await MainActor.run {
+                    exportTask = nil
+                    #if canImport(UIKit)
+                    presentShareSheet(for: fileURL)
                     #endif
                 }
             } else {

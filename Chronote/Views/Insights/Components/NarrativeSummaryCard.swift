@@ -198,11 +198,11 @@ struct NarrativeSummaryCard: View {
                createdAt: latest.createdAt,
                mostRecentEntryDate: mostRecentEntryDate,
                currentEntryCount: entryCount
-           ) {
-            payload = latest.payload
-        } else {
-            payload = nil
-        }
+            ) {
+                payload = latest.payload
+            } else {
+                payload = nil
+            }
         // **P1 fix (2026-05-13 superreview)**:之前用 `headline?.isEmpty == false` 过滤导致
         // v2 老 cache(rangeKind != nil + headline == nil)和 v3 incomplete(stream 失败但
         // 已有部分 body)被整个抹掉,`displayHeadline` 的 fallback body 路径永远跑不到。

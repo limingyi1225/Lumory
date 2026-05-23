@@ -28,6 +28,9 @@ struct DiaryDetailView: View {
     @State var editedText: String = ""
     @State var editedMoodValue: Double = 0.5
     @State var editedDate: Date = Date()
+    @State var removedImageFileNames: Set<String> = []
+    @State var removedAudioFileName: String?
+    @State var originalAudioFileNameAtEditStart: String?
     @State var hasUnsavedChanges = false
     /// 保存失败时向用户展示的错误消息；非 nil 时弹 alert。
     @State var saveError: String?
@@ -45,6 +48,7 @@ struct DiaryDetailView: View {
     /// Image viewer 的图片数据：在点击缩略图时异步加载，加载完成后再呈现 viewer，
     /// 避免在 cover/sheet body 里做同步 I/O 阻塞主线程。
     @State var viewerImages: [Data] = []
+    @State var selectedThemeSubject: DiaryDetailThemeSubject?
 
     // `presentImageViewer` / `deleteEntry` 已抽到 `DiaryDetailView/DiaryDetailView+Display.swift`
     // 和 `DiaryDetailView+Edit.swift`。
@@ -83,16 +87,19 @@ struct DiaryDetailView: View {
                         }
                         summaryBlock
                         entryBodyBlock
-                        if let audioFileName = entry.audioFileName, let audioURL = resolvedAudioURL {
+                        if let audioFileName = entry.audioFileName,
+                           removedAudioFileName != audioFileName,
+                           let audioURL = resolvedAudioURL {
                             audioBlock(audioFileName: audioFileName, audioURL: audioURL)
                         }
-                        if !entry.imageFileNameArray.isEmpty {
+                        if !visibleImageFileNames.isEmpty {
                             photosBlock
                         }
                         themesSection
                     }
                     .padding(.horizontal, 20)
-                    .padding(.vertical, 18)
+                    .padding(.top, 18)
+                    .padding(.bottom, 18)
                     // F7 — iPad 阅读宽度限定。日记正文 + summary + themes + 图片网格,720pt formContentMaxWidth
                     // 是表单/单栏内容的舒适宽度,跟 Insights 的 narrative 760 / list 900 区分(详情更紧凑)
                     .lumoryReadableContent(maxWidth: LumoryAdaptivePresentation.formContentMaxWidth)
@@ -180,6 +187,16 @@ struct DiaryDetailView: View {
             // 那条路径上 root toast overlay 被压在 sheet 之下,保存 toast 看不见。在这层重挂兜底。
             .lumoryToastOverlay()
             .navigationBarBackButtonHidden(isEditing)
+            .lumoryAdaptiveModal(item: $selectedThemeSubject) { subject in
+                ThemeFilteredEntriesView(
+                    theme: subject.theme,
+                    allThemes: subject.allThemes,
+                    onMerged: nil,
+                    onDeleted: nil,
+                    onEntryDeleted: nil
+                )
+                .environment(\.managedObjectContext, viewContext)
+            }
             .interactiveDismissDisabled(isEditing && hasUnsavedChanges)
             // **P2 fix (2026-05-13 superreview round 2)**:fullScreenCover dismiss 后 `viewerImages`
             // 仍持有 5 张 12MP HEIC ≈ 25MB 常驻 parent State,InsightsView 滚动时长期占用峰内存。

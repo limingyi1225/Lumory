@@ -133,11 +133,9 @@ final class ThemeAliasResolver: ObservableObject {
         // (megareview P1 #1)indexSnapshot lookup 必须走 `ThemeKey.make`(NFC + lower + trim)
         // 跟 Store.rebuildIndex 反向索引对齐 —— Store.swift:28 / ThemeKey.swift:13 都已点名
         // Resolver 内 ad-hoc `.lowercased()` 在 NFD 输入(剪贴板 / 网页粘贴的组合字符)下 silent miss。
-        // pairKey 入口保留 `.lowercased()` 兼容老 negativePairs 持久化数据 —— 改 ThemeKey.make
-        // 会让用户已 reject 的对子复活,bad UX trade-off。
-        let newKey = suggestion.newTag.lowercased()                  // 给 pairKey 用(老兼容)
-        let originalCanonKey = suggestion.canonicalGuess.lowercased() // 给 pairKey 用(老兼容)
-        let newIndexKey = ThemeKey.make(suggestion.newTag)            // 给 indexSnapshot lookup
+        let newKey = ThemeKey.make(suggestion.newTag)
+        let originalCanonKey = ThemeKey.make(suggestion.canonicalGuess)
+        let newIndexKey = newKey                                      // 给 indexSnapshot lookup
         let originalCanonIndexKey = ThemeKey.make(suggestion.canonicalGuess)
 
         // newTag == canonical 没意义
@@ -165,7 +163,7 @@ final class ThemeAliasResolver: ObservableObject {
         } else {
             resolvedCanonical = suggestion.canonicalGuess
         }
-        let canonKey = resolvedCanonical.lowercased() // 给 pairKey 用(老兼容)
+        let canonKey = ThemeKey.make(resolvedCanonical)
 
         // 双向命中 negativePairs → 跳过。
         // **同时**检查 raw `originalCanonKey` 和 resolved `canonKey`:reject 当时存的是
@@ -179,9 +177,9 @@ final class ThemeAliasResolver: ObservableObject {
         // pending dedup 用 **unordered pair key**,与 negativePairs 对齐:
         // AI 在两次 scan 间可能 swap newTag/canonicalGuess —— 之前的 direction-aware 比较会让
         // 同一对子重复入队,用户被迫审核两次(codex P2 fix)。
-        let pendingPairKey = ThemeAliasStore.pairKey(newKey, canonKey)
+        let pendingPairKey = ThemeAliasStore.pairKey(suggestion.newTag, resolvedCanonical)
         if store.pending.contains(where: {
-            ThemeAliasStore.pairKey($0.newTag.lowercased(), $0.canonicalGuess.lowercased()) == pendingPairKey
+            ThemeAliasStore.pairKey($0.newTag, $0.canonicalGuess) == pendingPairKey
         }) { return false }
 
         // 入队的是**归一化后**的版本。若 canonicalGuess 被改写成现有 canonical,UI / confirm 都
@@ -237,7 +235,7 @@ final class ThemeAliasResolver: ObservableObject {
         guard !raw.isEmpty else { return }
 
         let newTag = suggestion.newTag.trimmingCharacters(in: .whitespaces)
-        let newTagLower = newTag.lowercased()
+        let newTagKey = ThemeKey.make(newTag)
         // (megareview P1 #1)indexSnapshot lookup 必须走 ThemeKey.make 与 Store 反向索引对齐
         let newTagIndexKey = ThemeKey.make(newTag)
         let chosenIndexKey = ThemeKey.make(raw)
@@ -246,10 +244,10 @@ final class ThemeAliasResolver: ObservableObject {
 
         // Step 1: resolve chosen 到当前真正的 canonical
         let resolvedChosen: String = indexSnapshot[chosenIndexKey] ?? raw
-        let resolvedChosenLower = resolvedChosen.lowercased()
+        let resolvedChosenKey = ThemeKey.make(resolvedChosen)
 
         // chosen 落到 newTag 自己 → 退化(用户在 picker 选成 newTag,已排除但 API 防御)。
-        if newTagLower == resolvedChosenLower {
+        if newTagKey == resolvedChosenKey {
             objectWillChange.send()
             store.update { state in
                 state.pending.removeAll { $0.id == suggestion.id }
@@ -271,9 +269,10 @@ final class ThemeAliasResolver: ObservableObject {
         var pluckFromParent: (parent: String, alias: String)? = nil
 
         if let parent = indexSnapshot[newTagIndexKey] {
-            if parent.lowercased() == resolvedChosenLower {
+            let parentKey = ThemeKey.make(parent)
+            if parentKey == resolvedChosenKey {
                 // newTag 已经在 chosen group 里 —— 不动 group,只清 pending
-            } else if parent.lowercased() == newTagLower {
+            } else if parentKey == newTagKey {
                 // (a) newTag 是 canonical 自己 → 整组 absorb
                 canonicalsToAbsorb.insert(parent)
             } else {
@@ -290,7 +289,8 @@ final class ThemeAliasResolver: ObservableObject {
         store.update { state in
             // Step 3a: case (b) 把 newTag 从 parent group 拔出来(parent group 仍然活着)
             if let pluck = pluckFromParent, var parentAliases = state.groups[pluck.parent] {
-                parentAliases.removeAll { $0.lowercased() == pluck.alias.lowercased() }
+                let aliasKey = ThemeKey.make(pluck.alias)
+                parentAliases.removeAll { ThemeKey.make($0) == aliasKey }
                 if parentAliases.isEmpty {
                     // parent 没别的 alias 了 → 整组删掉(仅剩 canonical 自己,语义上等于"无 group")
                     state.groups.removeValue(forKey: pluck.parent)
@@ -314,7 +314,7 @@ final class ThemeAliasResolver: ObservableObject {
                 finalAliases.formUnion(existing)
             }
             if let oldKey = state.groups.keys.first(where: {
-                $0.lowercased() == resolvedChosenLower && $0 != resolvedChosen
+                ThemeKey.make($0) == resolvedChosenKey && $0 != resolvedChosen
             }) {
                 if let existing = state.groups[oldKey] {
                     finalAliases.formUnion(existing)
@@ -324,8 +324,8 @@ final class ThemeAliasResolver: ObservableObject {
 
             // Step 5: 写回
             let aliases = finalAliases
-                .filter { $0.lowercased() != resolvedChosenLower }
-                .uniqued(byKey: { $0.lowercased() })
+                .filter { ThemeKey.make($0) != resolvedChosenKey }
+                .uniqued(byKey: { ThemeKey.make($0) })
                 .sorted()
             state.groups[resolvedChosen] = aliases
 
@@ -333,16 +333,16 @@ final class ThemeAliasResolver: ObservableObject {
             // **canonicalGuess 不动**,后续仍可能有针对 canonicalGuess 的合并建议,不在这里清。
             state.pending.removeAll { s in
                 if s.id == suggestion.id { return true }
-                return ThemeAliasStore.aliasToCanonicalLowerLookup(in: state.groups, key: s.newTag.lowercased()) == resolvedChosenLower
+                return ThemeAliasStore.aliasToCanonicalLowerLookup(in: state.groups, key: s.newTag) == resolvedChosenKey
             }
 
             // Step 7: 清掉描述"newTag ↔ 现 chosen group 任意成员"的 stale negativePair —— 用户已经
             // 决定它们是同一实体,旧的"不是"记录就成了悖论(后续 unmerge / 别处合并时若不清,
             // negativePair 会反过来阻塞合理建议)。只清涉及 newTag 这一侧的;canonicalGuess 那边的
             // 拒绝意图(如果有)保留。
-            let chosenGroupLowercased: Set<String> = Set(([resolvedChosen] + aliases).map { $0.lowercased() })
-            for member in chosenGroupLowercased {
-                state.negativePairs.remove(ThemeAliasStore.pairKey(newTagLower, member))
+            let chosenGroupKeys: Set<String> = Set(([resolvedChosen] + aliases).map { ThemeKey.make($0) })
+            for member in chosenGroupKeys {
+                state.negativePairs.remove(ThemeAliasStore.pairKey(newTagKey, member))
             }
 
             state.coolUntil = nil  // 用户主动 confirm = 重新 engage,7 天冷却也清掉(否则 banner 会继续被压抑)
@@ -363,8 +363,8 @@ final class ThemeAliasResolver: ObservableObject {
     /// (`nil` = 阈值未到不改),reject 在自己的闭包内合并写。
     func reject(_ suggestion: PendingSuggestion) {
         let pairKey = ThemeAliasStore.pairKey(
-            suggestion.newTag.lowercased(),
-            suggestion.canonicalGuess.lowercased()
+            suggestion.newTag,
+            suggestion.canonicalGuess
         )
         let newCoolUntil = coolUntilForBumpedDismiss()  // pure: bumps counter + 返新 coolUntil 或 nil
         objectWillChange.send()
@@ -427,22 +427,22 @@ final class ThemeAliasResolver: ObservableObject {
         let targetTrim = target.trimmingCharacters(in: .whitespaces)
         guard !sourceTrim.isEmpty, !targetTrim.isEmpty else { return .noop }
 
-        let sourceLower = sourceTrim.lowercased()
-        let targetLower = targetTrim.lowercased()
-        guard sourceLower != targetLower else { return .noop }
+        let sourceKey = ThemeKey.make(sourceTrim)
+        let targetKey = ThemeKey.make(targetTrim)
+        guard sourceKey != targetKey else { return .noop }
         // (megareview P1 #1)indexSnapshot lookup 走 ThemeKey.make
-        let sourceIndexKey = ThemeKey.make(sourceTrim)
-        let targetIndexKey = ThemeKey.make(targetTrim)
+        let sourceIndexKey = sourceKey
+        let targetIndexKey = targetKey
 
         let indexSnapshot = store.snapshotIndex()
 
         // 解析到真正的 canonical(target 可能本身就是别人的 alias)
         let resolvedTarget: String = indexSnapshot[targetIndexKey] ?? targetTrim
-        let resolvedTargetLower = resolvedTarget.lowercased()
+        let resolvedTargetKey = ThemeKey.make(resolvedTarget)
 
         // source 解析:可能本身是 canonical,或某 group 的 alias
         let sourceCanonical: String? = indexSnapshot[sourceIndexKey]
-        if let sc = sourceCanonical, sc.lowercased() == resolvedTargetLower {
+        if let sc = sourceCanonical, ThemeKey.make(sc) == resolvedTargetKey {
             return .noop  // source 已经在 target 的 group 里 —— 无 op
         }
 
@@ -460,7 +460,7 @@ final class ThemeAliasResolver: ObservableObject {
             }
             // target 自己若 case 不同,合并 case
             if let oldKey = state.groups.keys.first(where: {
-                $0.lowercased() == resolvedTargetLower && $0 != resolvedTarget
+                ThemeKey.make($0) == resolvedTargetKey && $0 != resolvedTarget
             }) {
                 if let aliases = state.groups[oldKey] {
                     labelsToMerge.formUnion(aliases)
@@ -476,21 +476,21 @@ final class ThemeAliasResolver: ObservableObject {
             finalAliases.formUnion(labelsToMerge)
 
             let aliases = finalAliases
-                .filter { $0.lowercased() != resolvedTargetLower }
-                .uniqued(byKey: { $0.lowercased() })
+                .filter { ThemeKey.make($0) != resolvedTargetKey }
+                .uniqued(byKey: { ThemeKey.make($0) })
                 .sorted()
             state.groups[resolvedTarget] = aliases
 
             // 清理 stale pending:任何 newTag/canonicalGuess 命中合并后任意标签的 suggestion
-            let mergedLowercased = Set(([resolvedTarget] + aliases).map { $0.lowercased() })
+            let mergedKeys = Set(([resolvedTarget] + aliases).map { ThemeKey.make($0) })
             state.pending.removeAll { s in
-                mergedLowercased.contains(s.newTag.lowercased())
-                    || mergedLowercased.contains(s.canonicalGuess.lowercased())
+                mergedKeys.contains(ThemeKey.make(s.newTag))
+                    || mergedKeys.contains(ThemeKey.make(s.canonicalGuess))
             }
 
             // 清理 stale negativePair:用户主动合并相当于覆盖了之前的"不是"。组内任意两标签
             // 的对子都应清掉,否则未来 unmerge / 改路径时旧拒绝复活,会反过来阻塞合理建议。
-            let mergedArray = Array(mergedLowercased)
+            let mergedArray = Array(mergedKeys)
             for i in 0..<mergedArray.count {
                 for j in (i + 1)..<mergedArray.count {
                     state.negativePairs.remove(ThemeAliasStore.pairKey(mergedArray[i], mergedArray[j]))
@@ -510,10 +510,11 @@ final class ThemeAliasResolver: ObservableObject {
     /// 用户在 management page 主动拆分某个 group(把 alias 重新独立)。
     func unmerge(canonical: String, removeAlias alias: String) {
         guard store.groups[canonical] != nil else { return }
+        let aliasKey = ThemeKey.make(alias)
         objectWillChange.send()
         store.update { state in
             guard var aliases = state.groups[canonical] else { return }
-            aliases.removeAll { $0.lowercased() == alias.lowercased() }
+            aliases.removeAll { ThemeKey.make($0) == aliasKey }
             if aliases.isEmpty {
                 state.groups.removeValue(forKey: canonical)
             } else {
@@ -533,14 +534,15 @@ final class ThemeAliasResolver: ObservableObject {
         // SwiftUI willChange 后下一 run loop 才拉值,所以读旧值 → send → 写新值的顺序正确。
         // 算 removedLabels **必须在 send 之前** —— 闭包内重算意义不大且让逻辑分散。
 
-        // 大小写不敏感找真实 key
-        let exactKey = store.groups.keys.first(where: { $0.lowercased() == canonical.lowercased() })
+        let canonicalKey = ThemeKey.make(canonical)
+        // 大小写 / NFC 不敏感找真实 key
+        let exactKey = store.groups.keys.first(where: { ThemeKey.make($0) == canonicalKey })
             ?? canonical
-        // 收集这个 group 覆盖的所有 lowercased 标签(canonical + 它的 aliases)
+        // 收集这个 group 覆盖的所有 normalized 标签(canonical + 它的 aliases)
         var removedLabels = Set<String>()
-        removedLabels.insert(exactKey.lowercased())
+        removedLabels.insert(ThemeKey.make(exactKey))
         if let aliases = store.groups[exactKey] {
-            for a in aliases { removedLabels.insert(a.lowercased()) }
+            for a in aliases { removedLabels.insert(ThemeKey.make(a)) }
         }
 
         objectWillChange.send()
@@ -548,8 +550,8 @@ final class ThemeAliasResolver: ObservableObject {
             state.groups.removeValue(forKey: exactKey)
             // 清掉 pending 里指向已删除标签的建议
             state.pending.removeAll { s in
-                removedLabels.contains(s.newTag.lowercased())
-                    || removedLabels.contains(s.canonicalGuess.lowercased())
+                removedLabels.contains(ThemeKey.make(s.newTag))
+                    || removedLabels.contains(ThemeKey.make(s.canonicalGuess))
             }
         }
         NotificationCenter.default.post(name: .themeAliasMapDidChange, object: nil)
@@ -561,17 +563,18 @@ final class ThemeAliasResolver: ObservableObject {
     func restoreGroup(canonical: String, aliases: [String]) {
         let canonicalTrim = canonical.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !canonicalTrim.isEmpty else { return }
+        let canonicalKey = ThemeKey.make(canonicalTrim)
         let snapshotAliases = aliases
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && $0.lowercased() != canonicalTrim.lowercased() }
+            .filter { !$0.isEmpty && ThemeKey.make($0) != canonicalKey }
         objectWillChange.send()
         store.update { state in
             // 找现有同 canonical 的 group(大小写不敏感),merge 进 snapshotAliases。
-            let existingKey = state.groups.keys.first { $0.lowercased() == canonicalTrim.lowercased() }
+            let existingKey = state.groups.keys.first { ThemeKey.make($0) == canonicalKey }
             let existingAliases = existingKey.flatMap { state.groups[$0] } ?? []
             let merged = (existingAliases + snapshotAliases)
-                .filter { !$0.isEmpty && $0.lowercased() != canonicalTrim.lowercased() }
-                .uniqued(byKey: { $0.lowercased() })
+                .filter { !$0.isEmpty && ThemeKey.make($0) != canonicalKey }
+                .uniqued(byKey: { ThemeKey.make($0) })
                 .sorted()
             // 用 snapshot 的 canonicalTrim 作为最终 key(大小写跟用户最初建组时一致);
             // 如果存在另一种大小写的旧 key,先删再写避免双 key。
@@ -584,19 +587,19 @@ final class ThemeAliasResolver: ObservableObject {
     }
 
     /// 公开版:供 ThemeManagementService.deleteTheme 在删除 entry.themes CSV 中的标签后,
-    /// 同步清理任何提到这些标签的 pending 建议。labels 应是 lowercased。
+    /// 同步清理任何提到这些标签的 pending 建议。labels 应是 `ThemeKey.make` 后的 normalized key。
     func purgePending(matchingLowercasedLabels labels: Set<String>) {
         guard !labels.isEmpty else { return }
         let before = store.pending.count
         // 先看看到底有没有匹配 — 没有就别 fire objectWillChange / save 浪费一次
         let willChange = store.pending.contains { s in
-            labels.contains(s.newTag.lowercased()) || labels.contains(s.canonicalGuess.lowercased())
+            labels.contains(ThemeKey.make(s.newTag)) || labels.contains(ThemeKey.make(s.canonicalGuess))
         }
         guard willChange else { return }
         objectWillChange.send()
         store.update { state in
             state.pending.removeAll { s in
-                labels.contains(s.newTag.lowercased()) || labels.contains(s.canonicalGuess.lowercased())
+                labels.contains(ThemeKey.make(s.newTag)) || labels.contains(ThemeKey.make(s.canonicalGuess))
             }
         }
         Log.info("[ThemeAliasResolver] purgePending: 清掉 \(before - store.pending.count) 条命中标签的 pending", category: .persistence)
@@ -605,8 +608,8 @@ final class ThemeAliasResolver: ObservableObject {
     func pendingSuggestions(matchingLowercasedLabels labels: Set<String>) -> [PendingSuggestion] {
         guard !labels.isEmpty else { return [] }
         return store.pending.filter { suggestion in
-            labels.contains(suggestion.newTag.lowercased())
-                || labels.contains(suggestion.canonicalGuess.lowercased())
+            labels.contains(ThemeKey.make(suggestion.newTag))
+                || labels.contains(ThemeKey.make(suggestion.canonicalGuess))
         }
     }
 
@@ -616,14 +619,14 @@ final class ThemeAliasResolver: ObservableObject {
         store.update { state in
             for suggestion in suggestions {
                 let pairKey = ThemeAliasStore.pairKey(
-                    suggestion.newTag.lowercased(),
-                    suggestion.canonicalGuess.lowercased()
+                    suggestion.newTag,
+                    suggestion.canonicalGuess
                 )
                 let alreadyExists = state.pending.contains { existing in
                     existing.id == suggestion.id
                         || ThemeAliasStore.pairKey(
-                            existing.newTag.lowercased(),
-                            existing.canonicalGuess.lowercased()
+                            existing.newTag,
+                            existing.canonicalGuess
                         ) == pairKey
                 }
                 if !alreadyExists {
@@ -760,9 +763,10 @@ final class ThemeAliasResolver: ObservableObject {
         let interval = coolUntil.timeIntervalSinceNow
         guard interval > 0 else { return }  // 已过期,不必 schedule
         // tolerance 给 OS 节能优化空间;到期点偏 30s 完全可接受。
+        let expectedCoolUntil = coolUntil
         let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.store.coolUntil == expectedCoolUntil else { return }
                 // SwiftUI ObservableObject 重 re-render
                 self.objectWillChange.send()
                 // InsightsView 等通过 NotificationCenter 监听,一并通知

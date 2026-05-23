@@ -51,19 +51,19 @@ final class ThemeManagementService: ObservableObject {
     /// **如果 CoreData save 失败,alias group 保留**(避免 raw themes 还在但 alias map 已删的不一致状态)。
     @discardableResult
     func deleteTheme(canonical: String) async -> DeletionOutcome {
-        let canonLower = canonical.lowercased()
+        let canonicalKey = ThemeKey.make(canonical)
 
-        // 收集要删的所有 lowercased tag(canonical 自身 + 已合并别名)
-        var tagsToRemove: Set<String> = [canonLower]
+        // 收集要删的所有 normalized tag(canonical 自身 + 已合并别名)
+        var tagsToRemove: Set<String> = [canonicalKey]
         if let aliases = resolver.groups[canonical] {
-            for a in aliases { tagsToRemove.insert(a.lowercased()) }
+            for a in aliases { tagsToRemove.insert(ThemeKey.make(a)) }
         }
         // canonical 的大小写匹配也一并扫
-        for (key, aliases) in resolver.groups where key.lowercased() == canonLower {
-            tagsToRemove.insert(key.lowercased())
-            for a in aliases { tagsToRemove.insert(a.lowercased()) }
+        for (key, aliases) in resolver.groups where ThemeKey.make(key) == canonicalKey {
+            tagsToRemove.insert(ThemeKey.make(key))
+            for a in aliases { tagsToRemove.insert(ThemeKey.make(a)) }
         }
-        let aliasGroupCanonical = resolver.groups.keys.first { $0.lowercased() == canonLower }
+        let aliasGroupCanonical = resolver.groups.keys.first { ThemeKey.make($0) == canonicalKey }
         let aliasGroupAliases = aliasGroupCanonical.flatMap { resolver.groups[$0] } ?? []
 
         // bg task 返回 (success, affected) 而不是 Int —— 之前的 `return 0` 既可能表示
@@ -92,8 +92,8 @@ final class ThemeManagementService: ObservableObject {
             var originals: [UUID: [String]] = [:]
             for entry in entries {
                 let original = entry.themeArray
-                let removed = original.filter { tagsToRemove.contains($0.lowercased()) }
-                let filtered = original.filter { !tagsToRemove.contains($0.lowercased()) }
+                let removed = original.filter { tagsToRemove.contains(ThemeKey.make($0)) }
+                let filtered = original.filter { !tagsToRemove.contains(ThemeKey.make($0)) }
                 if filtered.count != original.count {
                     if let id = entry.id {
                         originals[id] = removed
@@ -131,7 +131,7 @@ final class ThemeManagementService: ObservableObject {
             removedPending: removedPending
         )
 
-        if let exactKey = resolver.groups.keys.first(where: { $0.lowercased() == canonLower }) {
+        if let exactKey = resolver.groups.keys.first(where: { ThemeKey.make($0) == canonicalKey }) {
             resolver.deleteGroup(canonical: exactKey)
         }
 
@@ -167,8 +167,8 @@ final class ThemeManagementService: ObservableObject {
             for entry in entries {
                 guard let id = entry.id, let snapshotThemes = originals[id] else { continue }
                 let currentThemes = entry.themeArray
-                let currentLowerSet = Set(currentThemes.map { $0.lowercased() })
-                let toRestore = snapshotThemes.filter { !currentLowerSet.contains($0.lowercased()) }
+                let currentThemeKeys = Set(currentThemes.map { ThemeKey.make($0) })
+                let toRestore = snapshotThemes.filter { !currentThemeKeys.contains(ThemeKey.make($0)) }
                 guard !toRestore.isEmpty else { continue }   // 全在 → 已被并发流程加回 → no-op
                 entry.setThemes(currentThemes + toRestore)
                 changed += 1

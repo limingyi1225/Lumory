@@ -48,7 +48,7 @@ struct SyncDiagnosticView: View {
                                 .frame(maxWidth: .infinity)
                                 .padding()
                                 // P0-3 漏勺页贴玻璃 — 整页之前 0 命中 liquidGlass,扁平绿/橙/红色块跟主页玻璃风脱节。
-                                .liquidGlassCard(cornerRadius: 12, tint: .green, tintStrength: 0.10)
+                                .liquidGlassCard(cornerRadius: LumoryCornerRadius.inline, tint: .green, tintStrength: 0.10)
                             } else {
                                 // Issues found
                                 VStack(alignment: .leading, spacing: 12) {

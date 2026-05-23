@@ -96,6 +96,19 @@ struct ConversationHistoryView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        #if canImport(UIKit)
+                        HapticManager.shared.softNavigate()
+                        #endif
+                        NotificationCenter.default.post(name: .lumoryReturnHomeRequested, object: nil)
+                        dismiss()
+                    } label: {
+                        Image(systemName: "house")
+                            .symbolRenderingMode(.hierarchical)
+                    }
+                    .accessibilityLabel(NSLocalizedString("回到首页", comment: "Return to Home"))
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(NSLocalizedString("完成", comment: "Done")) { dismiss() }
                         .font(.body.weight(.semibold))
@@ -135,28 +148,12 @@ struct ConversationHistoryView: View {
     // MARK: - Empty
 
     private var emptyState: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: emptyIcon)
-                .font(.system(size: 44, weight: .light))
-                .foregroundStyle(.tertiary)
-                .symbolRenderingMode(.hierarchical)
-            VStack(spacing: 8) {
-                Text(localizedEmptyTitle)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.primary)
-                if !localizedEmptySubtitle.isEmpty {
-                    Text(localizedEmptySubtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
-                }
-            }
-            Spacer()
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
+        EmptyStateView(
+            systemImage: emptyIcon,
+            title: localizedEmptyTitle,
+            message: localizedEmptySubtitle.isEmpty ? nil : localizedEmptySubtitle,
+            size: .large
+        )
     }
 
     private var emptyIcon: String {
@@ -228,6 +225,9 @@ struct ConversationHistoryView: View {
         #if canImport(UIKit)
         HapticManager.shared.impact(.medium)
         #endif
+        if selectedConversation?.objectID == conversation.objectID {
+            selectedConversation = nil
+        }
         viewContext.delete(conversation)
         do {
             try viewContext.save()
@@ -526,6 +526,7 @@ private struct ConversationDetailView: View {
                 preserveLineBreaks: true
             )
             .textSelection(.enabled)
+
         }
     }
 

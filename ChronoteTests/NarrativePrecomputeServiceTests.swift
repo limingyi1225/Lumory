@@ -108,6 +108,12 @@ struct NarrativePrecomputeServiceTests {
         #expect(!payload.body.isEmpty)
         #expect(payload.headline != nil, "Mock 输出含 [HEADLINE] marker,split 后应有 headline")
         #expect(payload.headline?.isEmpty == false)
+        let entryRequest = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
+        entryRequest.resultType = .dictionaryResultType
+        entryRequest.propertiesToFetch = ["id", "date"]
+        entryRequest.sortDescriptors = [NSSortDescriptor(key: "date", ascending: false)]
+        let expectedSourceIds = try context.fetch(entryRequest).compactMap { $0["id"] as? UUID }
+        #expect(conv.citedEntryUUIDs == expectedSourceIds, "narrative citation 必须保存 prompt 实际纳入的 entry ids")
     }
 
     @Test func refreshesFinalMetricsWhenEntryIsAddedDuringStream() async throws {

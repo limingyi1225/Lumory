@@ -94,17 +94,25 @@ final class ContextPromptGenerator {
         let olderThemes = Set(olderEntries.flatMap { $0.themes })
         let recentThemes = Set(recentEntries.flatMap { $0.themes })
         let lapsed = olderThemes.subtracting(recentThemes)
-        guard let theme = lapsed.first(where: { !$0.isEmpty }) else { return nil }
+        let candidates = lapsed.compactMap { theme -> (theme: String, lastSeen: Date, count: Int)? in
+            guard !theme.isEmpty else { return nil }
+            let matchingDates = olderEntries
+                .filter { $0.themes.contains(theme) }
+                .map { $0.date }
+            guard let lastSeen = matchingDates.max() else { return nil }
+            return (theme, lastSeen, matchingDates.count)
+        }
+        let ranked = candidates.sorted { lhs, rhs in
+            if lhs.lastSeen != rhs.lastSeen { return lhs.lastSeen > rhs.lastSeen }
+            if lhs.count != rhs.count { return lhs.count > rhs.count }
+            return lhs.theme.localizedStandardCompare(rhs.theme) == .orderedAscending
+        }
+        guard let chosen = ranked.first else { return nil }
 
-        // 找出该主题最近一次出现，计算间隔
-        guard let lastSeen = olderEntries
-            .filter({ $0.themes.contains(theme) })
-            .map({ $0.date })
-            .max() else { return nil }
-        let days = calendar.dateComponents([.day], from: lastSeen, to: now).day ?? 0
+        let days = calendar.dateComponents([.day], from: chosen.lastSeen, to: now).day ?? 0
         guard days >= lapseDays else { return nil }
 
-        return ContextPrompt(text: String(format: NSLocalizedString("已经 %d 天没提到 %@ 了，最近怎么样？", comment: "Theme lapse"), days, theme))
+        return ContextPrompt(text: String(format: NSLocalizedString("已经 %d 天没提到 %@ 了，最近怎么样？", comment: "Theme lapse"), days, chosen.theme))
     }
 
     /// 从日记里"长出来"的人/物/事 prompt：扫描 recent + older 的 themes，

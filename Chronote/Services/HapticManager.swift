@@ -8,7 +8,7 @@ import UIKit
 final class HapticManager {
     static let shared = HapticManager()
 
-    /// 历史 `.click()` 是 medium impact;新代码请用 `impact(.light/.soft/.medium/...)`。
+    /// 历史 `.click()` 是 medium impact;新代码优先用语义方法,再落到 `impact(_:)`。
     private let mediumGenerator: UIImpactFeedbackGenerator
     private let lightGenerator: UIImpactFeedbackGenerator
     private let softGenerator: UIImpactFeedbackGenerator
@@ -33,6 +33,26 @@ final class HapticManager {
     /// 触发一次 medium impact 震动（旧 API,保留兼容）
     func click() {
         impact(.medium)
+    }
+
+    /// 提交 / 发送类动作的按下反馈。保持轻,完成结果另用 `complete()` / error toast 表达。
+    func submit() {
+        impact(.light)
+    }
+
+    /// 保存 / 恢复 / 完成类正向结果。
+    func complete() {
+        notification(.success)
+    }
+
+    /// 删除 / 清空等高风险确认。
+    func destructive() {
+        notification(.warning)
+    }
+
+    /// 展开 / 进入详情 / 切换小范围 UI 的轻导航反馈。
+    func softNavigate() {
+        impact(.light)
     }
 
     /// 任意 style 的 impact 震动 — fire 后立刻 prepare 复用

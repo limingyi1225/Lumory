@@ -164,8 +164,8 @@ extension OpenAIService {
         Log.info("[OpenAIService] parseImportedDiaries: raw content length \(content.count) chars",
                  category: .ai)
 
-        guard let startIndex = content.firstIndex(of: "["),
-              let endIndex = content.lastIndex(of: "]") else {
+        let jsonCandidates = Self.jsonArrayCandidates(in: content)
+        guard !jsonCandidates.isEmpty else {
             // 模型有内容但不是 JSON 数组结构 —— 算解析失败,不能当成"0 条"。
             throw DiaryImportError.parsingFailed(
                 reason: NSLocalizedString("error.import.notJSON",
@@ -173,24 +173,31 @@ extension OpenAIService {
                                           comment: "AI response not JSON array")
             )
         }
-        let jsonString = String(content[startIndex...endIndex])
         struct RawEntry: Decodable {
             let date: String
             let text: String
         }
-        guard let jsonData = jsonString.data(using: .utf8) else {
+        let raws: [RawEntry]
+        var lastDecodeError: Error?
+        var decoded: [RawEntry]?
+        for jsonString in jsonCandidates {
+            guard let jsonData = jsonString.data(using: .utf8) else { continue }
+            do {
+                decoded = try JSONDecoder().decode([RawEntry].self, from: jsonData)
+                break
+            } catch {
+                lastDecodeError = error
+            }
+        }
+        guard let decoded else {
             throw DiaryImportError.parsingFailed(
-                reason: NSLocalizedString("error.import.notJSON",
-                                          value: "AI 返回的内容不是合法 JSON 数组。",
-                                          comment: "AI response not JSON array")
+                reason: lastDecodeError?.localizedDescription
+                    ?? NSLocalizedString("error.import.notJSON",
+                                         value: "AI 返回的内容不是合法 JSON 数组。",
+                                         comment: "AI response not JSON array")
             )
         }
-        let raws: [RawEntry]
-        do {
-            raws = try JSONDecoder().decode([RawEntry].self, from: jsonData)
-        } catch {
-            throw DiaryImportError.parsingFailed(reason: error.localizedDescription)
-        }
+        raws = decoded
 
         var results: [ParsedDiaryEntry] = []
         for (index, raw) in raws.enumerated() {
@@ -224,6 +231,48 @@ extension OpenAIService {
         }
         // **空数组是合法成功**:模型读完粘贴内容认定"里面没有日记结构"。UI 会区分对待。
         return results
+    }
+
+    nonisolated private static func jsonArrayCandidates(in content: String) -> [String] {
+        var candidates: [String] = []
+        var start = content.startIndex
+        while start < content.endIndex {
+            guard content[start] == "[" else {
+                start = content.index(after: start)
+                continue
+            }
+
+            var i = start
+            var depth = 0
+            var inString = false
+            var escaped = false
+            while i < content.endIndex {
+                let ch = content[i]
+                if inString {
+                    if escaped {
+                        escaped = false
+                    } else if ch == "\\" {
+                        escaped = true
+                    } else if ch == "\"" {
+                        inString = false
+                    }
+                } else if ch == "\"" {
+                    inString = true
+                } else if ch == "[" {
+                    depth += 1
+                } else if ch == "]" {
+                    depth -= 1
+                    if depth == 0 {
+                        candidates.append(String(content[start...i]))
+                        break
+                    }
+                }
+                i = content.index(after: i)
+            }
+
+            start = content.index(after: start)
+        }
+        return candidates
     }
 
     nonisolated private static func parseImportedDiaryDate(_ raw: String) -> Date? {

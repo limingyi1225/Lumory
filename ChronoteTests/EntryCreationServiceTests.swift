@@ -95,6 +95,57 @@ struct EntryCreationServiceTests {
         #expect((entry.imageFileNames ?? "").isEmpty)
     }
 
+    @Test func create_withDateOverride_savesSelectedDate() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let calendar = Calendar(identifier: .gregorian)
+        let selectedDate = try #require(calendar.date(from: DateComponents(year: 2026, month: 5, day: 1, hour: 20, minute: 30)))
+
+        let result = await EntryCreationService.create(
+            .init(text: "Backfilled entry", audioFileName: nil, images: [], moodValue: 0.7, date: selectedDate),
+            in: persistence,
+            viewContext: context,
+            ai: MockAIService(),
+            aliasJudge: { _, _ in },
+            requestReminderReschedule: {}
+        )
+
+        guard case .saved(let entryID) = result else {
+            Issue.record("expected .saved, got \(result)")
+            return
+        }
+
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+        let entry = try #require(try context.fetch(request).first)
+        #expect(entry.date == selectedDate)
+    }
+
+    @Test func whitespaceText_isTrimmedBeforeSave() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+
+        let result = await EntryCreationService.create(
+            .init(text: "  \n\t  ", audioFileName: nil, images: [], moodValue: 0.5),
+            in: persistence,
+            viewContext: context,
+            ai: MockAIService(),
+            aliasJudge: { _, _ in },
+            requestReminderReschedule: {}
+        )
+
+        guard case .saved(let entryID) = result else {
+            Issue.record("expected .saved, got \(result)")
+            return
+        }
+
+        let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", entryID as NSUUID)
+        let entry = try #require(try context.fetch(request).first)
+        #expect(entry.wrappedText.isEmpty)
+        #expect(entry.wordCount == 0)
+    }
+
     @Test func imageAndAudio_persistsAttachmentMetadata() async throws {
         let persistence = PersistenceController(inMemory: true)
         let context = persistence.container.viewContext
@@ -189,7 +240,7 @@ struct EntryCreationServiceTests {
         let audioURL = LumoryAttachmentPaths.legacyURL(fileName: audioName)
         try Data(repeating: 0xA1, count: 16).write(to: audioURL)
         defer {
-            try? LumoryAttachmentPaths.deleteAllCopies(fileName: audioName, kind: .audio)
+            _ = try? LumoryAttachmentPaths.deleteAllCopies(fileName: audioName, kind: .audio)
             if let files = try? fm.contentsOfDirectory(atPath: imageDir.path) {
                 for file in files where !imageFilesBefore.contains(file) {
                     try? fm.removeItem(at: imageDir.appendingPathComponent(file))

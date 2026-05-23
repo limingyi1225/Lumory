@@ -46,6 +46,8 @@ enum LumoryDateFormatters {
     /// "2026-05-03" 数字日期 — Theme alias / 内部诊断。
     static let isoDate: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
         f.dateFormat = "yyyy-MM-dd"
         return f
     }()
@@ -67,6 +69,8 @@ enum LumoryDateFormatters {
     /// "17:30" 24h 数字格式 — locale-independent。HomeTimelineCard / DiaryPreviewView 时间戳。
     static let twentyFourHourTime: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
         f.dateFormat = "HH:mm"
         return f
     }()

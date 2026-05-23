@@ -3,12 +3,15 @@ import CoreData
 
 // MARK: - Theme filtered entries sheet
 //
-// 点击 ThemeCard 后弹出：筛选出该主题的所有日记条目，复用 DiaryEntryRow。
+// 点击 ThemeCard 后弹出：筛选出该主题的所有日记条目，视觉贴近 Home timeline。
 
 struct ThemeFilteredEntriesView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var hSizeClass
+    @AppStorage("appLanguage", store: AppGroup.userDefaults) private var appLanguage: String = {
+        Locale.current.identifier.hasPrefix("zh") ? "zh-Hans" : "en"
+    }()
     let theme: InsightsEngine.Theme
     /// 父视图传入的全部 themes(用来给 merge sheet 列候选,排除自己)
     let allThemes: [InsightsEngine.Theme]
@@ -26,6 +29,7 @@ struct ThemeFilteredEntriesView: View {
     @State private var mergeSubject: InsightsEngine.Theme?
     @State private var showDeleteAlert = false
     @State private var deleteFailureMessage: String?
+    @State private var fetchGen: Int = 0
     /// Button row tap 后塞这个,.navigationDestination(item:) 接住推到 DiaryDetailView。
     /// wave17 改 Button + item-driven destination 是为了去掉 NavigationLink 自带 chevron(用户反馈"杂乱")。
     @State private var selectedEntry: DiaryEntry?
@@ -35,28 +39,36 @@ struct ThemeFilteredEntriesView: View {
         NavigationStack {
             Group {
                 if entries.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "tag")
-                            .font(.largeTitle)
-                            .foregroundColor(.secondary)
-                        Text(NSLocalizedString("没有匹配的日记", comment: "No matched entries"))
-                            .foregroundColor(.secondary)
-                    }
+                    EmptyStateView(
+                        systemImage: "tag",
+                        title: NSLocalizedString("没有匹配的日记", comment: "No matched entries"),
+                        message: NSLocalizedString("这个主题暂时没有可显示的日记。", comment: "No matched entries detail"),
+                        size: .compact
+                    )
                 } else {
-                    // .plain + 透明 row + 清空 List 背景 → DiaryEntryRow 自带的 liquidGlassCard
+                    // .plain + 透明 row + 清空 List 背景 → HomeTimelineCard 的 accent-card
                     // 才能干净地浮在系统的玻璃 sheet 背景上,不被 insetGrouped 的灰底压住。
                     List {
+                        themePulseHeader
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 10, trailing: 16))
+
                         ForEach(entries, id: \.objectID) { entry in
                             Button {
                                 HapticManager.shared.impact(.light)
                                 selectedEntry = entry
                             } label: {
-                                DiaryEntryRow(entry: entry)
+                                HomeTimelineCard(entry: entry, appLanguage: appLanguage)
+                                    .contentShape(
+                                        .contextMenuPreview,
+                                        RoundedRectangle(cornerRadius: LumoryCornerRadius.card, style: .continuous)
+                                    )
+                                    .padding(.bottom, 10)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(PressableScaleButtonStyle())
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                            .lumoryGlassListRow(top: 6)
                             // 二级列表跟 HomeView 主时间线一致 — 左划删 / 长按弹菜单。
                             // P1-T8 完全对齐(添加 contextMenu 内 Edit 入口)需要独立 navigation
                             // destination,跨结构改动大,留 P3 epic。当前左划删除 + 长按删除已涵盖
@@ -225,6 +237,155 @@ struct ThemeFilteredEntriesView: View {
         }
     }
 
+    @ViewBuilder
+    private var themePulseHeader: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Circle()
+                    .fill(Color.moodSpectrum(value: theme.avgMood))
+                    .frame(width: 10, height: 10)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(NSLocalizedString("Theme Pulse", comment: "Theme pulse header"))
+                        .font(.caption.weight(.semibold))
+                        .textCase(.uppercase)
+                        .tracking(0.8)
+                        .foregroundStyle(.secondary)
+                    Text(theme.name)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                pulseMetric(
+                    value: String(format: NSLocalizedString("%d 次", comment: "Theme count"), theme.count),
+                    label: NSLocalizedString("出现", comment: "Theme pulse count label")
+                )
+                pulseMetric(
+                    value: String(format: NSLocalizedString("%d 天", comment: "Theme unique days"), theme.uniqueDays),
+                    label: NSLocalizedString("分布", comment: "Theme pulse days label")
+                )
+                pulseMetric(
+                    value: "\(Int(theme.avgMood * 100))",
+                    label: NSLocalizedString("平均心情", comment: "Theme pulse mood label")
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                moodRangeBar
+                Text(recentPulseSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !relatedThemeNames.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(NSLocalizedString("常一起出现", comment: "Related themes label"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    FlowLayout(spacing: 8) {
+                        ForEach(relatedThemeNames, id: \.self) { name in
+                            Text(name)
+                                .font(.caption)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .liquidGlassCapsule(tint: Color.moodSpectrum(value: theme.avgMood))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .liquidGlassCard(
+            cornerRadius: LumoryCornerRadius.card,
+            tint: Color.moodSpectrum(value: theme.avgMood),
+            tintStrength: 0.10,
+            interactive: false
+        )
+    }
+
+    private func pulseMetric(value: String, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .monospacedDigit()
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .liquidGlassCard(cornerRadius: LumoryCornerRadius.nestedRow, interactive: false)
+    }
+
+    private var moodRangeBar: some View {
+        GeometryReader { geo in
+            let widthFraction = min(1, max(0.08, theme.moodHigh - theme.moodLow))
+            let offsetFraction = min(max(0, theme.moodLow), max(0, 1 - widthFraction))
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.secondary.opacity(0.14))
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.moodSpectrum(value: theme.moodLow),
+                                Color.moodSpectrum(value: theme.avgMood),
+                                Color.moodSpectrum(value: theme.moodHigh)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: max(12, geo.size.width * CGFloat(widthFraction)))
+                    .offset(x: geo.size.width * CGFloat(offsetFraction))
+            }
+        }
+        .frame(height: 8)
+    }
+
+    private var recentPulseSummary: String {
+        let calendar = Calendar.current
+        let now = Date()
+        let thirtyDaysAgo = calendar.date(byAdding: .day, value: -30, to: now) ?? now
+        let recentCount = entries.filter { ($0.date ?? .distantPast) >= thirtyDaysAgo }.count
+        if recentCount > 0 {
+            return String(format: NSLocalizedString("最近 30 天出现 %d 次", comment: "Theme recent pulse summary"), recentCount)
+        }
+        guard let latest = entries.compactMap(\.date).max() else {
+            return NSLocalizedString("还没有足够的时间线数据", comment: "Theme no timeline summary")
+        }
+        return String(
+            format: NSLocalizedString("最近一次出现在 %@", comment: "Theme latest occurrence summary"),
+            LumoryDateFormatters.mediumDate.string(from: latest)
+        )
+    }
+
+    private var relatedThemeNames: [String] {
+        var counts: [String: Int] = [:]
+        let current = ThemeAliasResolver.shared.canonicalize(theme.name).lowercased()
+        for entry in entries {
+            var seenInEntry = Set<String>()
+            for raw in entry.themeArray {
+                let canonical = ThemeAliasResolver.shared.canonicalize(raw)
+                let key = canonical.lowercased()
+                guard key != current,
+                      !InsightsEngine.isBannedTheme(canonical),
+                      seenInEntry.insert(key).inserted else { continue }
+                counts[canonical, default: 0] += 1
+            }
+        }
+        return counts
+            .sorted { lhs, rhs in
+                lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+            }
+            .prefix(3)
+            .map(\.key)
+    }
+
     @MainActor
     /// 单条删除走 4 秒撤销窗口(跟 HomeView / DiaryDetailView 同 pattern)。
     /// 失败 rollback + 显示 banner;成功后从本地 entries 列表移除避免动画抽搐。
@@ -237,7 +398,7 @@ struct ThemeFilteredEntriesView: View {
         viewContext.delete(entry)
         do {
             try viewContext.save()
-            HapticManager.shared.impact(.medium)
+            HapticManager.shared.destructive()
             EntryWipeOrchestrator.performSingleDeleteCleanup()
             withAnimation { entries.removeAll { $0.objectID == entryObjectID } }
             // selectedEntry 可能指向被删 entry — DiaryDetailView 内部 swipe 删除完 pop 回来后
@@ -282,6 +443,8 @@ struct ThemeFilteredEntriesView: View {
 
     @MainActor
     private func fetch() async {
+        fetchGen &+= 1
+        let myGen = fetchGen
         let entryIds = theme.entryIds
         // 走 keywordHits idiom:bg fetch [NSManagedObjectID] → main `existingObject`。
         // theme.entryIds 可能 100+,主线程 `id IN %@` fetch 在 sheet 进入动画里会有感。
@@ -295,6 +458,7 @@ struct ThemeFilteredEntriesView: View {
                 guard let rows = try? context.fetch(request) else { return [] }
                 return rows.map { $0.objectID }
             }
+        guard myGen == fetchGen else { return }
         entries = objectIDs.compactMap { try? viewContext.existingObject(with: $0) as? DiaryEntry }
     }
 }

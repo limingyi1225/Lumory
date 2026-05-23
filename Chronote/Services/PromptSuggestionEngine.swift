@@ -160,7 +160,10 @@ final class PromptSuggestionEngine: ObservableObject {
     /// 池空返回 nil，调用方自行 fallback。
     func randomHomePlaceholder() -> String? {
         guard let pool = current?.homePlaceholders, !pool.isEmpty else { return nil }
-        if pool.count == 1 { return pool[0] }
+        if pool.count == 1 {
+            lastPlaceholderIndex = 0
+            return pool[0]
+        }
         var idx = Int.random(in: 0..<pool.count)
         // 避免连续两次一样
         if idx == lastPlaceholderIndex {

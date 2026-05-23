@@ -8,6 +8,7 @@ import PhotosUI
 /// 的实现仍在 HomeView 里原位跑——它需要访问 View 身上的 `MainActor.run` 闭包写这些字段,
 /// VM 作为单一存储点,任务里直接写 `photoVM.selectedImageItems` / `photoVM.selectedPhotos`。
 @available(iOS 17.0, *)
+@MainActor
 @Observable
 final class HomePhotoViewModel {
     struct SelectedImage: Identifiable, Equatable {

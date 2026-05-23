@@ -51,7 +51,7 @@ struct DiaryImportView: View {
                         .scrollContentBackground(.hidden)
                         .frame(minHeight: 200)
                 }
-                .liquidGlassCard(cornerRadius: 16)
+                .liquidGlassCard(cornerRadius: LumoryCornerRadius.card)
 
                 // **进度 + 结果反馈**：以前按钮一按就 dismiss，用户既看不到进度、也看不到失败数量。
                 // 现在在 sheet 内部显示进度条和导入中禁用操作按钮，导入完成后弹 alert 再 dismiss。

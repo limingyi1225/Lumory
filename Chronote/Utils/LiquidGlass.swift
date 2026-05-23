@@ -2,8 +2,12 @@ import SwiftUI
 
 // MARK: - Liquid Glass tokens
 //
-// P1-T2:跨 view 圆角 14/16/18/22 散布,reviewer 抓到同 view 内多种圆角并存。
-// 统一规则:**内容卡 16,toast / overlay 系统级 chip 22**。新代码必须从这里拿,不要再写 14/18。
+// 语义层级:
+// - inline 12:输入框、warning/loading banner、短提示面。
+// - nestedRow 14:卡片内部的候选 row / citation row / message bubble。
+// - card 16:主内容卡、设置 row、Insights module。
+// - chip 22:composer 外壳、toast / overlay / popover-style chip。
+// 新代码优先从这里取 token,只有非常小的装饰 shape 才保留裸值。
 
 enum LumoryCornerRadius {
     /// 内容卡(timeline row、settings row、insights module、TextEditor 玻璃化等)
@@ -26,7 +30,7 @@ extension View {
     /// — Apple's guidance reserves `.interactive()` for elements that respond
     /// to touch/pointer.
     func liquidGlassCard(
-        cornerRadius: CGFloat = 16,
+        cornerRadius: CGFloat = LumoryCornerRadius.card,
         tint: Color? = nil,
         tintStrength: Double = 0.16,
         interactive: Bool = false
@@ -71,7 +75,7 @@ extension View {
     }
 
     /// Insights dashboard module card — consistent corner radius + subtle shadow.
-    func insightsCard(cornerRadius: CGFloat = 18) -> some View {
+    func insightsCard(cornerRadius: CGFloat = LumoryCornerRadius.card) -> some View {
         self.liquidGlassCard(cornerRadius: cornerRadius)
             .shadow(color: Color.primary.opacity(0.05), radius: 8, x: 0, y: 3)
     }
@@ -99,7 +103,7 @@ extension View {
 
     /// Left accent bar — a narrow colored strip clipped inside the card shape.
     @ViewBuilder
-    func moodAccentBar(_ color: Color, cornerRadius: CGFloat = 16, visible: Bool = true) -> some View {
+    func moodAccentBar(_ color: Color, cornerRadius: CGFloat = LumoryCornerRadius.card, visible: Bool = true) -> some View {
         if visible {
             self.overlay(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 2, style: .continuous)

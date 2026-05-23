@@ -54,6 +54,7 @@ final class EntryWipeOrchestratorTests: XCTestCase {
         ThemeAliasResolver.shared.resetForBulkEntryWipe()
         // Widget snapshot:测试自行用 overrideURL,actor 内 in-memory 状态可用 invalidateCaches 重置。
         await WidgetSnapshotService.shared.invalidateCaches()
+        await EntryDeletionUndoService.shared.resetForTesting()
     }
 
     override func tearDown() async throws {
@@ -69,6 +70,7 @@ final class EntryWipeOrchestratorTests: XCTestCase {
         ThemeAliasResolver.shared.resetNegativePairs()
         ThemeAliasResolver.shared.resetForBulkEntryWipe()
         await WidgetSnapshotService.shared.invalidateCaches()
+        await EntryDeletionUndoService.shared.resetForTesting()
         try await super.tearDown()
     }
 
@@ -96,6 +98,28 @@ final class EntryWipeOrchestratorTests: XCTestCase {
         XCTAssertNil(cleared?.lastEntryDate)
         XCTAssertNil(cleared?.lastEntryMood)
         XCTAssertNil(cleared?.prompt, "prompt 必须清空 —— 旧 placeholder 可能引用已删主题")
+    }
+
+    func testBulkWipe_discardsPendingSingleDeleteUndo() async {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let entry = DiaryEntry(context: context)
+        entry.id = UUID()
+        entry.date = Date()
+        entry.text = "待撤销的单删"
+        entry.moodValue = 0.5
+        entry.recomputeWordCount()
+
+        let snapshot = EntryDeletionSnapshot(entry: entry)
+        EntryDeletionUndoService.shared.register(snapshot: snapshot)
+        XCTAssertTrue(EntryDeletionUndoService.shared.hasPending, "seed precondition")
+
+        await EntryWipeOrchestrator.performBulkWipeCleanup()
+
+        XCTAssertFalse(
+            EntryDeletionUndoService.shared.hasPending,
+            "bulk wipe 必须取消上一条单删 undo,否则用户可把已全部删除的数据复活"
+        )
     }
 
     func testBulkWipe_resetsAliasGroupsAndPending_butPreservesNegativePairs() async {

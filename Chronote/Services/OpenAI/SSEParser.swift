@@ -168,6 +168,15 @@ enum SSEParser {
                         if line.hasPrefix("data:") {
                             var payload = Substring(line.dropFirst(5))
                             if payload.first == " " { payload = payload.dropFirst() }
+                            if payload == "[DONE]" {
+                                if !buffer.isEmpty {
+                                    if try dispatch(buffer) { return }
+                                    buffer = ""
+                                }
+                                seenDone = true
+                                continuation.finish()
+                                return
+                            }
                             if !buffer.isEmpty { buffer += "\n" }
                             buffer += String(payload)
                             // 兼容 "data: [DONE]" 单行无空行收尾的实现

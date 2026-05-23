@@ -293,6 +293,29 @@ struct InsightsEngineSearchSemanticTests {
         #expect(result.totalCount == 5)
     }
 
+    @Test func mixedDimensionMismatch_excludesBadVectorsFromCoverageAndResults() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let now = Date()
+        let valid = makeEntry(in: context, text: "alpha bravo", date: now, withEmbedding: true)
+        let mismatched = makeEntry(
+            in: context,
+            text: "newer but wrong dimension",
+            date: now.addingTimeInterval(60),
+            withEmbedding: false
+        )
+        mismatched.setEmbedding([Float](repeating: 0.5, count: 8))
+        try context.save()
+
+        let engine = InsightsEngine(persistence: persistence, ai: MockAIService())
+        let result = await engine.searchSemantic(query: "alpha bravo", topK: 5)
+
+        #expect(result.queryEmbedded)
+        #expect(result.totalCount == 2)
+        #expect(result.indexCoverage == 0.5, "只有 1/2 的 embedding 维度可用")
+        #expect(result.ids == [valid.objectID], "维度错误的较新 entry 不能以 score=0 混入结果")
+    }
+
     // MARK: - Ranking sanity check
 
     @Test func ranking_putsExactMatchFirst() async throws {

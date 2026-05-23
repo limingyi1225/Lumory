@@ -57,12 +57,16 @@ struct CitationEntryCard: View {
     let entry: DiaryEntry
 
     var body: some View {
-        NavigationLink {
-            DiaryDetailView(entry: entry, startInEditMode: false)
-        } label: {
-            content(for: entry)
+        if entry.managedObjectContext != nil && !entry.isDeleted {
+            NavigationLink {
+                DiaryDetailView(entry: entry, startInEditMode: false)
+            } label: {
+                content(for: entry)
+            }
+            .buttonStyle(PressableScaleButtonStyle())
+        } else {
+            MissingCitationCard()
         }
-        .buttonStyle(PressableScaleButtonStyle())
     }
 
     // 日期 label 复用 `LumoryDateFormatters.mediumDate` 共享实例。

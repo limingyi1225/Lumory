@@ -62,7 +62,7 @@ class CloudKitSyncMonitor: ObservableObject {
         ) { [weak self] _ in
             Log.info("[CloudKitSyncMonitor] Remote changes detected", category: .sync)
             MainActor.assumeIsolated {
-                self?.syncStatus = .synced
+                self?.syncStatus = .syncing
                 self?.errorMessage = nil
             }
         })

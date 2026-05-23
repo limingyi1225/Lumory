@@ -78,7 +78,7 @@ extension OpenAIService {
             if let score = json["mood_score"] as? Int, (1...100).contains(score) {
                 return Double(score) / 100.0
             }
-            if let score = json["mood_score"] as? Double, (1...100).contains(Int(score)) {
+            if let score = json["mood_score"] as? Double, (1.0...100.0).contains(score) {
                 return score / 100.0
             }
         }

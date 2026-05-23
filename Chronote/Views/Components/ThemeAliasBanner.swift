@@ -143,7 +143,7 @@ struct ThemeAliasBanner: View {
         .padding(14)
         // 中性 liquid glass —— 跟 picker / pendingCard / 待审卡片设计统一(用户要求)。
         // sparkles icon 自身已是 accent 色,够提示"有 actionable 建议",卡片本体 tint 反而过载。
-        .liquidGlassCard(cornerRadius: 18, interactive: false)
+        .liquidGlassCard(cornerRadius: LumoryCornerRadius.card, interactive: false)
         // P1-Dark-3 阴影 0.06 在 OLED 暗色不可见,提到 0.18 让卡片有 depth。
         .shadow(color: Color.primary.opacity(0.18), radius: 10, y: 3)
         // .sheet 已挪到 content(for:) 那一层 —— 这里不再挂,避免折叠时 sheet 被拆。

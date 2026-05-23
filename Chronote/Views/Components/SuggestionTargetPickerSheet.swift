@@ -247,15 +247,12 @@ struct SuggestionTargetPickerSheet: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.title2)
-                .foregroundStyle(.tertiary)
-            Text(NSLocalizedString("没有匹配的主题", comment: "No matching themes"))
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
+        EmptyStateView(
+            systemImage: "magnifyingglass",
+            title: NSLocalizedString("没有匹配的主题", comment: "No matching themes"),
+            size: .compact,
+            showsIconBackground: false
+        )
     }
 
     @ViewBuilder
@@ -273,7 +270,7 @@ struct SuggestionTargetPickerSheet: View {
                     .foregroundStyle(Color.primary)
             }
             .padding(28)
-            .liquidGlassCard(cornerRadius: 22)
+            .liquidGlassCard(cornerRadius: LumoryCornerRadius.chip)
         }
     }
 

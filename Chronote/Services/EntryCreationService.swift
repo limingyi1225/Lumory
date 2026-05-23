@@ -246,7 +246,7 @@ enum EntryCreationService {
             committedThemes = []
             Log.info("[EntryCreationService] theme 抽取失败,保留现有 themes", category: .ai)
         }
-        if let vector = embedding {
+        if let vector = embedding, !vector.isEmpty {
             entry.setEmbedding(vector)
         }
 

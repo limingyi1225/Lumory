@@ -314,7 +314,9 @@ extension DiaryDetailView {
                 // **Partial-failure guard**：主题抽取现在用 outcome 区分"合法无主题"和"请求失败"。
                 // `.success([])` 代表用户把文本改成确实无主题的内容,必须清掉旧 themes;只有
                 // `.failed` 或 embedding nil 才保留旧索引,避免 transient 故障污染 entry。
-                guard case .success(let themes) = themeOutcome, let vector = embedding else {
+                guard case .success(let themes) = themeOutcome,
+                      let vector = embedding,
+                      !vector.isEmpty else {
                     Log.info("[DiaryDetailView] refreshAIIndex: AI 部分失败（themeOutcome=\(String(describing: themeOutcome)), embedding=\(embedding != nil ? "ok" : "nil")），保留原值", category: .ai)
                     return (false, entry.id, [])
                 }
@@ -355,15 +357,26 @@ extension DiaryDetailView {
         originalSyncedImages: [Data]
     ) -> Data? {
         guard !remainingFileNames.isEmpty else { return nil }
-        let remainingImages: [Data]
+        let remainingNameSet = Set(remainingFileNames)
+        let remainingPairs: [(String, Data)]
         if originalSyncedImages.count == originalFileNames.count {
-            remainingImages = originalFileNames.enumerated().compactMap { index, fileName in
-                remainingFileNames.contains(fileName) ? originalSyncedImages[index] : nil
+            remainingPairs = originalFileNames.enumerated().compactMap { index, fileName in
+                remainingNameSet.contains(fileName) ? (fileName, originalSyncedImages[index]) : nil
             }
         } else {
-            remainingImages = remainingFileNames.compactMap { DiaryEntry.loadImageData(fileName: $0) }
+            remainingPairs = remainingFileNames.compactMap { fileName in
+                if let originalIndex = originalFileNames.firstIndex(of: fileName),
+                   originalSyncedImages.indices.contains(originalIndex) {
+                    return (fileName, originalSyncedImages[originalIndex])
+                }
+                guard let data = DiaryEntry.loadImageData(fileName: fileName) else {
+                    Log.warning("[DiaryDetail] Missing retained image data for \(fileName); dropping stale image reference", category: .persistence)
+                    return nil
+                }
+                return (fileName, data)
+            }
         }
-        let images = remainingImages
+        let images = remainingPairs.map(\.1)
         guard images.count == remainingFileNames.count else { return nil }
         guard !images.isEmpty else { return nil }
         return try? NSKeyedArchiver.archivedData(withRootObject: images, requiringSecureCoding: true)

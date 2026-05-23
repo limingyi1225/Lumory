@@ -204,6 +204,10 @@ struct DiaryExportView: View {
             .first(where: { $0.activationState == .foregroundActive }),
               let rootViewController = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
                 ?? windowScene.windows.first?.rootViewController else {
+            LumoryToastCenter.shared.show(
+                NSLocalizedString("导出完成,但现在无法打开分享菜单。回到 Lumory 后可以重新导出。", comment: "Export completed but share sheet could not be presented"),
+                severity: .warning
+            )
             return
         }
         

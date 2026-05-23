@@ -291,7 +291,11 @@ extension OpenAIService {
                     throw BackendErrorMapper.error(forStatus: http.statusCode, retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
                 }
                 let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
-                return decoded.data.first?.embedding
+                guard let embedding = decoded.data.first?.embedding, !embedding.isEmpty else {
+                    Log.error("[OpenAIService] Embed response contained no vector", category: .ai)
+                    return nil
+                }
+                return embedding
             }
         } catch {
             Log.error("[OpenAIService] Embed error: \(error)", category: .ai)

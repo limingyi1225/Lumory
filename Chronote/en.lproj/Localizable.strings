@@ -679,3 +679,4 @@
 "停止扫描" = "Stop Scan";
 "当前待审 %d 条" = "%d pending now";
 "移除照片" = "Remove photo";
+"导出完成,但现在无法打开分享菜单。回到 Lumory 后可以重新导出。" = "Export completed, but Lumory can't open the share sheet right now. Return to Lumory and export again.";

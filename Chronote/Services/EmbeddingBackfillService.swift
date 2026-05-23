@@ -181,7 +181,7 @@ final class EmbeddingBackfillService: ObservableObject {
 
         // 请求 embedding（网络调用，不锁 Core Data）
         let vector = await ai.embed(text: text)
-        guard let vector else {
+        guard let vector, !vector.isEmpty else {
             Log.error("[EmbeddingBackfill] embed 失败: \(objectID)", category: .migration)
             return false
         }

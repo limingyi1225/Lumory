@@ -109,7 +109,10 @@ extension OpenAIService {
             let confRaw = (entry["confidence"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
-            let conf = ThemeAliasJudgeMatch.Confidence(rawValue: confRaw ?? "") ?? .medium
+            guard let conf = ThemeAliasJudgeMatch.Confidence(rawValue: confRaw ?? "") else {
+                Log.info("[OpenAIService] judgeThemeAliases: 丢弃低/未知置信对子 \(newTag)→\(canonical)", category: .ai)
+                continue
+            }
 
             // Hallucination 防御:model 偶尔会回吐 input 里没有的 tag。整体丢弃。
             guard allowedNew.contains(Self.themeKey(newTag)),
@@ -215,7 +218,10 @@ extension OpenAIService {
             let confRaw = (entry["confidence"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
-            let conf = ThemeAliasJudgeGroup.Confidence(rawValue: confRaw ?? "") ?? .medium
+            guard let conf = ThemeAliasJudgeGroup.Confidence(rawValue: confRaw ?? "") else {
+                Log.info("[OpenAIService] scan: 丢弃低/未知置信组 \(canonical)", category: .ai)
+                continue
+            }
 
             // Hallucination 防御:canonical 必须在 candidate 列表里;aliases 至少有一条命中。
             // 整组若 canonical 是 hallucinated → 丢弃整组(否则后续 confirm 写入 ghost canonical)。

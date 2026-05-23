@@ -2197,6 +2197,7 @@ struct ThemeAliasJudgeServiceTests {
         )
         let ai = ThemeAliasAITestDouble()
         ai.suspendScan = true
+        ai.scanError = CancellationError()
         let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
         let service = ThemeAliasJudgeService(persistence: persistence, ai: ai, resolver: resolver)
 
@@ -2208,6 +2209,8 @@ struct ThemeAliasJudgeServiceTests {
         #expect(service.scanProgress.phase == .idle)
         ai.releaseScan()
         await task.value
+        #expect(service.scanProgress.isRunning == false)
+        #expect(service.scanProgress.phase == .idle)
     }
 
     @Test func scanAllHistory_respectsNegativePairs() async throws {
@@ -2273,6 +2276,92 @@ struct ThemeAliasJudgeServiceTests {
 
         #expect(ai.judgeCalls == 1)
         #expect(resolver.pending.isEmpty)
+    }
+
+    @Test func judgeAfterWrite_deletedEntryDoesNotConsumeThrottle() async throws {
+        let throttleKey = "lumory.themeAliasJudge.lastJudgeAt"
+        UserDefaults.standard.removeObject(forKey: throttleKey)
+        defer { UserDefaults.standard.removeObject(forKey: throttleKey) }
+
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        insertDiaryEntry(
+            context: context,
+            date: makeDate(year: 2024, month: 6, day: 1),
+            themes: ["Person A"]
+        )
+        try context.save()
+
+        let ai = ThemeAliasAITestDouble()
+        ai.judgeResult = [
+            ThemeAliasJudgeMatch(
+                newTag: "Person A Nickname",
+                canonical: "Person A",
+                confidence: .high,
+                reason: "test"
+            )
+        ]
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let service = ThemeAliasJudgeService(persistence: persistence, ai: ai, resolver: resolver)
+
+        await service.judgeAfterWrite(entryID: UUID(), newTags: ["Person A Nickname"])
+        #expect(ai.judgeCalls == 1)
+        #expect(resolver.pending.isEmpty)
+
+        let liveEntryID = UUID()
+        insertDiaryEntry(
+            context: context,
+            id: liveEntryID,
+            date: makeDate(year: 2024, month: 6, day: 2),
+            themes: ["Person A Nickname"]
+        )
+        try context.save()
+
+        await service.judgeAfterWrite(entryID: liveEntryID, newTags: ["Person A Nickname"])
+        #expect(ai.judgeCalls == 2, "deleted-entry abort must not spend the 60s judge throttle")
+    }
+
+    @Test func judgeAfterWrite_deletedEntryWithNoMatchesDoesNotConsumeThrottle() async throws {
+        let throttleKey = "lumory.themeAliasJudge.lastJudgeAt"
+        UserDefaults.standard.removeObject(forKey: throttleKey)
+        defer { UserDefaults.standard.removeObject(forKey: throttleKey) }
+
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        insertDiaryEntry(
+            context: context,
+            date: makeDate(year: 2024, month: 6, day: 1),
+            themes: ["Person A"]
+        )
+        try context.save()
+
+        let ai = ThemeAliasAITestDouble()
+        ai.judgeResult = []
+        let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
+        let service = ThemeAliasJudgeService(persistence: persistence, ai: ai, resolver: resolver)
+
+        await service.judgeAfterWrite(entryID: UUID(), newTags: ["Person A Nickname"])
+        #expect(ai.judgeCalls == 1)
+
+        let liveEntryID = UUID()
+        insertDiaryEntry(
+            context: context,
+            id: liveEntryID,
+            date: makeDate(year: 2024, month: 6, day: 2),
+            themes: ["Person A Nickname"]
+        )
+        try context.save()
+        ai.judgeResult = [
+            ThemeAliasJudgeMatch(
+                newTag: "Person A Nickname",
+                canonical: "Person A",
+                confidence: .high,
+                reason: "test"
+            )
+        ]
+
+        await service.judgeAfterWrite(entryID: liveEntryID, newTags: ["Person A Nickname"])
+        #expect(ai.judgeCalls == 2, "deleted-entry empty-match path must not spend the 60s judge throttle")
     }
 
     /// **B4 race test** — T1 挂起在 AI scanThemeAliasGroups,T2 模拟进入(bump scanGen + 替换 scanTask)。
@@ -2351,16 +2440,27 @@ struct ThemeAliasJudgeServiceTests {
         defer { UserDefaults.standard.removeObject(forKey: throttleKey) }
 
         let persistence = PersistenceController(inMemory: true)
-        try seedEntries(persistence, [
-            (["Person A"], makeDate(year: 2024, month: 6, day: 1))
-        ])
+        let context = persistence.container.viewContext
+        insertDiaryEntry(
+            context: context,
+            date: makeDate(year: 2024, month: 6, day: 1),
+            themes: ["Person A"]
+        )
+        let firstEntryID = UUID()
+        insertDiaryEntry(
+            context: context,
+            id: firstEntryID,
+            date: makeDate(year: 2024, month: 6, day: 2),
+            themes: ["FreshTag"]
+        )
+        try context.save()
         let ai1 = ThemeAliasAITestDouble()
         ai1.judgeResult = []
         let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
 
         // Phase 1: service A 第一次 judgeAfterWrite → 触发 AI 调用 + 写 UserDefaults timestamp
         let serviceA = ThemeAliasJudgeService(persistence: persistence, ai: ai1, resolver: resolver)
-        await serviceA.judgeAfterWrite(entryID: UUID(), newTags: ["FreshTag"])
+        await serviceA.judgeAfterWrite(entryID: firstEntryID, newTags: ["FreshTag"])
 
         #expect(ai1.judgeCalls == 1, "first judgeAfterWrite should call AI")
         let storedTimestamp = UserDefaults.standard.double(forKey: throttleKey)
@@ -3218,18 +3318,25 @@ struct Round2FixesTests {
     }
 
     /// Fix #7: judgeAfterWrite 60s debounce —— 60s 内第二次调跳过 AI 调用。
-    @Test func judgeAfterWrite_debouncesWithin60s() async {
+    @Test func judgeAfterWrite_debouncesWithin60s() async throws {
+        let throttleKey = "lumory.themeAliasJudge.lastJudgeAt"
+        UserDefaults.standard.removeObject(forKey: throttleKey)
+        defer { UserDefaults.standard.removeObject(forKey: throttleKey) }
+
         let persistence = PersistenceController(inMemory: true)
-        try? seedEntries(persistence, [
-            (["A"], makeDate(year: 2024, month: 6, day: 1)),
-            (["B"], makeDate(year: 2024, month: 6, day: 2))
-        ])
+        let context = persistence.container.viewContext
+        insertDiaryEntry(context: context, date: makeDate(year: 2024, month: 6, day: 1), themes: ["A"])
+        insertDiaryEntry(context: context, date: makeDate(year: 2024, month: 6, day: 2), themes: ["B"])
+        let firstEntryID = UUID()
+        insertDiaryEntry(context: context, id: firstEntryID, date: makeDate(year: 2024, month: 6, day: 3), themes: ["FreshTag1"])
+        try context.save()
+
         let ai = ThemeAliasAITestDouble()
         let resolver = ThemeAliasResolver(testingWithEmptyState: isolatedDefaults())
         let service = ThemeAliasJudgeService(persistence: persistence, ai: ai, resolver: resolver)
 
         // 第一次调 → 应当跑 judgeThemeAliases(知道是新 tag)
-        await service.judgeAfterWrite(entryID: UUID(), newTags: ["FreshTag1"])
+        await service.judgeAfterWrite(entryID: firstEntryID, newTags: ["FreshTag1"])
         let firstCalls = ai.judgeCalls
 
         // 60s 内第二次调 → 应被 debounce 跳过
@@ -4014,6 +4121,70 @@ struct EmbeddingBackfillServiceTests {
         #expect(progress.processed == 0)
         #expect(progress.total == 0)
         #expect(progress.isRunning == false)
+    }
+
+    @Test func backfillAll_emptyEmbeddingCountsAsFailureAndRemainsPending() async {
+        let (pc, _) = seed(missing: 1, withVector: 0)
+        let service = EmbeddingBackfillService(persistence: pc, ai: EmptyEmbeddingAIService(), batchSize: 1, throttleMs: 0)
+
+        let progress = await service.backfillAll()
+
+        #expect(progress.processed == 0)
+        #expect(progress.failed == 1)
+        #expect(progress.isRunning == false)
+        let after = await service.pendingCount()
+        #expect(after == 1, "empty vectors must not be written as successful embeddings")
+    }
+}
+
+private struct EmptyEmbeddingAIService: AIServiceProtocol {
+    private let base = MockAIService()
+
+    func summarize(text: String) async -> String? { await base.summarize(text: text) }
+    func analyzeMood(text: String) async -> Double { await base.analyzeMood(text: text) }
+    func extractThemes(text: String) async -> [String] { await base.extractThemes(text: text) }
+    func judgeThemeAliases(newTags: [String], inventory: [ThemeAliasJudgeCandidate]) async -> [ThemeAliasJudgeMatch] { [] }
+    func scanThemeAliasGroups(candidates: [ThemeAliasJudgeCandidate]) async throws -> [ThemeAliasJudgeGroup] { [] }
+    func embed(text: String) async -> [Float]? { [] }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    func askEvents(question: String, context entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        AsyncStream { continuation in continuation.finish() }
+    }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    func streamReportEvents(entries: [DiaryEntryData]) -> AsyncStream<StreamEvent> {
+        AsyncStream { continuation in continuation.finish() }
+    }
+
+    func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? { nil }
+    func parseImportedDiaries(rawText: String) async throws -> [ParsedDiaryEntry] { [] }
+}
+
+@MainActor
+struct DiaryDetailRefreshAIIndexTests {
+    @Test func refreshAIIndex_emptyEmbeddingDoesNotClearExistingEmbeddingOrThemes() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let entry = insertDiaryEntry(
+            context: context,
+            date: makeDate(year: 2024, month: 6, day: 1),
+            themes: ["旧主题"],
+            text: "work"
+        )
+        entry.setEmbedding([0.1, 0.2, 0.3])
+        try context.save()
+        let objectID = entry.objectID
+
+        await DiaryDetailView.refreshAIIndex(
+            for: objectID,
+            newText: "work",
+            ai: EmptyEmbeddingAIService()
+        )
+
+        let refreshed = try #require(context.existingObject(with: objectID) as? DiaryEntry)
+        #expect(refreshed.themeArray == ["旧主题"])
+        #expect(refreshed.embeddingVector == [Float(0.1), Float(0.2), Float(0.3)])
     }
 }
 

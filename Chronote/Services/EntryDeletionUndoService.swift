@@ -198,13 +198,17 @@ final class EntryDeletionUndoService {
         let imageFiles = snapshot.attachmentImageFileNames
         let audioFile = snapshot.audioFileName
         #if canImport(UIKit)
-        let backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "LumoryRecentDeletedArchive")
+        let backgroundTask = EntryDeletionBackgroundTaskHolder()
+        backgroundTask.id = UIApplication.shared.beginBackgroundTask(withName: "LumoryRecentDeletedArchive") {
+            Log.warning("[EntryDeletionUndo] recent-deleted archive background task expired", category: .persistence)
+            Self.endArchiveBackgroundTask(backgroundTask)
+        }
         #endif
         Task.detached(priority: .utility) {
             #if canImport(UIKit)
             defer {
                 Task { @MainActor in
-                    Self.endArchiveBackgroundTask(backgroundTaskID)
+                    Self.endArchiveBackgroundTask(backgroundTask)
                 }
             }
             #endif
@@ -229,7 +233,21 @@ final class EntryDeletionUndoService {
 
         let imageFiles = snapshot.attachmentImageFileNames
         let audioFile = snapshot.audioFileName
+        #if canImport(UIKit)
+        let backgroundTask = EntryDeletionBackgroundTaskHolder()
+        backgroundTask.id = UIApplication.shared.beginBackgroundTask(withName: "LumoryBulkWipeAttachmentCleanup") {
+            Log.warning("[EntryDeletionUndo] bulk-wipe attachment cleanup background task expired", category: .persistence)
+            Self.endArchiveBackgroundTask(backgroundTask)
+        }
+        #endif
         Task.detached(priority: .utility) {
+            #if canImport(UIKit)
+            defer {
+                Task { @MainActor in
+                    Self.endArchiveBackgroundTask(backgroundTask)
+                }
+            }
+            #endif
             await deleteAttachmentFiles(imageFileNames: imageFiles, audioFileName: audioFile)
         }
     }
@@ -238,12 +256,20 @@ final class EntryDeletionUndoService {
     var hasPending: Bool { pending != nil }
 
     #if canImport(UIKit)
-    private static func endArchiveBackgroundTask(_ taskID: UIBackgroundTaskIdentifier) {
-        guard taskID != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(taskID)
+    private static func endArchiveBackgroundTask(_ holder: EntryDeletionBackgroundTaskHolder) {
+        guard holder.id != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(holder.id)
+        holder.id = .invalid
     }
     #endif
 }
+
+#if canImport(UIKit)
+@MainActor
+private final class EntryDeletionBackgroundTaskHolder {
+    var id: UIBackgroundTaskIdentifier = .invalid
+}
+#endif
 
 /// 删除磁盘上的 attachment 文件。**必须**走 `DiaryEntry.delete{Image,Audio}FromDocuments` —
 /// 它们覆盖 iCloud / `LumoryImages` / `LumoryAudio` / 老扁平 `Documents/` 三层路径。

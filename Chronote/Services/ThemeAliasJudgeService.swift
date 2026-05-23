@@ -145,13 +145,13 @@ final class ThemeAliasJudgeService: ObservableObject {
         let actuallyNew = cleanedNewTags.filter { !inventoryKeys.contains(ThemeKey.make($0)) }
         guard !actuallyNew.isEmpty else { return }
 
-        lastJudgeAfterWriteAt = Date()
+        let previousJudgeAfterWriteAt = lastJudgeAfterWriteAt
+        let currentJudgeAfterWriteAt = Date()
+        lastJudgeAfterWriteAt = currentJudgeAfterWriteAt
         let matches = await ai.judgeThemeAliases(
             newTags: actuallyNew,
             inventory: inventory
         )
-
-        guard !matches.isEmpty else { return }
 
         // stale-write 防御:judge 期间(数秒~数十秒)用户可能已经把刚写的 entry 删了。
         // 此时仍 enqueue 会留 (entryID -> 已 tombstoned) 的 ghost suggestion,management view
@@ -163,9 +163,15 @@ final class ThemeAliasJudgeService: ObservableObject {
             return ((try? context.count(for: req)) ?? 0) > 0
         }
         guard entryStillExists else {
+            if let storedJudgeAfterWriteAt = lastJudgeAfterWriteAt,
+               abs(storedJudgeAfterWriteAt.timeIntervalSince(currentJudgeAfterWriteAt)) < 0.001 {
+                self.lastJudgeAfterWriteAt = previousJudgeAfterWriteAt
+            }
             Log.info("[ThemeAliasJudge] judgeAfterWrite: entry \(entryID) 已被删,跳过 enqueue", category: .ai)
             return
         }
+
+        guard !matches.isEmpty else { return }
 
         // 落 pending(过滤 negativePairs / 已合并 / 重复)。
         // **批量** sampleEntryIDs:一次 bg fetch 拿到所有 canonical tag 的引文 IDs,
@@ -247,6 +253,10 @@ final class ThemeAliasJudgeService: ObservableObject {
         do {
             groups = try await ai.scanThemeAliasGroups(candidates: inventory)
         } catch {
+            if Task.isCancelled || error is CancellationError {
+                scanProgress = ScanProgress(isRunning: false, phase: .idle, suggestionsAdded: 0)
+                return
+            }
             Log.error("[ThemeAliasJudge] scan failed: \(error)", category: .ai)
             let reason = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription

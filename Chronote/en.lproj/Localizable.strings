@@ -631,9 +631,6 @@
 /* E-05 superreview 2026-05-19: "Sync Now" 6s timeout was silent — surface the timeout state. */
 "同步未在 6 秒内完成,可能还在后台进行,请稍后再试。" = "Sync didn't finish within 6 seconds. It may still be running in the background — try again in a moment.";
 
-/* B-04 superreview 2026-05-19: stop button accessible label (reachable in skeleton state). */
-"停止生成" = "Stop generating";
-
 /* codex 终审 2026-05-19: SettingsView delete-all failure body was missing localization. */
 "删除暂时无法完成。请稍后再试。如果反复失败,先确认 iCloud 已完成同步,或重启 App 后再试。" = "Couldn't finish deleting. Try again in a moment. If it keeps failing, confirm iCloud has finished syncing, or restart the app and try again.";
 

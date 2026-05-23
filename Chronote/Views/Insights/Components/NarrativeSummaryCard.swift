@@ -271,26 +271,6 @@ struct NarrativeSummaryCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // Stop button 挂卡片顶层 overlay,这样 streaming 时不管 displayHeadline
-        // 是不是空,用户都能中断主动生成。老实现把它放在 headlineView 内,第一次生成
-        // 无 cache 时 headlineView 不渲染,停止按钮跟着不显,用户会被锁住等完整轮流。
-        .overlay(alignment: .topTrailing) {
-            if blocksUserTap {
-                Button {
-                    HapticManager.shared.impact(.medium)
-                    Task { await coordinator.cancel(range) }
-                } label: {
-                    Image(systemName: "stop.fill")
-                        .font(LumoryFonts.narrativeMeta)
-                        .foregroundStyle(Color.accentColor)
-                        .padding(6)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(10)
-                .accessibilityLabel(NSLocalizedString("停止生成", comment: "Stop narrative generation"))
-            }
-        }
         // wave16 (2026-05-13):去 accent tint + accent shadow 改 `.insightsCard()` —— 用户反馈
         // "浅蓝色突兀,跟下面 heatmap 不一组"。中性玻璃 + primary shadow 0.05 跟 WritingHeatmap
         // 同一 dashboard token,色系统一。hero 感靠字号 + padding + 第一位排序,不靠 tint。
@@ -369,8 +349,8 @@ struct NarrativeSummaryCard: View {
                 .textSelection(.enabled)
                 .animation(.smooth(duration: 0.4), value: displayHeadline)
 
-            // `arrow.up.right` 只在"有 headline 可点开沉浸阅读"时显;streaming + stop
-            // button 在 contentCard overlay 层,这里只剩 idle 状态下的箭头 affordance。
+            // `arrow.up.right` 只在"有 headline 可点开沉浸阅读"时显;streaming 时
+            // 整卡只给"正在生成中"轻反馈,不提供中断入口。
             if !isStreaming {
                 Image(systemName: "arrow.up.right")
                     .font(LumoryFonts.narrativeMeta)

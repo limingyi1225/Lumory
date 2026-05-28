@@ -142,9 +142,7 @@ struct RecordingLiveStatusView: View {
     }
 
     private var recordingDurationText: String {
-        let elapsedText = formattedDuration(currentTime: elapsed, totalDuration: 0)
-        let limitText = formattedDuration(currentTime: AudioRecorder.maximumDuration, totalDuration: 0)
-        return "\(elapsedText)/\(limitText)"
+        formattedDuration(currentTime: elapsed, totalDuration: 0)
     }
 }
 

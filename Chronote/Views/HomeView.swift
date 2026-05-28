@@ -221,7 +221,7 @@ struct HomeView: View {
                 recorder.maxDurationRecording = nil
                 if accepted {
                     LumoryToastCenter.shared.show(
-                        NSLocalizedString("录音已到 10 分钟上限,已自动停止。", comment: "Recording auto-stopped after max duration"),
+                        NSLocalizedString("录音已自动停止。", comment: "Recording auto-stopped after max duration"),
                         severity: .info
                     )
                 } else if !inputVM.isSending {

@@ -37,11 +37,12 @@ paths:
 写日记 / 删日记 / 派生缓存清理:
 - [EntryCreationService.swift](Chronote/Services/EntryCreationService.swift) — `@MainActor enum`。`create(_:in:viewContext:ai:saveAction:aliasJudge:requestReminderReschedule:) async -> Result(.saved(UUID) / .failed)`。3 个 `*OffMain` helper `nonisolated static`(audio iCloud / image disk / NSKeyedArchiver sync blob)+ `performAIWriteback async -> Bool`(stale-write guard + fire-and-forget 生产 / 单测可 await)。`saveAction` 默认 `{ try $0.save() }`(单测可注入 throwing spy 测 save 失败路径),`aliasJudge` 默认调 `ThemeAliasJudgeService.shared.judgeAfterWrite`,`requestReminderReschedule` 默认调 `ReminderService.shared.requestReschedule`(注入闭包让单测能传 `{}` 防 reminder 偷调 `.shared`)。
 - [EntryDeletionUndoService.swift](Chronote/Services/EntryDeletionUndoService.swift) — 单例 `@MainActor`,4 秒撤销窗口 + attachment 延迟清。`register(snapshot:)` 启动撤销 task,`undo(into:)` 从快照重建 entry 并调 `EntryWipeOrchestrator.performSingleDeleteCleanup()`,`commitPendingNow()` 兜底清。
-- [EntryWipeOrchestrator.swift](Chronote/Services/EntryWipeOrchestrator.swift) — `@MainActor enum`。**派生缓存清理唯一入口**。两条 API:
+- [EntryWipeOrchestrator.swift](Chronote/Services/EntryWipeOrchestrator.swift) — `@MainActor enum`。**派生缓存清理唯一入口**。三条 API:
   - `performBulkWipeCleanup() async`:5 件套 — `ReminderService.requestReschedule + ThemeAliasResolver.resetForBulkEntryWipe(保留 negativePairs)+ PromptSuggestionEngine.clearCache + InsightsResultCache.clear + WidgetSnapshotService.clear(写 empty + reload widget,`await` 因后台 grace 切 unstructured Task)`。callsite:`SettingsEntryDeletionService.deleteAll` / `DatabaseRecoveryService.executeRecovery`。
   - `performSingleDeleteCleanup()`:4 件 — Reminder reschedule + Prompt cache clear + Insights cache clear + alias 孤儿清理(fire-and-forget)+ `WidgetSnapshotService.invalidateCaches()`。**不**主动 clear widget,依赖 `NSManagedObjectContextDidSave` 观察者重抓。callsite:`HomeView.deleteEntry` / `DiaryDetailView` / `ThemeFilteredEntriesView` / `PointDetailSheet`。
   - `EntryDeletionUndoService.undo` 也调 `performSingleDeleteCleanup()` —— 撤销复盘"集合变化"。
-  - **写新删除路径必须走这俩 API**,不要重新硬编码五/四件套 — 漏一个 → banner / 通知 body / 别名管理页 / Insights / 主屏 widget 引用 ghost entry。
+  - `performImportCleanup() async`:bulk import(写路径,ADD 突变)后清理 — `InsightsResultCache.clear` + `markNarrativeChangedNow`(narrative invalidatedBefore marker 前移)+ `finishNarrativeInvalidationAfterEntryChange`(cancel 在飞 precompute)+ 触发一次 `.month` narrative 重算。**不动 reminder / alias / widget snapshot 文件**(import 是 ADD 不产生孤儿;widget 走 save 观察者重抓)。callsite:`CoreDataImportService.importEntries` 成功分支,**排在 `PromptSuggestionEngine.refreshIfNeeded()` 网络刷新之前**(失效廉价、先跑,避免被 AI prompt 生成拖延让用户立刻开 Insights 仍命中 stale)。
+  - **写新删除 / 导入路径必须走这三条 API**,不要重新硬编码五/四/N 件套 — 漏一个 → banner / 通知 body / 别名管理页 / Insights / 主屏 widget / narrative 引用 ghost entry。
 
 AI / 文本 / 嵌入:
 - [AIService.swift](Chronote/Services/AIService.swift) — `AIServiceProtocol` + `MockAIService`(单测用)。
@@ -71,7 +72,7 @@ CloudKit / 数据库 / 导入导出:
 - [DatabaseRecoveryService.swift](Chronote/Services/DatabaseRecoveryService.swift) — 启动时 store 加载失败的恢复(带备份与用户弹窗)。
 - [DataMigrationService.swift](Chronote/Services/DataMigrationService.swift) — v2 JSON → CoreData 一次性迁移(启动时 `Task.detached`)。
 - `*BackfillService.swift` — `WordCountBackfillService`(启动 + remote-change 自动跑);`EmbeddingBackfillService` / `ThemeBackfillService` **不 auto**,由用户主动触发(Settings 一键重建索引或单独入口)。`runningTask` `@MainActor` 隔离,所有 start/cancel race 锁死。
-- [CoreDataImportService.swift](Chronote/Services/CoreDataImportService.swift) · [DiaryExportService.swift](Chronote/Services/DiaryExportService.swift) — 导入导出。**导入解析**走 `AIService.parseImportedDiaries`,没有独立 `DiaryImportService`。
+- [CoreDataImportService.swift](Chronote/Services/CoreDataImportService.swift) · [DiaryExportService.swift](Chronote/Services/DiaryExportService.swift) — 导入导出。**导入解析**走 `AIService.parseImportedDiaries`,没有独立 `DiaryImportService`。**导入成功(`succeeded > 0`)后走 `EntryWipeOrchestrator.performImportCleanup()`** 失效 Insights / Narrative 缓存 + 触发 `.month` 重算(import 是写路径,跟创建/编辑/删除一样改派生缓存依赖的 entry 集合,否则导入的历史日记在 AI 回顾里跨会话 ghost);cleanup 排在 `refreshIfNeeded()` 之前。
 - [UITestSampleData.swift](Chronote/Services/UITestSampleData.swift) — `#if DEBUG`,启动参数 `-LumoryUITestSampleData YES` 让 `PersistenceController.shared` 自动构造 in-memory store(NSInMemoryStoreType + url=/dev/null,完全旁路 CloudKit),`seedIfNeeded` 种 30 条手写 + ~60 条模板化样例。Guard 强制要求 NSInMemoryStoreType。
 
 提醒 / 通知 / Widget:

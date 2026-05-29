@@ -28,8 +28,9 @@ per-install(客户端 `X-Install-Id` = Keychain UUID,`InstallIdentity.current`)+
 
 - `chat` messages 总 char `MAX_MESSAGES_CHARS`(默认 32000,**十进制非 32768**)。
 - `embedding` input `MAX_EMBEDDING_INPUT_CHARS`(默认 8192)。
-- `transcription` 文件 `MAX_TRANSCRIPTION_FILE_BYTES`(默认 25 MB,OpenAI 上限),走 multer memoryStorage + MIME 白名单(`audio/mp4` / `m4a` / `mpeg` / `wav` / `webm` / `ogg` / `flac`)。
+- `transcription` 文件 `MAX_TRANSCRIPTION_FILE_BYTES`(默认 25 MB,OpenAI 上限),走 multer memoryStorage + MIME 白名单(`audio/mp4` / `m4a` / `x-m4a` / `mpeg` / `wav` / `x-wav` / `webm` / `ogg` / `flac`,共 9 项 —— `x-m4a` / `x-wav` 是同格式变体)。
 - `REQUEST_TIMEOUT_MS=120_000`(和客户端 `timeoutIntervalForResource=300s` 对齐,给长 SSE 流留余量)。
+- `STREAM_IDLE_TIMEOUT_MS=120_000`(流式 SSE 的 **mid-stream idle 上限**)。axios 的 `timeout` 对 `responseType:'stream'` 只管到 TTFB(响应头一到就 settle / `isDone=true`,socket 级 `req.setTimeout` 的 handler 之后 no-op),**管不了 chunk 间空闲**。流式 handler 自挂 idle 计时器:每收到 chunk 重置,超时则带 `code:'UPSTREAM_IDLE_TIMEOUT'` `destroy` upstream → 走 `'error'` cleanup 链让客户端断流重试。防"上游连上吐头后卡死不吐数据"白占连接到客户端 300s。
 
 ## 转写路由 model hardcode
 

@@ -38,7 +38,8 @@ token 化的:`AnimationConfig.toast`(0.34/0.86)/ `.bannerAppear`(0.42/0.86)/ `.b
 - **"关闭"** = 退出只读视图(全屏图片 viewer / 详细报告 / 别人写好的内容);
 - **"完成"** = 提交所有更改(编辑保存 / 表单提交)。
 
-例:AskPastView 关闭时取消 stream task → 文案是"取消";SyncDiagnostic 全屏报告 → "完成"。
+例:正在编辑 / 表单填一半 → "取消";只读图片 viewer / 详细报告 → "关闭";SyncDiagnostic 全屏报告 → "完成"。
+- ⚠️ **已知不一致(待 review)**:`AskPastView` 的 close 按钮当前用 **"关闭"**([AskPastView.swift:103](Chronote/Views/Insights/AskPastView.swift:103) `NSLocalizedString("关闭")`),但它关闭时会 cancel 在跑的 stream task —— 按上面规则严格说该归"取消"。文案与规则不完全对齐,改文案(→"取消")还是认它是"只读回顾视图用关闭",是个产品取舍,先标记。
 
 ## DateFormatter
 

@@ -84,6 +84,15 @@ function modelAllowlistEnv(name, defaults) {
 // URLSessionConfiguration.timeoutIntervalForResource = 300s 对齐（客户端传输层兜底更长，
 // 保证上游超时在服务器侧先触发、客户端能看到干净的 504 而不是 "网络断了"）。
 const REQUEST_TIMEOUT_MS = positiveNumberEnv('OPENAI_TIMEOUT_MS', 120_000);
+// (megareview P2)流式 SSE 的 mid-stream idle 上限。axios 的 `timeout` 对 responseType:'stream'
+// 只管到响应头(TTFB)—— settle 后 isDone=true,socket 级 req.setTimeout 的 handler 直接 no-op,
+// **管不了 chunk 之间的空闲**。一个连上了、吐了头、然后卡死的上游,axios 不会主动掐,只能等
+// 客户端 timeoutIntervalForResource=300s 兜底,期间白占一条连接 + upstream socket。这里给流式
+// 自己挂 idle 计时器:每收到 chunk 重置,超过本值没新数据就 destroy upstream(走 'error' cleanup
+// 链让客户端拿到断流并由 NetworkRetryHelper 重试)。取 120s = REQUEST_TIMEOUT_MS:既给 reasoning
+// 模型首 token 前的思考留足余量(narrative reasoning=low/medium,首 token 一般 <30s),又远小于
+// 客户端 300s 故能在客户端放弃前先回收。调小要权衡:别小于上游最慢的 chunk 间隔。
+const STREAM_IDLE_TIMEOUT_MS = positiveNumberEnv('OPENAI_STREAM_IDLE_TIMEOUT_MS', 120_000);
 const MAX_MESSAGES_CHARS = positiveNumberEnv('MAX_MESSAGES_CHARS', 32_000);
 const MAX_EMBEDDING_INPUT_CHARS = positiveNumberEnv('MAX_EMBEDDING_INPUT_CHARS', 8_192);
 const MAX_CHAT_COMPLETION_TOKENS = positiveNumberEnv('MAX_CHAT_COMPLETION_TOKENS', 16_384);
@@ -533,7 +542,31 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         responseType: 'stream',
         timeout: REQUEST_TIMEOUT_MS,
         signal: abortController.signal,
+        // (megareview P3)对齐其余 3 处 axios(non-stream chat / embeddings / transcription)——
+        // 上游地址硬编码到可信 OPENAI_BASE_URL,不应跟随任何 3xx 跳转(defense-in-depth:
+        // 避免被重定向到别处时携带 Authorization bearer)。此前唯独流式漏设。
+        maxRedirects: 0,
       });
+
+      // (megareview P2)mid-stream idle 计时器(见 STREAM_IDLE_TIMEOUT_MS 处长注释)。
+      // axios timeout 对流式只管 TTFB,管不了 chunk 间空闲,这里自己兜。每收到 chunk 重置;
+      // 超时则带 sentinel destroy upstream → 落到下面的 'error' handler(非 CLIENT_DISCONNECT
+      // 分支)log.error + res.destroy → 客户端断流重试。clearIdleTimer 幂等,end/error 都清。
+      let idleTimer = null;
+      const clearIdleTimer = () => {
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
+      };
+      const armIdleTimer = () => {
+        clearIdleTimer();
+        idleTimer = setTimeout(() => {
+          const idleError = new Error('upstream idle timeout');
+          idleError.code = 'UPSTREAM_IDLE_TIMEOUT';
+          upstream.data.destroy(idleError);
+        }, STREAM_IDLE_TIMEOUT_MS);
+      };
 
       // (2026-05-15 superreview-4 P1)`'error'` listener 必须**在 activeStreams.add 之前**挂。
       // Node Readable 在无 'error' listener 时 emit 'error' → `process.emit('uncaughtException')`
@@ -542,6 +575,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       // 同 microtick 内 abort,upstream 立即 emit error)。这里先把 listener 挂上再做 add /
       // 'data' / 'end',保证 race 窗口为 0。
       upstream.data.on('error', (error) => {
+        clearIdleTimer();
         activeStreams.delete(upstream.data);
         res.off('close', abortUpstream);
         // (2026-05-15 superreview-2 P1)区分 client mid-stream 中断和真上游错误。
@@ -565,6 +599,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
       });
 
       activeStreams.add(upstream.data);
+      armIdleTimer();
 
       let sawDone = false;
       let sseBuffer = '';
@@ -583,6 +618,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
           upstream.data.destroy(clientDisconnect);
           return;
         }
+        armIdleTimer(); // 收到有效 chunk,重置 idle 计时器
         const text = chunk.toString('utf8');
         const combined = sseBuffer + text;
         const frames = combined.split(/\r?\n\r?\n/);
@@ -604,6 +640,7 @@ app.post('/api/openai/chat/completions', async (req, res) => {
         }
       });
       upstream.data.on('end', () => {
+        clearIdleTimer();
         activeStreams.delete(upstream.data);
         res.off('close', abortUpstream);
         if (res.destroyed) {

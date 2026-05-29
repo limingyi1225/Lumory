@@ -107,4 +107,27 @@ enum EntryWipeOrchestrator {
     static func finishNarrativeInvalidationAfterEntryChange() async {
         await NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()
     }
+
+    /// 批量导入(bulk-ADD)后的派生缓存失效。导入跟单删一样改变了派生缓存依赖的 entry 集合,
+    /// 但语义是"加"不是"删",所以**只跑会读到 ghost 聚合的两处失效**,不照搬单删的全套:
+    ///   - **不动 reminder**:导入多是历史日期,不改变当前周期的达标判断(导入服务返回后
+    ///     调用方若想兜底可自行 `requestReschedule`,这里不揽)。
+    ///   - **不清 alias**:导入是 ADD,不产生指向已删 entry 的孤儿 pending。
+    ///   - **不动 widget snapshot 文件**:`viewContext.save()` 已触发 `NSManagedObjectContextDidSave`
+    ///     观察者 `requestRefresh`,widget 会从 CoreData 重抓。
+    ///
+    /// 真正要失效的是两处会服务"导入前"聚合的缓存(megareview P2 — import 写路径绕过了等价失效):
+    ///   - `InsightsResultCache`:SWR warm cache 会显示导入前的 themes/mood/streak(后台 reload 自愈)。
+    ///   - Narrative cache:`invalidatedBefore` marker 持久化在 UserDefaults,不前移则导入的历史日记
+    ///     在 AI 回顾里**跨会话不可见**,直到别的写/删/编辑路径碰巧 invalidate。
+    /// 最后主动触发一次 `.month` narrative 重算,让用户立刻看到含新日记的回顾(对齐
+    /// `EntryCreationService` 单条创建后的行为)。
+    ///
+    /// 调用方负责:导入的 `viewContext.save()` 已成功(本函数只清派生缓存,不动 CoreData)。
+    static func performImportCleanup() async {
+        InsightsResultCache.shared.clear()
+        markNarrativeChangedNow()
+        await finishNarrativeInvalidationAfterEntryChange()
+        await NarrativePrecomputeService.shared.requestRefreshIfNeeded(for: .month)
+    }
 }

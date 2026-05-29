@@ -66,6 +66,48 @@ struct AIConversationTests {
         #expect(conv.citedEntryUUIDs == [id1, id2])
     }
 
+    // (megareview 待确认 W11)`persistConversationIfNeeded` 把 SSE `.truncated` / `.failed` 的
+    // `isIncomplete` / `errorText` 落进 AskPast payload,但此前 round-trip 测试这两个字段恒为
+    // false/nil,没锁住"非默认值也能正确编解码"。
+    //
+    // **两个字段互斥**(见 AskPastView.AskMessage 注释):`isIncomplete`=断在中间(有半截正文、
+    // errorText 为 nil);`errorText`=根本没开始(零内容)。故 fixture 用两条 AI 消息分别覆盖
+    // 这两个**真实**状态,而非在一条消息上同时置位(那是生产中不会出现的非法组合)。
+    @Test func insertAskPast_roundTripsIncompleteAndErrorText() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+
+        let payload = AIConversation.AskPastPayload(messages: [
+            .init(role: .user, text: "去年这个月我在忙什么?", citedEntryIds: [], isIncomplete: false, errorText: nil),
+            // 状态 A —— .truncated 断在中间:有半截正文,isIncomplete=true,errorText=nil。
+            .init(role: .ai, text: "你那阵子在准备一场演讲——", citedEntryIds: [], isIncomplete: true, errorText: nil),
+            // 状态 B —— 流彻底失败(零内容):text 空,isIncomplete=false,errorText 有值。
+            .init(role: .ai, text: "", citedEntryIds: [], isIncomplete: false, errorText: "网络中断,生成失败")
+        ])
+
+        let conv = try AIConversation.insertAskPast(
+            in: context,
+            title: "去年这个月我在忙什么?",
+            payload: payload,
+            citedEntryIds: []
+        )
+        try context.save()
+
+        let decoded = try #require(conv.askPastPayload)
+        #expect(decoded.messages.count == 3)
+        // user 消息默认值保持
+        #expect(decoded.messages[0].isIncomplete == false)
+        #expect(decoded.messages[0].errorText == nil)
+        // 状态 A:truncated —— isIncomplete=true / errorText=nil round-trip 不丢
+        #expect(decoded.messages[1].isIncomplete == true)
+        #expect(decoded.messages[1].errorText == nil)
+        #expect(decoded.messages[1].text == "你那阵子在准备一场演讲——")
+        // 状态 B:failed —— isIncomplete=false / errorText 有值 round-trip 不丢
+        #expect(decoded.messages[2].isIncomplete == false)
+        #expect(decoded.messages[2].errorText == "网络中断,生成失败")
+        #expect(decoded.messages[2].text == "")
+    }
+
     @Test func askPastPayload_returnsNil_whenKindIsNarrative() async throws {
         // 类型 gate:误用 askPast 字段访问 narrative 记录返 nil(防类型混淆 bug)。
         let persistence = PersistenceController(inMemory: true)

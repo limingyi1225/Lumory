@@ -141,6 +141,18 @@ class CoreDataImportService: ObservableObject {
         // 识别要走 Settings 的"扫描已有主题"(scanAllHistory)显式触发。
         if succeeded > 0 {
             Task { @MainActor in
+                // (megareview P2)bulk import 是写路径,跟单条创建/编辑/删除一样改变了派生缓存
+                // 依赖的 entry 集合,但此前只刷了 prompt 池,**漏了 Insights / Narrative 失效**:
+                // 导入的历史日记在 AI 回顾里 ghost(narrative invalidatedBefore marker 不前移 →
+                // 跨会话 stale),Insights warm cache 也服务导入前聚合。走 orchestrator 统一失效
+                // + 触发一次 .month 重算。
+                //
+                // **顺序要紧(codex review)**:cleanup 必须在 refreshIfNeeded 之前 await ——
+                // refreshIfNeeded 在 fingerprint 变更后会发起 AI/网络 prompt 生成(可能数秒),
+                // 而 cleanup 是廉价的本地失效(cache clear + marker + 调度 precompute)。若把
+                // cleanup 排在网络刷新之后,用户导入后立刻打开 Insights 仍会命中 stale 缓存
+                // (失效还没跑)。先失效、再刷 prompt。
+                await EntryWipeOrchestrator.performImportCleanup()
                 await PromptSuggestionEngine.shared.refreshIfNeeded()
             }
         }

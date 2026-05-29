@@ -16,7 +16,6 @@ import PhotosUI
 import Foundation
 
 extension HomeView {
-
     /// handleSendAction 内部抓取 `inputVM` / `recordingVM` / `photoVM` 三个 VM 的当前值,失败回滚时复原。
     /// `internal` 因 extension scope 默认无 private 修饰;只在本文件消费,无外部 caller
     /// (grep `SendSnapshot` 全仓 4 处全在 +Send.swift)。
@@ -253,6 +252,8 @@ extension HomeView {
                         Self.sendFailureMessage(error: saveResult.failureError),
                         severity: .warning
                     )
+                    // 落库失败时盘上录音文件解析不到 → 复原 composer 会静默丢弃录音,给 toast(helper 见下,控函数行长)。
+                    notifyIfAudioLostOnFailedSave(audioToSend: audioToSend)
                 }
                 return
             }
@@ -294,6 +295,20 @@ extension HomeView {
 
             Log.info("[HomeView SendButton] Send action completed", category: .ui)
         }
+    }
+
+    /// 落库失败复原 composer 时,若录音文件在盘上已解析不到,复原会静默丢弃它。
+    /// 跟成功路径"录音转写未完成" toast 对齐反馈强度,提示用户录音没回来。
+    /// (抽成 helper 是为了把 handleSendAction 函数体压回 SwiftLint 200 行阈值内。)
+    func notifyIfAudioLostOnFailedSave(audioToSend: String?) {
+        let restorableAudio = audioToSend.flatMap { fileName in
+            LumoryAttachmentPaths.existingAudioURL(fileName: fileName) == nil ? nil : fileName
+        }
+        guard audioToSend != nil, restorableAudio == nil else { return }
+        LumoryToastCenter.shared.show(
+            NSLocalizedString("录音文件已丢失", comment: "Toast when a recording file can't be restored after a failed save"),
+            severity: .warning
+        )
     }
 
     /// AI 揭晓后,等用户的可编辑窗口收尾再返回。规则:

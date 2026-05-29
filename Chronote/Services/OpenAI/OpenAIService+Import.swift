@@ -279,10 +279,6 @@ extension OpenAIService {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        let fullDate = ISO8601DateFormatter()
-        fullDate.formatOptions = [.withFullDate]
-        if let date = fullDate.date(from: trimmed) { return date }
-
         let internetDateTime = ISO8601DateFormatter()
         internetDateTime.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let date = internetDateTime.date(from: trimmed) { return date }
@@ -294,7 +290,8 @@ extension OpenAIService {
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
         df.calendar = Calendar(identifier: .gregorian)
-        df.timeZone = TimeZone(secondsFromGMT: 0)
+        // megareview P1: 裸日期按本地时区解析,跟 fingerprint/display 的 Calendar.current 对齐
+        df.timeZone = Calendar.current.timeZone
         for format in ["yyyy-MM-dd", "yyyy/MM/dd"] {
             df.dateFormat = format
             if let date = df.date(from: trimmed) { return date }

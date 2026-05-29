@@ -263,12 +263,20 @@ final class PersistenceController {
                     case .setup:
                         Log.info("[PersistenceController] CloudKit setup completed", category: .persistence)
                     case .import:
-                        Log.error("[PersistenceController] CloudKit import: \(event.succeeded ? "succeeded" : "failed")", category: .persistence)
+                        if event.succeeded {
+                            Log.info("[PersistenceController] CloudKit import: succeeded", category: .persistence)
+                        } else {
+                            Log.error("[PersistenceController] CloudKit import: failed", category: .persistence)
+                        }
                         if let error = event.error {
                             Log.error("[PersistenceController] Import error: \(error)", category: .persistence)
                         }
                     case .export:
-                        Log.error("[PersistenceController] CloudKit export: \(event.succeeded ? "succeeded" : "failed")", category: .persistence)
+                        if event.succeeded {
+                            Log.info("[PersistenceController] CloudKit export: succeeded", category: .persistence)
+                        } else {
+                            Log.error("[PersistenceController] CloudKit export: failed", category: .persistence)
+                        }
                         if let error = event.error {
                             Log.error("[PersistenceController] Export error: \(error)", category: .persistence)
                         }

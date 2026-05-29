@@ -19,11 +19,10 @@ extension DiaryEntry {
     var displayText: String {
         let raw = summary ?? String((text ?? "").prefix(30)) + "..."
         // 过滤掉句号、星号和引号
-        let filtered = raw
-            .replacingOccurrences(of: ".", with: "")
-            .replacingOccurrences(of: "。", with: "")
-            .replacingOccurrences(of: "*", with: "")
-            .replacingOccurrences(of: "\"", with: "")
+        // 4 个目标字符都是单字符删除(replace with ""),单次扫描等价 4 次 replacingOccurrences,
+        // 输出字节级一致,列表行渲染少 3 趟全串扫描。
+        let removeSet: Set<Character> = [".", "。", "*", "\""]
+        let filtered = String(raw.filter { !removeSet.contains($0) })
         return filtered
     }
 

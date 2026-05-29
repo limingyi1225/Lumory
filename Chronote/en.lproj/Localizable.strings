@@ -677,3 +677,8 @@
 "当前待审 %d 条" = "%d pending now";
 "移除照片" = "Remove photo";
 "导出完成,但现在无法打开分享菜单。回到 Lumory 后可以重新导出。" = "Export completed, but Lumory can't open the share sheet right now. Return to Lumory and export again.";
+
+/* megareview i18n fix */
+"仅当 App 启动时报错 / 反复同步失败时使用。会重建本地数据库并尝试从 iCloud 恢复,期间数据不可访问。" = "Use this only if the app fails to launch or sync keeps failing. It rebuilds the local database and tries to recover from iCloud; your data is unavailable during the process.";
+"清除后 Insights「历史回顾」里的「故事」记录会全部消失,下次进入可重新生成。日记本身不受影响。" = "After clearing, the Story records under Insights › History will all be removed and can be regenerated next time you open it. Your diary entries themselves are not affected.";
+"录音文件已丢失" = "Recording file was lost";

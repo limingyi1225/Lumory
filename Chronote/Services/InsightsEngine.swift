@@ -107,10 +107,12 @@ final class InsightsEngine {
     /// 该 range 内日记总数。NarrativeSummaryCard 判 stale + entryCount<3 disable。
     func entryCount(in range: DateInterval) async -> Int {
         await persistence.container.performBackgroundTask { context -> Int in
+            // 与 fetchEntryData 对齐:cap 到 now,防未来日期 entry 在 count 与 themes/heatmap 间发散
+            let now = Date()
             let request: NSFetchRequest<DiaryEntry> = DiaryEntry.fetchRequest()
             request.predicate = NSPredicate(
                 format: "date >= %@ AND date <= %@",
-                range.start as NSDate, range.end as NSDate
+                range.start as NSDate, min(range.end, now) as NSDate
             )
             return (try? context.count(for: request)) ?? 0
         }
@@ -120,11 +122,13 @@ final class InsightsEngine {
     /// nil = range 内无日记。
     func mostRecentEntryDate(in range: DateInterval) async -> Date? {
         await persistence.container.performBackgroundTask { context -> Date? in
+            // 与 fetchEntryData 对齐:cap 到 now,防未来日期 entry 在 count 与 themes/heatmap 间发散
+            let now = Date()
             let request: NSFetchRequest<NSDictionary> = NSFetchRequest<NSDictionary>(entityName: "DiaryEntry")
             request.resultType = .dictionaryResultType
             request.predicate = NSPredicate(
                 format: "date >= %@ AND date <= %@",
-                range.start as NSDate, range.end as NSDate
+                range.start as NSDate, min(range.end, now) as NSDate
             )
             request.propertiesToFetch = ["date"]
             request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]

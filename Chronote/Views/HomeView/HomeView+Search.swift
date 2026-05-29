@@ -235,7 +235,8 @@ extension HomeView {
                 request.predicate = NSCompoundPredicate(orPredicateWithSubpredicates: predicates)
                 request.sortDescriptors = [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
                 request.fetchLimit = 50
-                request.propertiesToFetch = ["id"]
+                // 不设 propertiesToFetch:它只对 .dictionaryResultType 生效,
+                // 这里是默认 .managedObjectResultType 的 fetch,设了也被静默忽略(下面只取 objectID)。
                 guard let entries = try? context.fetch(request) else { return [] }
                 return entries.map { $0.objectID }
             }

@@ -9,7 +9,7 @@ import Combine
 // 跟 body 都由 gpt-5.5 一并生成,客户端 stream 收完后用 NarrativeStreamSplitter 一次
 // split。streaming 期间用 sparks animate + thinking caption 占位。
 //
-// **生成策略**:.month 由 NarrativePrecomputeService 在写日记后 60s debounce 后台
+// **生成策略**:.month 由 NarrativePrecomputeService 在写日记后 8s debounce 后台
 // 自动重生(且 entryCount ≥ 3 + cache stale 才触发)。前台卡片不因 stale 自动开流 —
 // 用户正在看 Insights 时,summary 不应凭空改写。.all/.quarter/.year 也都必须手动点
 // "生成回顾"。

@@ -14,7 +14,7 @@ import CoreData
 // `generating` / `streamFailure` 渲染状态机,生成结果走 CoreData save → 卡片 onChange /
 // onReceive 回灌。
 //
-// **跟 NarrativePrecomputeService 的分工**:Precompute 是写日记后 60s debounce 的**后台
+// **跟 NarrativePrecomputeService 的分工**:Precompute 是写日记后 8s debounce 的**后台
 // 自动**预生成(只 .month);本 coordinator 是**用户主动触发**(任意 range)。两者 persist
 // 到同一张 AIConversation 表 —— coordinator 在 persist 前 `await
 // NarrativePrecomputeService.shared.cancelPendingAndBumpGeneration()` 去重,跟原
@@ -31,7 +31,6 @@ import CoreData
 @MainActor
 @Observable
 final class NarrativeGenerationCoordinator {
-
     /// 一次失败 / 截断且**没产出可持久化 body** 的记录。`occurredAt` 让卡片能判断「之后有
     /// 更新的 cache 写进来了(用户重试成功 / precompute 后台补上)」→ 失败标记作废。
     struct StreamFailure: Equatable {

@@ -301,7 +301,14 @@ Diary Entries:
     }
 
     private static func narrativeEntryBlock(_ entry: DiaryEntryData) -> String {
-        "日期: \(entry.date)\n心情分数: \(Int(entry.moodValue * 100))\n摘要: \(entry.summary)\n正文: \(entry.text)"
+        // **2026-05-28 删 `摘要:` 字段**:浓缩 prompt 同时塞 summary + 全文 = 冗余 —— summary
+        // 本就从 text 派生,gpt-5.5 拿到全文不需要再看一句 AI 缩写,白占 token 预算(同预算
+        // 下能塞进去的日记篇数变少)。更关键:`summary` 是写日记后 `performAIWriteback` 异步
+        // 回写的字段,date / moodValue / text 都是创建即存在 —— 留着它会让 narrative 依赖回写
+        // 落地,逼 NarrativePrecompute 拉长 debounce 空等。删掉后 narrative 只依赖创建即有的
+        // 字段,precompute debounce 得以收短。唯一放弃的边角收益:单篇超长被整块前截时,
+        // summary 原本能作为被切掉部分的梗概存活 —— 极少见,可接受。
+        "日期: \(entry.date)\n心情分数: \(Int(entry.moodValue * 100))\n正文: \(entry.text)"
     }
 
     private static func trimToUTF16Limit(_ text: String, _ maxUTF16Units: Int) -> String {

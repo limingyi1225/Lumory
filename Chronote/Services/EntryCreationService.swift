@@ -23,7 +23,6 @@ import UIKit
 /// - `persistence`:`StreakMilestoneService.evaluateAfterSave` 要的 store 句柄,单测传自己的实例。
 @MainActor
 enum EntryCreationService {
-
     struct Input {
         let text: String
         let audioFileName: String?
@@ -173,7 +172,7 @@ enum EntryCreationService {
             }
         }
 
-        // wave14 — 写日记成功后,fire-and-forget 触发 .month 浓缩重生(60s debounce + 守卫)。
+        // wave14 — 写日记成功后,fire-and-forget 触发 .month 浓缩重生(8s debounce + 守卫)。
         // 让用户下次进 InsightsView 顶部能看到反映新日记的浓缩。.all/.quarter/.year 不挂自动,
         // 用户主动点"为我浓缩"才生成。
         Task.detached(priority: .background) {

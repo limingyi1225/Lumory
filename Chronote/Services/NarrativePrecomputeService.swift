@@ -3,7 +3,7 @@ import CoreData
 
 // MARK: - NarrativePrecomputeService
 //
-// 写日记完成后,后台 60s debounce 重生当前 .month 浓缩 — 把"AI 总结"从用户主动
+// 写日记完成后,后台短 debounce(8s)重生当前 .month 浓缩 — 把"AI 总结"从用户主动
 // 触发变成"已经替你读完,你打开 InsightsView 直接看到结论"。**只对 .month 自动**;
 // .all/.quarter/.year 是长程总结(加 1 篇日记边际 < 1%),且 API 一次 ~$0.05-0.10,
 // 全量预生成成本不划算 → 用户切到时手动点"为我浓缩"。
@@ -15,14 +15,18 @@ import CoreData
 //  - 失败静默 → Log.warning,不打扰用户
 //
 // **AI 注入 seam**:`init(persistence:engine:debounce:)` — prod 用 `.shared` /
-// `InsightsEngine.shared` / 60s;test 用 mock InsightsEngine + 短 debounce(50ms)。
+// `InsightsEngine.shared` / 8s;test 用 mock InsightsEngine + 短 debounce(50ms)。
 
 actor NarrativePrecomputeService {
-
     static let shared = NarrativePrecomputeService(
         persistence: .shared,
         engine: .shared,
-        debounce: .seconds(60)
+        // **2026-05-28 60s → 8s**:原 60s 主要是空等 `performAIWriteback` 把 `entry.summary`
+        // 回写落地(narrative prompt 旧版含「摘要」字段)。删掉 prompt 里的摘要后(见
+        // `OpenAIService.narrativeEntryBlock`),narrative 只依赖创建即存在的 date/mood/text,
+        // 不必再等回写 —— debounce 退化成纯「settle 窗口」:给刚保存的 entry 落地 + 合并极少见
+        // 的「连建两篇」。编辑已有日记不触发 precompute(只 create 路径调),所以窗口可以很短。
+        debounce: .seconds(8)
     )
 
     private let persistence: PersistenceController

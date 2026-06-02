@@ -82,6 +82,8 @@ lumory-backend.tar.gz
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+# 临时 / 一次性 workflow 脚本不入库;已 track 的 megareview.mjs / superreview.mjs 仍照常显示 diff
+.claude/workflows/
 
 # oh-my-claudecode local state (sessions / notepad / project-memory / plans / logs)
 .omc/

@@ -65,7 +65,9 @@ if (!ANTHROPIC_API_KEY) {
   log.fatal('Missing ANTHROPIC_API_KEY. Set it in server/.env');
   process.exit(1);
 }
-log.info({ keyLength: ANTHROPIC_API_KEY.length }, 'Loaded ANTHROPIC_API_KEY');
+// 不记 keyLength —— CodeQL js/clear-text-logging 把 `.length` 也算敏感数据流(PR #6 CI 告警)。
+// 旁边 OPENAI 行是历史代码暂不动;这里只确认加载成功。
+log.info('Loaded ANTHROPIC_API_KEY');
 
 // 客户端在每个请求里要带 `X-App-Secret: <APP_SHARED_SECRET>` 才放行。
 // 没配就让 server 在启动时直接拒绝跑（fail-closed），避免无意识把不鉴权的代理暴露出去。

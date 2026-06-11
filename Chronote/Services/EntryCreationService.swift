@@ -253,7 +253,7 @@ enum EntryCreationService {
         do {
             try viewContext.save()
             Log.info(
-                "[EntryCreationService] 摘要+主题+索引已更新: themes=\(committedThemes.count), hasEmbedding=\(embedding != nil)",
+                "[EntryCreationService] 摘要+主题+索引已更新: hasSummary=\(summary?.isEmpty == false), themes=\(committedThemes.count), hasEmbedding=\(embedding != nil)",
                 category: .ai
             )
             didCommit = true

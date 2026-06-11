@@ -17,7 +17,7 @@
 //   - 200 + 含无效日期 / 空正文条目 → `.parsingFailed`(不能静默丢条目)
 //   - 200 + 空数组 → 合法成功,返 []
 //
-//  **AppSecrets 解耦**:`chatThrowing` 头部 guard `appSharedSecret.isEmpty` 会在我们的
+//  **AppSecrets 解耦**:`claudeChatThrowing` 头部 guard `appSharedSecret.isEmpty` 会在我们的
 //  mock URLSession 前直接抛 401。原来用 `XCTSkipIf` 跳过整个 suite —— codex review P2 指出
 //  这让干净 clone / CI 上跑 0 条回归测试也能"green"。现在通过 `OpenAIService` init 注入
 //  dummy secret,不改全局 AppSecrets,任意环境都能跑这套 mock 测试。
@@ -192,7 +192,7 @@ final class OpenAIServiceImportTests: XCTestCase {
     // MARK: - 解析失败路径(200 OK 但内容有问题)
 
     func test_emptyContent_throwsParsingFailed() async throws {
-        // chatThrowing 在 empty content 时 throw NSError(code: -2),parseImportedDiaries
+        // claudeChatThrowing 在 empty content 时 throw NSError(code: -2),parseImportedDiaries
         // catch all → .parsingFailed
         MockURLProtocol.requestHandler = Self.handler(status: 200, content: "")
         await assertThrowsParsingFailed(rawText: "随便写点")
@@ -266,7 +266,7 @@ final class OpenAIServiceImportTests: XCTestCase {
     // MARK: - Codex P2 #7 + Superreview P1: empty secret fail-closed path
 
     /// 生产场景 fail-closed:用户没填 `Lumory.local.xcconfig` → `AppSecrets.appSharedSecret == ""`
-    /// → `chatThrowing` 顶部 guard 在打 URLSession 前直接抛 `BackendErrorMapper.missingSharedSecretError()`
+    /// → `claudeChatThrowing` 顶部 guard 在打 URLSession 前直接抛 `BackendErrorMapper.missingSharedSecretError()`
     /// (domain="BackendError" code=401)→ `parseImportedDiaries` 的 `nsError.code >= 100 && < 600`
     /// catch 命中 → 抛 `DiaryImportError.network`。
     /// 这条 path 是 fresh clone 用户的真实生产体验,锁住 contract 防未来 secret 注入路径漂移。
@@ -365,7 +365,9 @@ final class OpenAIServiceImportTests: XCTestCase {
 
     // MARK: - Helpers
 
-    /// 构造一个返回 chat completion 响应壳的 handler(content 字段填可控字符串)。
+    /// 构造一个返回 Anthropic Messages 响应壳的 handler(text 字段填可控字符串)。
+    /// 2026-06-11 GPT→Claude 迁移:import 走 `claudeChatThrowing` → `/api/anthropic/messages`,
+    /// 响应形状从 OpenAI 的 choices[].message.content 换成 content[].text。
     private static func handler(status: Int, content: String) -> @Sendable (URLRequest) throws -> (HTTPURLResponse, Data) {
         return { request in
             let response = HTTPURLResponse(
@@ -375,14 +377,10 @@ final class OpenAIServiceImportTests: XCTestCase {
                 headerFields: ["Content-Type": "application/json"]
             )!
             let body: [String: Any] = [
-                "choices": [
-                    [
-                        "message": [
-                            "role": "assistant",
-                            "content": content
-                        ]
-                    ]
-                ]
+                "content": [
+                    ["type": "text", "text": content]
+                ],
+                "stop_reason": "end_turn"
             ]
             return (response, try JSONSerialization.data(withJSONObject: body))
         }

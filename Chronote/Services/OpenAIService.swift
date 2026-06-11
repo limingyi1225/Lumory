@@ -4,7 +4,7 @@ import CryptoKit
 
 @available(iOS 15.0, macOS 12.0, *)
 // `@unchecked Sendable` — 协议 `AIServiceProtocol: Sendable` 要求 conformer 满足 Sendable。
-// 这个类全是 `let` immutable stored state(`backendURL` / `session` / `appSharedSecret` / 两个
+// 这个类全是 `let` immutable stored state(`session` / `appSharedSecret` / 两个
 // JSONEncoder/Decoder),理论 inferred Sendable;但 `JSONEncoder` / `JSONDecoder` 类型自身在
 // Swift 类型系统上**不是** `Sendable`(reference type 有内部 cache state),所以无法 inferred。
 // 实际生产路径上两个 coder 只调 encode/decode 不改配置,跨线程使用安全。`@unchecked` 把这条
@@ -15,14 +15,10 @@ final class OpenAIService: AIServiceProtocol, @unchecked Sendable {
     /// 调用方优先用 `.shared`，避免在 hot-path 上重复初始化。
     static let shared = OpenAIService()
 
-    private static let backendEndpoint = "\(AppSecrets.backendURL)/api/openai/chat/completions"
-    private let backendURL: URL
     // **wave11 access 策略**:`jsonEncoder` / `jsonDecoder` 跨 extension 文件被
-    // generateReportFromData / askEvents / embed 共用,从 private 提升到 internal。
+    // claudeChat / streamClaudeChatEvents / embed 共用,从 private 提升到 internal。
     // 它们是无状态工具(`JSONEncoder()` / `JSONDecoder()` 默认配置,无敏感 state),
-    // 提升不暴露任何 secret。`backendURL`(配置 URL)/ `debounceDelay`(参数)留 private —
-    // 都是配置层 state,不该跨文件直接访问。其他 extension 通过 chat / chatThrowing /
-    // debouncedRequest 这几个 internal helper 间接走。
+    // 提升不暴露任何 secret。`debounceDelay`(参数)留 private。
     let jsonEncoder = JSONEncoder()
     let jsonDecoder = JSONDecoder()
     static let narrativeTextBlockMaxUTF16Units = 28_000
@@ -32,17 +28,13 @@ final class OpenAIService: AIServiceProtocol, @unchecked Sendable {
 
     /// URLSession 注入点:生产走 `.sharedRetrySession`(默认),测试可注入 URLProtocol-mocked session。
     /// 跨 extension 共用,因此 internal(同模块可见)。`OpenAIService+Streaming` / `+OneShotAI` /
-    /// `chat` / `chatThrowing` 全部走 `self.session`,统一一个 URLSession 实例。
+    /// `+Anthropic` 全部走 `self.session`,统一一个 URLSession 实例。
     let session: URLSession
     /// 后端共享密钥注入点。生产走 `AppSecrets.appSharedSecret`;URLProtocol-mocked 单测可传
     /// dummy secret,避免 clean checkout / CI 因缺少 gitignored xcconfig 而跳过测试。
     let appSharedSecret: String
 
     init(session: URLSession = .sharedRetrySession, appSharedSecret: String = AppSecrets.appSharedSecret) {
-        guard let backendURL = URL(string: Self.backendEndpoint) else {
-            preconditionFailure("[OpenAIService] Invalid backend endpoint: \(Self.backendEndpoint)")
-        }
-        self.backendURL = backendURL
         self.session = session
         self.appSharedSecret = appSharedSecret
     }
@@ -50,196 +42,18 @@ final class OpenAIService: AIServiceProtocol, @unchecked Sendable {
     // MARK: - Public — 这一节的公开 API 已按职责拆分到子目录:
     //   summarize / analyzeMood / firstValidScore / extractThemes / embed → +OneShotAI.swift
     //   generateReportFromData / askEvents / streamReportEvents → +Streaming.swift
+    //   claudeChat / claudeChatThrowing / makeAnthropicRequest → +Anthropic.swift
     //   judgeThemeAliases / scanThemeAliasGroups → +ThemeAlias.swift
     //   composeSuggestions / parseSuggestionBundle → +Suggestions.swift
     //   parseImportedDiaries → +Import.swift
-    // wave11 拆分,主文件只保留共享基础设施(chat / chatThrowing / debouncedRequest / 类壳)。
-
+    // wave11 拆分,主文件只保留共享基础设施(debouncedRequest / 类壳)。
 
     // MARK: - Core
-    /// 非流式 chat。流式路径走 `streamChatEvents` / `generateReportFromData` 自建 RequestBody,
-    /// 不经过这里 —— 历史上 `chat()` 还有一个 `stream:true` 分支(~35 行 SSE 累加 buffer),
-    /// `grep "chat(.*stream: true"` 全仓 0 caller,2026-05 删除避免将来误用。
-    ///
-    /// **wave11**:从 `private` 改成 `internal` —— 跨 extension 文件
-    /// (OneShotAI / ThemeAlias / Suggestions)调用,它们都通过 `chat` 这条共享通路发请求。
-    /// stored state(backendURL / debounceDelay)仍然 private,本方法是包装这些 state 的 helper。
-    func chat(prompt: String,
-                      model: String? = nil,
-                      maxTokens: Int = 128,
-                      forceJSON: Bool = false,
-                      reasoningEffort: String? = nil) async -> String? {
-        struct Message: Codable { let role: String; let content: String }
-        struct RequestBody: Codable {
-            let model: String
-            let messages: [Message]
-            let response_format: ResponseFormat?
-            let reasoning_effort: String?
-            // gpt-5 系列用 max_completion_tokens，不是 max_tokens。Swift 侧用 camelCase 以过 lint，
-            // 通过 CodingKeys 映射到 OpenAI 期望的 snake_case。
-            let maxCompletionTokens: Int?
-
-            struct ResponseFormat: Codable { let type: String }
-            enum CodingKeys: String, CodingKey {
-                case model, messages, response_format, reasoning_effort
-                case maxCompletionTokens = "max_completion_tokens"
-            }
-        }
-        struct ResponseBody: Codable {
-            struct Choice: Codable { let message: Message }
-            let choices: [Choice]
-        }
-
-        let requestBody = RequestBody(
-            model: model ?? "gpt-5.5",
-            messages: [Message(role: "user", content: prompt)],
-            response_format: forceJSON ? RequestBody.ResponseFormat(type: "json_object") : nil,
-            reasoning_effort: reasoningEffort,
-            maxCompletionTokens: maxTokens > 0 ? maxTokens : nil
-        )
-
-        guard !appSharedSecret.isEmpty else {
-            Log.error("[OpenAIService] Backend shared secret not configured", category: .ai)
-            return nil
-        }
-
-        // 改为走本地后端代理，不在客户端暴露 Key
-        let url = backendURL
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.applyBackendAuth(sharedSecret: appSharedSecret)
-        // (2026-05-15 megareview P2-2)`try?` 改 `do/try/catch` —— 原 `try?` 编码失败时 httpBody 是 nil,
-        // 服务器返 400 messages-array-missing,被 BackendErrorMapper 当成普通 400 不重试,客户端只看到
-        // "no content" 模糊错。理论上 Codable 固定 struct 几乎不会失败,但显式 catch 让真失败可诊断。
-        do {
-            request.httpBody = try jsonEncoder.encode(requestBody)
-        } catch {
-            Log.error("[OpenAIService] chat httpBody encode 失败: \(error)", category: .ai)
-            return nil
-        }
-
-        do {
-            Log.info("[OpenAIService] 执行非流式请求", category: .ai)
-            // 不用 [weak self]：见 embed() 上方注释
-            return try await NetworkRetryHelper.performWithRetry {
-                Log.info("[OpenAIService] 发送网络请求...", category: .ai)
-                let (data, response) = try await self.session.data(for: request)
-                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                    if let httpResponse = response as? HTTPURLResponse {
-                        let statusCode = httpResponse.statusCode
-                        // 诊断用最小信息：只 URL path + status + body 长度，不把 body 打进日志（避免泄日记/PII）
-                        Log.error("[OpenAIService] Backend request failed — path=\(request.url?.path ?? "?") status=\(statusCode) bodyLen=\(data.count)", category: .ai)
-                        throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse.value(forHTTPHeaderField: "Retry-After"))
-                    } else {
-                        Log.info("[OpenAIService] Bad response. Not an HTTPURLResponse. Response: \(response)", category: .ai)
-                        throw NSError(
-                            domain: "OpenAIService",
-                            code: -1,
-                            userInfo: [
-                                NSLocalizedDescriptionKey: NSLocalizedString(
-                                    "error.backend.invalidResponse",
-                                    comment: "Invalid response from backend"
-                                )
-                            ]
-                        )
-                    }
-                }
-                let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
-                guard let content = decoded.choices.first?.message.content.trimmingCharacters(in: .whitespacesAndNewlines) else {
-                    throw NSError(
-                        domain: "OpenAIService",
-                        code: -1,
-                        userInfo: [
-                            NSLocalizedDescriptionKey: NSLocalizedString(
-                                "error.backend.emptyContent",
-                                comment: "No content in response"
-                            )
-                        ]
-                    )
-                }
-                return content
-            }
-        } catch {
-            Log.error("[OpenAIService] Request error after retries: \(error)", category: .ai)
-            return nil
-        }
-    }
-
-    // MARK: - Throwing chat (used by parseImportedDiaries for typed error mapping)
     //
-    // 和 `chat()` 共享同一个请求/重试/解码骨架,但**不吞错**——把上游 401 / 429 / offline 等
-    // 直接 throw 出去,让 caller(目前是 `parseImportedDiaries`)能区分"网络/认证/限流"和
-    // "AI 真的没返回内容"。reviewer 第二轮指出旧 `chat` 全部错误归一成 `noContent`,导致
-    // 用户在配置/网络异常时被引导到错误的恢复路径。
-    //
-    // 仅支持非流式 —— 当前唯一用例(import 解析)是非流式调用,流式路径走原 `chat()`。
-    //
-    // **wave11**:从 `private` 改成 `internal` —— `OpenAIService+Import.swift` 跨文件调用。
-    func chatThrowing(prompt: String,
-                              model: String? = nil,
-                              maxTokens: Int = 128,
-                              reasoningEffort: String? = nil) async throws -> String {
-        struct Message: Codable { let role: String; let content: String }
-        struct RequestBody: Codable {
-            let model: String
-            let messages: [Message]
-            let stream: Bool?
-            let reasoning_effort: String?
-            let maxCompletionTokens: Int?
-            enum CodingKeys: String, CodingKey {
-                case model, messages, stream, reasoning_effort
-                case maxCompletionTokens = "max_completion_tokens"
-            }
-        }
-        struct ResponseBody: Codable {
-            struct Choice: Codable { let message: Message }
-            let choices: [Choice]
-        }
-
-        // Reviewer 二轮指出:shared secret 注入失败(xcconfig 没挂、Info.plist 没填)
-        // 时,客户端会把空 header 送上去,后端 timing-safe compare 直接判 401。我们在这里
-        // 提前拦下来,转成 `network` 错误带明确说明,而不是让用户看到"AI 未返回内容"误导提示。
-        // 2026-05-16 superreview P2 #6:统一走 BackendErrorMapper.missingSharedSecretError()
-        // —— streaming / OneShotAI 已经这么做,Transcriber 的 catch 也按 `domain == "BackendError"` 分流,
-        // 这里改对齐让 domain 语义一致。
-        guard !appSharedSecret.isEmpty else {
-            throw BackendErrorMapper.missingSharedSecretError()
-        }
-
-        let requestBody = RequestBody(
-            model: model ?? "gpt-5.5",
-            messages: [Message(role: "user", content: prompt)],
-            stream: nil,
-            reasoning_effort: reasoningEffort,
-            maxCompletionTokens: maxTokens > 0 ? maxTokens : nil
-        )
-        var request = URLRequest(url: backendURL)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.applyBackendAuth(sharedSecret: appSharedSecret)
-        request.httpBody = try jsonEncoder.encode(requestBody)
-
-        return try await NetworkRetryHelper.performWithRetry {
-            let (data, response) = try await self.session.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                let httpResponse = response as? HTTPURLResponse
-                let statusCode = httpResponse?.statusCode ?? -1
-                Log.error("[OpenAIService] chatThrowing failed — status=\(statusCode) bodyLen=\(data.count)", category: .ai)
-                throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
-            }
-            let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
-            guard let content = decoded.choices.first?.message.content
-                .trimmingCharacters(in: .whitespacesAndNewlines), !content.isEmpty else {
-                throw NSError(
-                    domain: "OpenAIService",
-                    code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "Empty content from model"]
-                )
-            }
-            return content
-        }
-    }
+    // **2026-06-11 GPT→Claude 迁移**:旧 `chat()` / `chatThrowing()`(OpenAI chat/completions
+    // 通路)已删 —— 全部业务调用切到 `claudeChat` / `claudeChatThrowing`(`+Anthropic.swift`,
+    // 走 `/api/anthropic/messages`)或端上 `OnDeviceAIService`。embed()(`+OneShotAI.swift`)
+    // 是唯一还打 OpenAI 端点的调用(Anthropic 无 embeddings API)。原实现保留在 git history。
 
     // MARK: - Debouncing
     /// 在启动 `request` 前先 sleep 一个短 delay，让极短时间内连发的请求合并。
@@ -338,9 +152,10 @@ extension String {
 extension OpenAIService {
     // MARK: - 业务方法已全部按职责拆到 OpenAI/ 子目录:
     //   summarize / analyzeMood / firstValidScore / extractThemes / embed → +OneShotAI.swift
-    //   generateReportFromData / streamReportEvents / askEvents / streamChatEvents → +Streaming.swift
+    //   generateReportFromData / streamReportEvents / askEvents / streamClaudeChatEvents → +Streaming.swift
+    //   claudeChat / claudeChatThrowing / makeAnthropicRequest / wire 类型 → +Anthropic.swift
     //   judgeThemeAliases / scanThemeAliasGroups / themeKey → +ThemeAlias.swift
     //   composeSuggestions / parseSuggestionBundle → +Suggestions.swift
     //   parseImportedDiaries → +Import.swift
-    // 主文件保留:类壳 / stored state / chat / chatThrowing / debouncedRequest 共享底座。
+    // 主文件保留:类壳 / stored state / debouncedRequest 共享底座。
 }

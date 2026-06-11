@@ -6,11 +6,18 @@ import Foundation
 // 共同特征:caller 订阅 `AsyncStream<StreamEvent>`,中间会反复 yield `.chunk` /
 // `.truncated` / `.failed` / `.done` 四类事件;底下都走 SSEParser 拆字节流。
 //
+// **2026-06-11 GPT→Claude 迁移**:两条流式入口(叙事 / Ask Past)切到 Claude Opus 4.8,
+// 走 `/api/anthropic/messages`(wire 类型与非流式 helper 见 `+Anthropic.swift`)。
+// thinking 不开 —— 流式场景延迟敏感;prompt 里显式要求"直接输出最终答案"防止
+// thinking-off 的 Opus 把推理过程写进可见正文。`generateReportFromData` 原本自带一份
+// 独立的 请求/SSE/重试 实现,迁移时合并到 `streamClaudeChatEvents` 共享底座,
+// 截断 reason 文案由 caller 传入(report vs answer 两套本地化 key)。
+//
 // 包含:
-//   - generateReportFromData —— 流式情绪报告(原始入口,onEvent closure 风格)
+//   - generateReportFromData —— 流式情绪报告(prompt 组装 + 事件转发,onEvent closure 风格)
 //   - streamReportEvents     —— 上面的 AsyncStream 包装(`AIServiceProtocol` 要求)
 //   - askEvents              —— Ask Past RAG 流式问答
-//   - streamChatEvents       —— 底层共享 SSE chat helper(askEvents 用,fileprivate)
+//   - streamClaudeChatEvents —— 底层共享 Claude SSE helper(两条入口共用,fileprivate)
 //   - narrativeTextBlock + helpers —— 把 entries 拼成有 token cap 的 prompt 文本块
 //   - shortDate / NarrativeTextBlock struct —— 共享文本结构
 
@@ -45,7 +52,8 @@ extension OpenAIService {
         let prompt = """
 阅读提供的日记条目,先写一两句概括,再写完整分析报告。
 # 输出格式
-严格按以下格式输出,顺序不可调换、标记不可省略:
+严格按以下格式输出,顺序不可调换、标记不可省略。第一行必须直接是 [HEADLINE],
+不要在它之前输出任何说明、思考过程或前言:
 [HEADLINE]
 （这里写一两句话的诗意概括,15-30 字。沉静、克制,像友人轻轻一句话。
 不要起标题、不要点评,只观察。一行写完,不空行。）
@@ -71,153 +79,22 @@ Diary Entries:
 \(textBlock)
 """
 
-        struct Message: Codable { let role: String; let content: String }
-        struct RequestBody: Codable {
-            let model: String
-            let messages: [Message]
-            let stream: Bool
-            let reasoning_effort: String?
-            // **P1 fix (2026-05-13 superreview)**:narrative prompt 写"总字数不超过 400 字"但模型
-            // 不总守。同 endpoint 的 streamChatEvents 设了 4096 cap,narrative 这里漏 → 偶发 leak
-            // 4k+ token,客户端 rawOutput 累 string concat + split 成本随之上涨。给 1500 硬 cap
-            // 对 ~400 字预期留 3x 余量,既挡住失控 leak 又不切到正常输出。
-            let maxCompletionTokens: Int?
-
-            enum CodingKeys: String, CodingKey {
-                case model, messages, stream, reasoning_effort
-                case maxCompletionTokens = "max_completion_tokens"
-            }
-        }
-        let requestBody = RequestBody(
-            model: "gpt-5.5",
-            messages: [Message(role: "user", content: prompt)],
-            stream: true,
-            reasoning_effort: "low",
-            maxCompletionTokens: 1500
-        )
-
-        guard !appSharedSecret.isEmpty else {
-            await MainActor.run { onEvent(.failed(BackendErrorMapper.missingSharedSecretError())) }
-            return
-        }
-
-        // wave11:`backendURL` 是主文件 private stored property —— 在这里直接构造 URL,
-        // 跟 streamChatEvents / embed 的写法一致(它们都用 `AppSecrets.backendURL`)。
-        guard let url = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions") else {
-            await MainActor.run { onEvent(.failed(BackendErrorMapper.error(forStatus: -1))) }
-            return
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.applyBackendAuth(sharedSecret: appSharedSecret)
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.setValue("keep-alive", forHTTPHeaderField: "Connection")
-        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        // (2026-05-15 megareview P2-2)显式 catch encode 失败,而不是 `try?` 让空 body 飞出去再被
-        // server 400 当普通错误处理。失败要 emit .failed event 给 caller 否则它永远以为流没起来。
-        do {
-            request.httpBody = try jsonEncoder.encode(requestBody)
-        } catch {
-            Log.error("[OpenAIService] streaming httpBody encode 失败: \(error)", category: .ai)
-            await MainActor.run { onEvent(.failed(BackendErrorMapper.error(forStatus: -1))) }
-            return
-        }
-
-        Log.info("[OpenAIService] 发送流式请求，模型: \(requestBody.model), stream: \(requestBody.stream)", category: .ai)
-
-        // **与 streamChat 相同的去重保护**：NarrativeSummaryCard / NarrativePrecomputeService 直接把每个 onChunk 累加进 buffer，
-        // 一旦断流后 NetworkRetryHelper 整段回放，生成的故事会出现前缀重复。一次成功 yield 过 chunk 后
-        // 不允许重试，直接吐截断标记收尾。
-        var hasEmittedAnyChunk = false
-        var didEmitTerminalStreamEvent = false
-        do {
-            // singleton method + escaping closure 不用 [weak self]，防 Release -O ARC 假早释放
-            try await NetworkRetryHelper.performWithRetry {
-                Log.info("[OpenAIService] 开始安全数据流式请求...", category: .ai)
-                let (bytes, response) = try await self.session.bytes(for: request)
-
-                if let http = response as? HTTPURLResponse {
-                    Log.info("[OpenAIService] 响应状态码: \(http.statusCode)", category: .ai)
-                    // 不再打印整个 allHeaderFields —— 可能含 Set-Cookie / Authorization / X-Request-Id
-                    // 等服务器内部字段。只留 Content-Type 用来判断 SSE。
-                    if let contentType = http.value(forHTTPHeaderField: "Content-Type") {
-                        Log.info("[OpenAIService] Content-Type: \(contentType)", category: .ai)
-                        if !contentType.contains("text/event-stream") && !contentType.contains("text/plain") {
-                            Log.warning("[OpenAIService] ⚠️ 警告：服务器没有返回流式响应格式！", category: .ai)
-                        }
-                    }
-                }
-
-                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                    let httpResponse = response as? HTTPURLResponse
-                    let statusCode = httpResponse?.statusCode ?? -1
-                    Log.error("[OpenAIService] 安全数据流式请求失败，状态码: \(statusCode)", category: .ai)
-                    throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
-                }
-                Log.info("[OpenAIService] 流式请求响应正常，开始处理字节流...", category: .ai)
-
-                // 统一经 SSEParser 解析 —— 不再 inline 重复实现。
-                var chunkCount = 0
-                do {
-                    for try await streamResp in SSEParser.parse(
-                        bytes: bytes,
-                        type: OpenAIStreamResponse.self,
-                        decoder: self.jsonDecoder
-                    ) {
-                        try Task.checkCancellation()
-                        // **P1 fix (2026-05-13 superreview round 2)**:OpenAI SSE 最后一条 chunk
-                        // 才带 `finish_reason`。原顺序"先 check truncated → return"会丢弃当条 chunk
-                        // 的 `delta.content` —— 命中 `finish_reason=length`(`max_completion_tokens=1500`
-                        // 撞上限是常见路径)时,模型最末一段 + `[BODY]` marker 都进不了 splitter →
-                        // 走 fallbackHeadline 路径 headline 永久丢。先 yield chunk 再 emit truncated。
-                        if let content = streamResp.choices.first?.delta?.content, !content.isEmpty {
-                            chunkCount += 1
-                            hasEmittedAnyChunk = true
-                            await MainActor.run { onEvent(.chunk(content)) }
-                        }
-                        if streamResp.hasTruncatedFinish {
-                            let reason = NSLocalizedString("stream.truncated.report", comment: "Report truncated marker")
-                            didEmitTerminalStreamEvent = true
-                            await MainActor.run { onEvent(.truncated(reason: reason)) }
-                            return
-                        }
-                    }
-                    Log.info("[OpenAIService] 字节流处理完成，总共收到 \(chunkCount) 个内容块", category: .ai)
-                } catch {
-                    if error is CancellationError {
-                        didEmitTerminalStreamEvent = true
-                        return
-                    }
-                    // 中途断流：已发过 chunk 就不重试（避免叙事正文前缀重复）；发 truncated 事件后正常返回
-                    if hasEmittedAnyChunk {
-                        Log.error("[OpenAIService] 报告流式中断; emitting truncation event: \(error)", category: .ai)
-                        let reason = NSLocalizedString("stream.truncated.report", comment: "Report truncated marker")
-                        didEmitTerminalStreamEvent = true
-                        await MainActor.run { onEvent(.truncated(reason: reason)) }
-                        return
-                    }
-                    throw error
-                }
-            }
-            if !didEmitTerminalStreamEvent {
-                await MainActor.run { onEvent(.done) }
-            }
-        } catch {
-            if error is CancellationError {
-                didEmitTerminalStreamEvent = true
-                return
-            }
-            Log.error("[OpenAIService] 安全数据流式请求错误: \(error)", category: .ai)
-            if hasEmittedAnyChunk {
-                // 已经吐过内容才断 —— 依然归到 truncated（不是致命 failure）
-                let reason = NSLocalizedString("stream.truncated.report", comment: "Report truncated marker")
-                didEmitTerminalStreamEvent = true
-                await MainActor.run { onEvent(.truncated(reason: reason)) }
-            } else {
-                didEmitTerminalStreamEvent = true
-                await MainActor.run { onEvent(.failed(error)) }
-            }
+        // **maxTokens=1500 的来历(P1 fix 2026-05-13 superreview)**:narrative prompt 写
+        // "总字数不超过 400 字"但模型不总守。1500 硬 cap 对 ~400 字预期留 3x 余量,
+        // 既挡住失控 leak 又不切到正常输出。Claude 迁移后语义不变(max_tokens)。
+        //
+        // 请求构建 / SSE 解析 / 重试 / "首 chunk 后不重试"去重 全部走 streamClaudeChatEvents
+        // 共享底座 —— 旧实现这里有一份跟 streamChatEvents 几乎逐行重复的拷贝,迁移时合并。
+        Log.info("[OpenAIService] 发送流式请求(Claude),模型: \(ClaudeModel.opus)", category: .ai)
+        let truncatedReason = NSLocalizedString("stream.truncated.report", comment: "Report truncated marker")
+        for await event in streamClaudeChatEvents(
+            prompt: prompt,
+            model: ClaudeModel.opus,
+            maxTokens: 1500,
+            truncatedReason: truncatedReason
+        ) {
+            if Task.isCancelled { return }
+            await MainActor.run { onEvent(event) }
         }
     }
 
@@ -390,7 +267,13 @@ Diary Entries:
                     """
                 }
 
-                for await event in self.streamChatEvents(prompt: prompt, model: "gpt-5.5", reasoningEffort: "low") {
+                let truncatedReason = NSLocalizedString("stream.truncated.answer", comment: "Answer truncated marker")
+                for await event in self.streamClaudeChatEvents(
+                    prompt: prompt,
+                    model: ClaudeModel.opus,
+                    maxTokens: 4096,
+                    truncatedReason: truncatedReason
+                ) {
                     if Task.isCancelled { break }
                     continuation.yield(event)
                 }
@@ -424,67 +307,33 @@ Diary Entries:
         }
     }
 
-    /// 低层流式 chat（**结构化事件版本**）：把 SSE 解析成 `StreamEvent` 流。
-    /// 三类事件:`.chunk` / `.truncated` / `.failed` / `.done`,caller 自己决定怎么渲染。
-    /// `fileprivate` —— 仅 askEvents 用,跨 extension 文件不暴露。
-    fileprivate func streamChatEvents(prompt: String,
-                                      model: String,
-                                      reasoningEffort: String?,
-                                      maxTokens: Int = 4096) -> AsyncStream<StreamEvent> {
+    /// 低层流式 chat(**结构化事件版本,Claude 通路**):把 Anthropic SSE 解析成 `StreamEvent` 流。
+    /// 四类事件:`.chunk` / `.truncated` / `.failed` / `.done`,caller 自己决定怎么渲染。
+    /// `truncatedReason` 由 caller 传入(report / answer 两套本地化文案)。
+    /// `fileprivate` —— 仅 askEvents / generateReportFromData 用,跨 extension 文件不暴露。
+    fileprivate func streamClaudeChatEvents(prompt: String,
+                                            model: String,
+                                            maxTokens: Int = 4096,
+                                            truncatedReason: String) -> AsyncStream<StreamEvent> {
         AsyncStream { continuation in
             let task = Task {
-                struct Message: Codable { let role: String; let content: String }
-                struct RequestBody: Codable {
-                    let model: String
-                    let messages: [Message]
-                    let stream: Bool
-                    let reasoning_effort: String?
-                    let maxCompletionTokens: Int?
-
-                    enum CodingKeys: String, CodingKey {
-                        case model, messages, stream, reasoning_effort
-                        case maxCompletionTokens = "max_completion_tokens"
-                    }
-                }
-                let body = RequestBody(
-                    model: model,
-                    messages: [Message(role: "user", content: prompt)],
-                    stream: true,
-                    reasoning_effort: reasoningEffort,
-                    maxCompletionTokens: maxTokens
-                )
-
-                guard let url = URL(string: "\(AppSecrets.backendURL)/api/openai/chat/completions") else {
-                    Log.error("[OpenAIService] Invalid chat-completions URL", category: .ai)
-                    continuation.yield(.failed(NSError(
-                        domain: "OpenAIService",
-                        code: -1,
-                        userInfo: [
-                            NSLocalizedDescriptionKey: NSLocalizedString(
-                                "error.backend.invalidResponse",
-                                comment: "Invalid response from backend"
-                            )
-                        ]
-                    )))
-                    continuation.finish()
-                    return
-                }
                 guard !appSharedSecret.isEmpty else {
                     continuation.yield(.failed(BackendErrorMapper.missingSharedSecretError()))
                     continuation.finish()
                     return
                 }
-                var request = URLRequest(url: url)
-                request.httpMethod = "POST"
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-                request.applyBackendAuth(sharedSecret: appSharedSecret)
-                // (2026-05-15 megareview P2-2)同 generateReportFromData,显式 catch encode 失败。
+                let request: URLRequest
                 do {
-                    request.httpBody = try self.jsonEncoder.encode(body)
+                    // 流式不开 thinking(延迟敏感),也不传 effort —— prompt 自身约束输出。
+                    request = try self.makeAnthropicRequest(
+                        prompt: prompt,
+                        model: model,
+                        maxTokens: maxTokens,
+                        stream: true
+                    )
                 } catch {
-                    Log.error("[OpenAIService] streamChatEvents httpBody encode 失败: \(error)", category: .ai)
-                    continuation.yield(.failed(BackendErrorMapper.error(forStatus: -1)))
+                    Log.error("[OpenAIService] streamClaudeChatEvents request build 失败: \(error)", category: .ai)
+                    continuation.yield(.failed(error))
                     continuation.finish()
                     return
                 }
@@ -502,36 +351,56 @@ Diary Entries:
                             throw BackendErrorMapper.error(forStatus: http?.statusCode ?? -1, retryAfter: http?.value(forHTTPHeaderField: "Retry-After"))
                         }
                         do {
-                            for try await streamResp in SSEParser.parse(
+                            for try await chunk in SSEParser.parse(
                                 bytes: bytes,
-                                type: OpenAIStreamResponse.self,
+                                type: AnthropicStreamChunk.self,
                                 decoder: self.jsonDecoder
                             ) {
                                 try Task.checkCancellation()
-                                // **P1 fix (2026-05-13 superreview round 2)** — 同 generateReportFromData。
-                                // OpenAI SSE 最后一条 chunk 才带 finish_reason,先 yield 当条 content 再
-                                // emit truncated,避免丢最末一段。
-                                if let content = streamResp.choices.first?.delta?.content, !content.isEmpty {
-                                    hasEmittedAnyChunk = true
-                                    continuation.yield(.chunk(content))
-                                }
-                                if streamResp.hasTruncatedFinish {
-                                    let reason = NSLocalizedString("stream.truncated.answer", comment: "Answer truncated marker")
-                                    didEmitTerminalStreamEvent = true
-                                    continuation.yield(.truncated(reason: reason))
+                                switch chunk.type {
+                                case "content_block_delta":
+                                    if let text = chunk.delta?.text, !text.isEmpty {
+                                        hasEmittedAnyChunk = true
+                                        continuation.yield(.chunk(text))
+                                    }
+                                case "message_delta":
+                                    // 截断信号(max_tokens / refusal)在 message_delta 帧。
+                                    // Anthropic 把 stop_reason 放在内容 delta 之后的独立帧,
+                                    // 不存在 OpenAI "最后一条 chunk 同时带 content + finish_reason"
+                                    // 的丢末段问题 —— 内容帧早已 yield 完。
+                                    if chunk.isTruncatedStop {
+                                        didEmitTerminalStreamEvent = true
+                                        continuation.yield(.truncated(reason: truncatedReason))
+                                        return
+                                    }
+                                case "message_stop":
+                                    // Anthropic 没有 `data: [DONE]`;message_stop 即成功终止。
+                                    // 直接 return,不等 EOF —— 否则 SSEParser 在 EOF 抛
+                                    // missingDone 会被误判成截断。
                                     return
+                                case "error":
+                                    // 上游 mid-stream error 帧(后端透传)。当作流错误抛,
+                                    // 走下面 hasEmittedAnyChunk 分流(已出内容→truncated,否则 throw 重试)。
+                                    throw SSEParser.ParserError.upstreamError(
+                                        chunk.error?.message ?? "upstream stream error"
+                                    )
+                                default:
+                                    break // message_start / content_block_start / content_block_stop / ping 忽略
                                 }
                             }
+                            // SSEParser 只在收到 [DONE] 时正常 finish,Anthropic 流里没有 [DONE],
+                            // 正常路径在上面 message_stop 处 return,EOF 路径由 SSEParser 抛
+                            // missingDone。走到这里 = 解析器行为变了,按"没收到终止帧"防御处理。
+                            throw SSEParser.ParserError.missingDone
                         } catch {
                             if error is CancellationError {
                                 didEmitTerminalStreamEvent = true
                                 return
                             }
                             if hasEmittedAnyChunk {
-                                Log.error("[OpenAIService] streamChat interrupted mid-stream; emitting truncated event: \(error)", category: .ai)
-                                let reason = NSLocalizedString("stream.truncated.answer", comment: "Answer truncated marker")
+                                Log.error("[OpenAIService] Claude stream interrupted mid-stream; emitting truncated event: \(error)", category: .ai)
                                 didEmitTerminalStreamEvent = true
-                                continuation.yield(.truncated(reason: reason))
+                                continuation.yield(.truncated(reason: truncatedReason))
                                 return
                             }
                             throw error
@@ -546,11 +415,10 @@ Diary Entries:
                         continuation.finish()
                         return
                     }
-                    Log.error("[OpenAIService] streamChat error: \(error)", category: .ai)
+                    Log.error("[OpenAIService] Claude stream error: \(error)", category: .ai)
                     if hasEmittedAnyChunk {
-                        let reason = NSLocalizedString("stream.truncated.answer", comment: "Answer truncated marker")
                         didEmitTerminalStreamEvent = true
-                        continuation.yield(.truncated(reason: reason))
+                        continuation.yield(.truncated(reason: truncatedReason))
                     } else {
                         didEmitTerminalStreamEvent = true
                         continuation.yield(.failed(error))

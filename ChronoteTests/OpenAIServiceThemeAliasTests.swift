@@ -78,21 +78,24 @@ final class OpenAIServiceThemeAliasTests: XCTestCase {
         }
     }
 
+    /// Anthropic Messages 响应壳(2026-06-11 GPT→Claude 迁移:别名判定走 claudeChat)。
     private static func chatResponse(content: String) -> Data {
         struct Response: Codable {
-            struct Choice: Codable {
-                struct Message: Codable {
-                    let role: String
-                    let content: String
-                }
-                let message: Message
+            struct ContentBlock: Codable {
+                let type: String
+                let text: String
             }
-            let choices: [Choice]
+            let content: [ContentBlock]
+            let stopReason: String
+
+            enum CodingKeys: String, CodingKey {
+                case content
+                case stopReason = "stop_reason"
+            }
         }
         return try! JSONEncoder().encode(Response(
-            choices: [
-                .init(message: .init(role: "assistant", content: content))
-            ]
+            content: [.init(type: "text", text: content)],
+            stopReason: "end_turn"
         ))
     }
 }

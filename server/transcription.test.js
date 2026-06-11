@@ -8,6 +8,7 @@ const { randomUUID } = require('node:crypto');
 const axios = require('axios');
 
 process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-openai-key';
+process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test-anthropic-key';
 process.env.APP_SHARED_SECRET = process.env.APP_SHARED_SECRET || 'test-app-secret';
 process.env.GLOBAL_IP_LIMIT_MAX = process.env.GLOBAL_IP_LIMIT_MAX || '50';
 process.env.NODE_ENV = 'test';

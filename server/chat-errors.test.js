@@ -14,6 +14,7 @@ const http = require('node:http');
 const axios = require('axios');
 
 process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-openai-key';
+process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test-anthropic-key';
 process.env.APP_SHARED_SECRET = process.env.APP_SHARED_SECRET || 'test-app-secret';
 // 高于本文件最大压力测试需要的 121 req,且高于 chat per-install 120 上限,确保
 // globalIPLimiter (per-IP) 不会在测试 4 之前 fire(测试 4 自己要 chatLimiter fire)。

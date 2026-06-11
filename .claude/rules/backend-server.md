@@ -12,7 +12,11 @@ paths:
 
 - 所有 `/api/*` 要求 header `X-App-Secret`,**timing-safe compare**。未配 `APP_SHARED_SECRET` 直接 fail-closed(启动即退)。
 - `/health` 不走鉴权,供健康探活。
-- 后端 `OPENAI_API_KEY` 和 `APP_SHARED_SECRET` 都必须来自 `server/.env`,缺任一立刻 `process.exit(1)`。
+- 后端 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `APP_SHARED_SECRET` 都必须来自 `server/.env`,缺任一立刻 `process.exit(1)`。
+
+## Anthropic 哑代理(2026-06-11 GPT→Claude 迁移)
+
+`/api/anthropic/messages` —— **透传 Anthropic Messages API 原生格式,不做翻译**。与 OpenAI chat 路由严格同构(streaming/buffered 双分支、error-listener-先于-activeStreams.add、idle 计时器、CLIENT_DISCONNECT sentinel),差异只有三处:上游 `api.anthropic.com/v1/messages`(headers `x-api-key` + `anthropic-version: 2023-06-01`)、**成功终止帧是 `event: message_stop` 而非 `data: [DONE]`**(`sseFrameHasMessageStop`,end 时没见过 → destroy 防半截流装成功)、char cap 把独立 `system` 字段计入(`countAnthropicBodyChars`)。`sanitizeAnthropicBody`:model 走 `ANTHROPIC_MODEL_ALLOWLIST`(默认 `claude-opus-4-8` + `claude-sonnet-4-6`,不在 allowlist 静默回落 opus)、`thinking` 仅 `{type:"adaptive"}` 透传(其他形状丢弃 —— enabled+budget_tokens 在 Opus 4.8 会 400)、`output_config` 仅 effort(low/medium/high)+ json_schema format。限流独立桶 `anthropicLimiter` 120/min per-install。**旧 `/api/openai/chat/completions` 保留**(在野旧版本 App 还在打),新客户端 chat 类全走这里;embeddings / 转写仍走 OpenAI 路由。
 
 ## 速率限制
 

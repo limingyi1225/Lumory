@@ -4,16 +4,21 @@ import CryptoKit
 // MARK: - OneShotAI(一次性 AI:输入文本 → 输出值)
 //
 // **wave11 拆出**:从 OpenAIService.swift 把 5 条"非流式 / 单次往返"AI 入口聚到一起。
-// 共同特征:caller `await` 一个值返回(摘要/分数/向量/标签数组),底下都走 `chat`
-// 这条共享通路。流式入口(askEvents / streamReportEvents / generateReportFromData)在
-// `+Streaming.swift`,职责完全不同。
+// 共同特征:caller `await` 一个值返回(摘要/分数/向量/标签数组)。流式入口
+// (askEvents / streamReportEvents / generateReportFromData)在 `+Streaming.swift`。
+//
+// **2026-06-11 GPT→Claude + 端上迁移**:摘要 / 心情 / 主题 三条改为
+// **端上优先(OnDeviceAIService,Apple Foundation Models)+ 云端 Claude Sonnet 4.6 兜底**。
+// 端上不可用(Apple Intelligence 未开 / 机型不支持 / 超长输入 / guardrails 拒答)时
+// 静默回落云端,prompt 两边保持同一套语义。embed 仍走 OpenAI(Anthropic 无 embeddings
+// API,换 provider 要全量重建向量索引,有意保留)。
 //
 // 包含:
-//   - summarize       —— 日记摘要
-//   - analyzeMood     —— 情绪分数(0-1)
+//   - summarize       —— 日记摘要(端上优先)
+//   - analyzeMood     —— 情绪分数(0-1)(端上优先)
 //   - firstValidScore —— 静态 helper:从自由文本提取 mood 分数(测试可见)
-//   - extractThemes   —— 抽 2-4 个主题标签
-//   - embed           —— 向量嵌入
+//   - extractThemes   —— 抽 2-4 个主题标签(端上优先)
+//   - embed           —— 向量嵌入(OpenAI,不动)
 //   - bannedThemes / embeddingPayload —— 私有静态 helper
 
 @available(iOS 15.0, macOS 12.0, *)
@@ -26,22 +31,34 @@ extension OpenAIService {
         let shortHash = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
         let requestKey = "summarize-\(shortHash)"
         return await debouncedRequest(key: requestKey, cancelledFallback: nil) {
+            // 端上优先:可用且生成成功直接返回,失败/不可用静默回落云端 Sonnet。
+            if let onDevice = await OnDeviceAIService.summary(text: text) {
+                return onDevice
+            }
             let prompt: String
             if text.containsChinese {
-                prompt = "概括以下日记内容，抓住重点，不超过15个字，仅使用逗号和分号。\n# Steps\n1. 阅读并理解日记内容。\n2. 抓住日记的关键信息和主题。\n3. 使用简洁精准的语言进行概括。\n4. 确保概括不超过15个字。\n5. 仅使用逗号和分号作为标点符号。\n# Output Format\n- 一个简短的概括，不超过15个字。\n- 仅使用逗号和分号，最后一个字后面不要有标点符号\n日记：\n\n\(text)"
+                prompt = "概括以下日记内容，抓住重点，不超过15个字，仅使用逗号和分号。\n# Steps\n1. 阅读并理解日记内容。\n2. 抓住日记的关键信息和主题。\n3. 使用简洁精准的语言进行概括。\n4. 确保概括不超过15个字。\n5. 仅使用逗号和分号作为标点符号。\n# Output Format\n- 一个简短的概括，不超过15个字。\n- 仅使用逗号和分号，最后一个字后面不要有标点符号。只输出概括本身,不要任何说明。\n日记：\n\n\(text)"
             } else {
-                prompt = "Summarize the following diary entry, focusing on the key points, in no more than 10 words, using only commas and semicolons.\n# Steps\n1. Read and understand the diary entry.\n2. Identify the key information and theme.\n3. Summarize using concise and precise language.\n4. Ensure the summary does not exceed 10 words.\n5. Use only commas and semicolons as punctuation.\n# Output Format\n- A short summary, no more than 10 words.\n- Only commas and semicolons used.\nDiary:\n\n\(text)"
+                prompt = "Summarize the following diary entry, focusing on the key points, in no more than 10 words, using only commas and semicolons.\n# Steps\n1. Read and understand the diary entry.\n2. Identify the key information and theme.\n3. Summarize using concise and precise language.\n4. Ensure the summary does not exceed 10 words.\n5. Use only commas and semicolons as punctuation.\n# Output Format\n- A short summary, no more than 10 words.\n- Only commas and semicolons used. Output the summary only, no commentary.\nDiary:\n\n\(text)"
             }
-            // 显式 maxTokens: 512——`chat` 的默认 128 对 gpt-5.5 "low" reasoning 太紧，
-            // reasoning tokens 本身就会吃掉一半以上，content 经常被截 / 返回空串。
-            return await self.chat(prompt: prompt, model: "gpt-5.5", maxTokens: 512, reasoningEffort: "low")
+            let cloud = await self.claudeChat(prompt: prompt, model: ClaudeModel.sonnet, maxTokens: 512)
+            if cloud == nil {
+                // 端上 + 云端双路全失败 → entry.summary 留 nil,UI 标题一直停在"生成中"占位。
+                // 没有自动重试机制(编辑该日记会经 refreshAIIndex 重算),这里必须有迹可循。
+                Log.warning("[OpenAIService] summarize: 端上与云端兜底均未产出,标题将缺失", category: .ai)
+            }
+            return cloud
         }
     }
 
     func analyzeMood(text: String) async -> Double {
-        // gpt-5.4-mini + effort=none。mini 家族支持 `none`（零推理开销），大模型 5.5 只支持 low+。
-        // prompt 显式列出 1-20 / 21-40 / 41-60 / 61-80 / 81-100 五档 + "avoid 50" 强硬指令，
-        // 让 mini 不经推理也能直接给出决断分。
+        // 端上优先(Apple Foundation Models)。范围校验跟云端共用 1...100 这一关。
+        if let onDevice = await OnDeviceAIService.moodScore(text: text), (1...100).contains(onDevice) {
+            return Double(onDevice) / 100.0
+        }
+
+        // 云端兜底:Claude Sonnet 4.6 + 结构化输出(moodScoreSchema 保证 {"mood_score": N})。
+        // prompt 显式列出 1-20 / 21-40 / 41-60 / 61-80 / 81-100 五档 + "avoid 50" 强硬指令。
         let diaryEscaped = text.replacingOccurrences(of: "\"", with: "\\\"")
         let prompt = """
             Classify the mood of this diary entry on a 1-100 scale. Be decisive — avoid 50 unless truly neutral.
@@ -59,12 +76,11 @@ extension OpenAIService {
             Diary: "\(diaryEscaped)"
             """
 
-        let rawOpt = await self.chat(
+        let rawOpt = await self.claudeChat(
             prompt: prompt,
-            model: "gpt-5.4-mini",
+            model: ClaudeModel.sonnet,
             maxTokens: 256,
-            forceJSON: true,
-            reasoningEffort: "none"      // mini 家族支持 none，直接省掉推理开销
+            jsonSchema: Self.moodScoreSchema
         )?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -133,6 +149,13 @@ extension OpenAIService {
 
     func extractThemesOutcome(text: String) async -> ThemeExtractionOutcome {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .success([]) }
+
+        // 端上优先。返回非 nil(含空数组 —— "纯抒情无具体对象"是合法判断)即采纳,
+        // 清洗管线(trim / banned 过滤 / 截 4 条)跟云端共用。nil 才回落云端。
+        if let onDevice = await OnDeviceAIService.themes(text: text) {
+            return .success(Self.cleanThemeTags(onDevice))
+        }
+
         let diaryEscaped = text.replacingOccurrences(of: "\"", with: "\\\"")
         let isZh = text.containsChinese
         let prompt: String
@@ -185,22 +208,43 @@ extension OpenAIService {
             Diary: "\(diaryEscaped)"
             """
         }
-        // 用 gpt-5.4-mini + reasoning=none；mini 支持 none，标签抽取不需要推理
-        guard let raw = await chat(prompt: prompt, model: "gpt-5.4-mini",
-                                   maxTokens: 256, forceJSON: true,
-                                   reasoningEffort: "none")?
+        // 云端兜底:Claude Sonnet 4.6 + 结构化输出(themeTagsSchema 保证 {"themes":[...]})。
+        guard let raw = await claudeChat(prompt: prompt, model: ClaudeModel.sonnet,
+                                         maxTokens: 256,
+                                         jsonSchema: Self.themeTagsSchema)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
               let data = raw.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let arr = json["themes"] as? [String] else {
             return .failed
         }
-        let cleaned = arr
+        return .success(Self.cleanThemeTags(arr))
+    }
+
+    /// 端上 / 云端两条路径共用的标签清洗:trim → 去空 → banned 过滤 → 截 4 条。
+    static func cleanThemeTags(_ raw: [String]) -> [String] {
+        let cleaned = raw
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .filter { !Self.bannedThemes.contains($0.lowercased()) }
-        return .success(Array(cleaned.prefix(4)))
+        return Array(cleaned.prefix(4))
     }
+
+    // MARK: - Structured output schemas(云端兜底路径)
+
+    private static let moodScoreSchema: [String: Any] = [
+        "type": "object",
+        "properties": ["mood_score": ["type": "integer"]],
+        "required": ["mood_score"],
+        "additionalProperties": false
+    ]
+
+    private static let themeTagsSchema: [String: Any] = [
+        "type": "object",
+        "properties": ["themes": ["type": "array", "items": ["type": "string"]]],
+        "required": ["themes"],
+        "additionalProperties": false
+    ]
 
     /// 后处理兜底：即使 prompt 已经明说不要，模型偶尔仍会回吐元描述词。
     /// 这里做一次硬过滤，阻止这些词进 Core Data。

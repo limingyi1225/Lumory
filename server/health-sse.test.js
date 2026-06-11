@@ -20,11 +20,17 @@ const { PassThrough } = require('node:stream');
 const axios = require('axios');
 
 process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-openai-key';
+process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test-anthropic-key';
 process.env.APP_SHARED_SECRET = process.env.APP_SHARED_SECRET || 'test-app-secret';
 process.env.GLOBAL_IP_LIMIT_MAX = process.env.GLOBAL_IP_LIMIT_MAX || '3';
 process.env.NODE_ENV = 'test';
 
-const { app, recordUnhandledRejection } = require('./index');
+const {
+  app,
+  recordUnhandledRejection,
+  sanitizeAnthropicBody,
+  sseFrameHasMessageStop,
+} = require('./index');
 
 function listen(app) {
   return new Promise((resolve, reject) => {
@@ -432,6 +438,143 @@ test('chat_streamingUpstreamEndsWithoutDone_destroysClientSocket', async (t) => 
   assert.equal(complete, false, 'response must be destroyed (complete=false), not ended cleanly');
   // Sanity: the partial frame did reach the client before the destroy.
   assert.equal(body.includes('"hi"'), true, 'expected partial frame "hi" to reach client');
+});
+
+// ---------------------------------------------------------------------------
+// Group 2b — Anthropic proxy invariants
+// ---------------------------------------------------------------------------
+
+test('anthropic_sanitizeBody_enforcesAllowlistAndKnownShapes', () => {
+  // 信任边界契约:model 不在 allowlist 回落默认、thinking 仅 adaptive 透传、
+  // output_config 只认 effort + json_schema、system 仅 string。
+  const sanitized = sanitizeAnthropicBody({
+    model: 'claude-fancy-9000',
+    system: 'sys prompt',
+    messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'system', content: 'sneaky' }, // Anthropic messages 无 system role → 归一 user
+    ],
+    max_tokens: 999999,
+    thinking: { type: 'enabled', budget_tokens: 5000 }, // Opus 4.8 上会 400 → 必须丢弃
+    output_config: {
+      effort: 'xhigh', // 不在 [low,medium,high] → 丢弃
+      format: { type: 'json_schema', schema: { type: 'object' } },
+    },
+  });
+
+  assert.equal(sanitized.model, 'claude-opus-4-8');
+  assert.equal(sanitized.system, 'sys prompt');
+  assert.equal(sanitized.messages[1].role, 'user');
+  assert.ok(sanitized.max_tokens <= 16384);
+  assert.equal(sanitized.thinking, undefined);
+  assert.equal(sanitized.output_config.effort, undefined);
+  assert.deepEqual(sanitized.output_config.format, {
+    type: 'json_schema',
+    schema: { type: 'object' },
+  });
+
+  const adaptive = sanitizeAnthropicBody({
+    messages: [{ role: 'user', content: 'hi' }],
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'medium' },
+  });
+  assert.deepEqual(adaptive.thinking, { type: 'adaptive' });
+  assert.equal(adaptive.output_config.effort, 'medium');
+});
+
+test('anthropic_sseFrameHasMessageStop_matchesEventLineOnly', () => {
+  assert.equal(sseFrameHasMessageStop('event: message_stop\ndata: {"type":"message_stop"}'), true);
+  assert.equal(sseFrameHasMessageStop('event:message_stop'), true);
+  // data 行里出现 message_stop 字样不算(必须是 event: 行)
+  assert.equal(sseFrameHasMessageStop('data: {"text":"message_stop"}'), false);
+  assert.equal(
+    sseFrameHasMessageStop('event: content_block_delta\ndata: {"delta":{"text":"hi"}}'),
+    false
+  );
+});
+
+test('anthropic_streamingUpstreamEndsWithoutMessageStop_destroysClientSocket', async (t) => {
+  // 与 OpenAI 路由 "ended without [DONE]" 同款防御:Anthropic 流正常结束但没发
+  // message_stop = 半截流,必须 destroy 而不是干净 end(否则客户端把残篇当完整)。
+  const originalAdapter = axios.defaults.adapter;
+  let upstream;
+
+  axios.defaults.adapter = async (config) => {
+    upstream = new PassThrough();
+    setImmediate(() => {
+      upstream.write(
+        'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n'
+      );
+      setImmediate(() => {
+        upstream.end(); // graceful end, no message_stop
+      });
+    });
+    return {
+      status: 200,
+      statusText: 'OK',
+      headers: { 'content-type': 'text/event-stream' },
+      config,
+      data: upstream,
+      request: {},
+    };
+  };
+
+  t.after(() => {
+    axios.defaults.adapter = originalAdapter;
+    upstream?.destroy();
+  });
+
+  const server = await listen(app);
+  t.after(() => close(server));
+
+  const { port } = server.address();
+  const { body, complete } = await new Promise((resolve, reject) => {
+    const data = JSON.stringify({
+      model: 'claude-opus-4-8',
+      stream: true,
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    const req = http.request(
+      {
+        method: 'POST',
+        host: '127.0.0.1',
+        port,
+        path: '/api/anthropic/messages',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(data),
+          'X-App-Secret': process.env.APP_SHARED_SECRET,
+          'X-Install-Id': 'a7d9673d-eba6-4cf8-a209-cc87f4f7cbbd',
+          'X-Forwarded-For': '10.60.10.7',
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('close', () => {
+          resolve({
+            body: Buffer.concat(chunks).toString('utf8'),
+            complete: res.complete,
+          });
+        });
+        res.on('error', () => {
+          resolve({ body: Buffer.concat(chunks).toString('utf8'), complete: false });
+        });
+      }
+    );
+    req.on('error', () => {});
+    req.end(data);
+    setTimeout(() => reject(new Error('anthropic stream test timeout')), 3000).unref();
+  });
+
+  assert.equal(complete, false, 'response must be destroyed (complete=false), not ended cleanly');
+  assert.equal(body.includes('"hi"'), true, 'expected partial frame to reach client');
+
+  await pollHealth(server, (b) => b?.activeStreams === 0, {
+    timeoutMs: 1000,
+    label: 'anthropic ended-without-message_stop path must release activeStreams',
+  });
 });
 
 // ---------------------------------------------------------------------------

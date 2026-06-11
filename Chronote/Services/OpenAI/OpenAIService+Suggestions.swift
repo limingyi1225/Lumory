@@ -3,8 +3,9 @@ import Foundation
 // MARK: - Suggestions(AI 写作建议)
 //
 // **wave11 拆出**:从 OpenAIService.swift 把"写作建议"子系统聚到一起。
-// `PromptSuggestionEngine` 是真源,这里是它调的 AI 接口 —— 一次 gpt-5.5 同时生成
-// AskPast 4 条预设 + 首页 5 条占位语,JSON 返回。
+// `PromptSuggestionEngine` 是真源,这里是它调的 AI 接口 —— 一次调用同时生成
+// AskPast 4 条预设 + 首页 5 条占位语(2026-06-11 起端上 Foundation Models 优先,
+// 云端 Claude Sonnet 4.6 兜底,共用同一份 prompt 模板)。
 //
 // 包含:
 //   - composeSuggestions       —— 主入口
@@ -13,16 +14,40 @@ import Foundation
 
 @available(iOS 15.0, macOS 12.0, *)
 extension OpenAIService {
-    /// 一次 gpt-5.5 调用生成 AskPast 预设 + 首页占位语池，JSON 返回。
-    /// 失败 / 畸形 / 字段不全 → 返回 nil，让 PromptSuggestionEngine 保留旧 cache 或上游 fallback。
+    /// 一次调用生成 AskPast 预设 + 首页占位语池。**端上优先(Apple Foundation Models)+
+    /// 云端 Claude Sonnet 4.6 兜底**(2026-06-11 迁移),两条路径共用同一份 prompt 模板。
+    /// 失败 / 畸形 / 字段不全 → 返回 nil,让 PromptSuggestionEngine 保留旧 cache 或上游 fallback。
     func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? {
         let prompt = Self.buildSuggestionPrompt(context: context)
-        guard let raw = await chat(
+
+        // 端上优先。产出走 parseSuggestionBundle 同款 trim / 空校验 / 截断,
+        // 任一字段为空回落云端(端上小模型偶发只填一个字段)。
+        if let onDevice = await OnDeviceAIService.suggestions(prompt: prompt) {
+            let presets = onDevice.presets
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .prefix(5)
+            let placeholders = onDevice.placeholders
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .prefix(8)
+            if !presets.isEmpty, !placeholders.isEmpty {
+                return SuggestionBundle(
+                    askPastPresets: Array(presets),
+                    homePlaceholders: Array(placeholders),
+                    generatedAt: Date(),
+                    fingerprint: context.makeFingerprint(),
+                    language: context.language
+                )
+            }
+            Log.info("[composeSuggestions] 端上产出字段不全,回落云端", category: .ai)
+        }
+
+        guard let raw = await claudeChat(
             prompt: prompt,
-            model: "gpt-5.5",
+            model: ClaudeModel.sonnet,
             maxTokens: 1024,
-            forceJSON: true,
-            reasoningEffort: "low"
+            jsonSchema: Self.suggestionBundleSchema
         )?.trimmingCharacters(in: .whitespacesAndNewlines) else {
             Log.error("[composeSuggestions] 无响应", category: .ai)
             return nil
@@ -35,6 +60,18 @@ extension OpenAIService {
             generatedAt: Date()
         )
     }
+
+    /// 云端兜底的结构化输出 schema。字段名与 prompt 的"输出 JSON"段一致,
+    /// parseSuggestionBundle 的同义 key 容错(presets/placeholders)继续保留无妨。
+    private static let suggestionBundleSchema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "askPastPresets": ["type": "array", "items": ["type": "string"]],
+            "homePlaceholders": ["type": "array", "items": ["type": "string"]]
+        ],
+        "required": ["askPastPresets", "homePlaceholders"],
+        "additionalProperties": false
+    ]
 
     /// 纯函数版的 JSON → SuggestionBundle 解析。提取出来是为了能在单测里喂各种
     /// 畸形 / 缺字段 / 同义 key 的输入验证 fallback 行为，同时也让 composeSuggestions

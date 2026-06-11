@@ -3,9 +3,10 @@ import Foundation
 // MARK: - Theme Alias(主题别名 AI 子系统)
 //
 // **wave11 拆出**:从 OpenAIService.swift 把"主题别名"两条入口聚到一起。
-// 共同特征:都是"标签去重"业务,模型 = gpt-5.5 + reasoning=medium(mini 抓不住跨语言
-// 昵称对应,low 抓不全,medium 是 quality/cost 折中)。`ThemeAliasResolver` 是真源,
-// 这里两个 API 都是发请求 + 解析 → 返回结构化结果给 resolver 入队待审。
+// 共同特征:都是"标签去重"业务,模型 = Claude Opus 4.8 + adaptive thinking + effort=medium
+// (2026-06-11 GPT→Claude 迁移;弱模型抓不住跨语言昵称对应,这是全 App 唯一保留 thinking
+// 的调用)。`ThemeAliasResolver` 是真源,这里两个 API 都是发请求 + 解析 → 返回结构化
+// 结果给 resolver 入队待审。
 //
 // 包含:
 //   - judgeThemeAliases    —— 写日记 hot-path 后跑(新 tags vs 已有库存,挑高置信度对子)
@@ -17,8 +18,8 @@ import Foundation
 extension OpenAIService {
     // MARK: - Theme alias judge (on-write + scan)
     //
-    // 模型 = gpt-5.5 + reasoning=medium。
-    // mini 太弱抓不到"宝贝 ↔ Abby"这种跨语言昵称对应;5.5 + medium 是 quality/cost 折中。
+    // 模型 = Claude Opus 4.8 + adaptive thinking + effort=medium。
+    // 弱模型抓不到"宝贝 ↔ Abby"这种跨语言昵称对应;adaptive + medium 是 quality/cost 折中。
     // 这两个接口都是写日记 hot-path 上跑的,延迟不敏感(banner 是异步软提示),但要稳定。
 
     func judgeThemeAliases(
@@ -67,20 +68,26 @@ extension OpenAIService {
         没有匹配:{"matches":[]}
         """
 
-        // gpt-5.5 + reasoning=medium —— `low` 抓不住"宝贝 ↔ Abby"这种跨语言昵称。
-        // medium 的 reasoning token 大概 800-1500,output JSON ~300。max_completion_tokens 升到 4096
-        // 给 p99 长 inventory 留余量;原 3072 下长清单 + medium reasoning 会偶发截断 JSON →
-        // parse fail → 静默漏匹配。superreview P2 fix。
+        // **Claude Opus 4.8 + adaptive thinking + effort=medium**(2026-06-11 迁移,对应旧
+        // gpt-5.5 + reasoning=medium):跨语言昵称推理("宝贝 ↔ Abby")需要思考,这是全 App
+        // 唯一保留 thinking 的调用。adaptive = 模型自己决定想多少,简单输入几乎不想。
+        // maxTokens 升到 8192:adaptive thinking 的 thinking token 计入 max_tokens,
+        // 旧 4096 在长 inventory + 思考展开时可能截断 JSON。
+        // 结构化输出(jsonSchema)保证返回匹配 schema 的合法 JSON —— hallucination 验证
+        // (模型回吐 input 里不存在的 tag)仍保留,schema 管形状不管内容真伪。
         // superreview P1 #7 fix:on-write 是 fire-and-forget,失败必须有 Log,
         // 否则持续 401/429 / 解析失败时 alias 索引完全静默失效,无从诊断。
-        guard let raw = await chat(
+        guard let raw = await claudeChat(
             prompt: prompt,
-            model: "gpt-5.5",
-            maxTokens: 4096,
-            forceJSON: true,
-            reasoningEffort: "medium"
+            model: ClaudeModel.opus,
+            maxTokens: 8192,
+            adaptiveThinking: true,
+            effort: "medium",
+            jsonSchema: Self.aliasMatchesSchema,
+            // adaptive thinking 非流式:思考期间零字节静默,默认 30s idle 超时不够。
+            requestTimeout: 150
         )?.trimmingCharacters(in: .whitespacesAndNewlines) else {
-            Log.warning("[OpenAIService] judgeThemeAliases: chat() returned nil — likely rate-limited / auth / network failure", category: .ai)
+            Log.warning("[OpenAIService] judgeThemeAliases: claudeChat() returned nil — likely rate-limited / auth / network failure", category: .ai)
             return []
         }
         if Task.isCancelled { return [] }
@@ -169,16 +176,20 @@ extension OpenAIService {
         没有任何同实体组:{"groups":[]}
         """
 
-        // gpt-5.5 + reasoning=medium。scan 一次扫全量,JSON 输出可能很大,maxTokens 给到 6144。
-        // **throws 区分**:chat() 返 nil → 网络/后端故障 → throw .requestFailed
+        // Claude Opus 4.8 + adaptive thinking + effort=medium(同 judgeThemeAliases)。
+        // scan 一次扫全量,JSON 输出可能很大 + thinking token 计入 max_tokens,给到 10240。
+        // **throws 区分**:claudeChat() 返 nil → 网络/后端故障 → throw .requestFailed
         //                 JSON 解析失败 → throw .parsingFailed
         //                 真的 0 条匹配 → return [](Settings 显示"没找到")
-        guard let raw = await chat(
+        guard let raw = await claudeChat(
             prompt: prompt,
-            model: "gpt-5.5",
-            maxTokens: 6144,
-            forceJSON: true,
-            reasoningEffort: "medium"
+            model: ClaudeModel.opus,
+            maxTokens: 10_240,
+            adaptiveThinking: true,
+            effort: "medium",
+            jsonSchema: Self.aliasGroupsSchema,
+            // 同 judgeThemeAliases:thinking + 大 JSON 输出,非流式静默期超默认 30s idle。
+            requestTimeout: 150
         )?.trimmingCharacters(in: .whitespacesAndNewlines) else {
             throw ThemeAliasError.requestFailed
         }
@@ -246,6 +257,55 @@ extension OpenAIService {
         }
         return out
     }
+
+    // MARK: - Structured output schemas
+    //
+    // Anthropic structured outputs(output_config.format)的 JSON schema。约束:
+    // 所有 object 必须 `additionalProperties: false`;不支持数值/长度约束(min/max),
+    // 范围类校验仍靠 prompt + 客户端后处理。
+    private static let aliasMatchesSchema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "matches": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "properties": [
+                        "new": ["type": "string"],
+                        "canonical": ["type": "string"],
+                        "confidence": ["type": "string", "enum": ["high", "medium"]],
+                        "reason": ["type": "string"]
+                    ],
+                    "required": ["new", "canonical", "confidence"],
+                    "additionalProperties": false
+                ]
+            ]
+        ],
+        "required": ["matches"],
+        "additionalProperties": false
+    ]
+
+    private static let aliasGroupsSchema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "groups": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "properties": [
+                        "canonical": ["type": "string"],
+                        "aliases": ["type": "array", "items": ["type": "string"]],
+                        "confidence": ["type": "string", "enum": ["high", "medium"]],
+                        "reason": ["type": "string"]
+                    ],
+                    "required": ["canonical", "aliases", "confidence"],
+                    "additionalProperties": false
+                ]
+            ]
+        ],
+        "required": ["groups"],
+        "additionalProperties": false
+    ]
 
     fileprivate static func snippetSummary(_ raw: String, max: Int) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)

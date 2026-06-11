@@ -2,12 +2,13 @@
 //  OpenAIServiceStreamingTests.swift
 //  ChronoteTests
 //
-//  Wire-level SSE 翻译层测试(megareview OPT-HIGH H6)。
+//  Wire-level SSE 翻译层测试(megareview OPT-HIGH H6;2026-06-11 GPT→Claude 迁移后
+//  wire 形状换成 Anthropic 帧:content_block_delta / message_delta / message_stop)。
 //
-//  覆盖 `OpenAIService.streamReportEvents` 把 OpenAI SSE 字节流 → `StreamEvent` enum 的关键路径:
-//   - 正常 chunks + finish_reason="stop" + [DONE] → 多个 .chunk + .done(无 .truncated)
-//   - chunks + finish_reason="length" → .chunk + .truncated(锁住"max_completion_tokens 撞顶"路径)
-//   - 已 yield chunk 后 stream 错误 / EOF → .truncated(non-empty body 不视为彻底 failed)
+//  覆盖 `OpenAIService.streamReportEvents` 把 Anthropic SSE 字节流 → `StreamEvent` enum 的关键路径:
+//   - 正常 text_delta×N + message_delta(end_turn) + message_stop → 多个 .chunk + .done(无 .truncated)
+//   - text_delta + message_delta(stop_reason=max_tokens) → .chunk + .truncated(锁住"max_tokens 撞顶"路径)
+//   - 已 yield chunk 后 stream 错误 / EOF(无 message_stop)→ .truncated(non-empty body 不视为彻底 failed)
 //
 //  历史 bug 复盘:reviewer 之前发现 `AsyncLineSequence` 在 iOS 26 不为空行 yield ""→ SSEParser
 //  失去 dispatch 信号 → 所有 chunk 粘成一坨 throw invalidEvent → 整流哑掉但服务端 200。
@@ -41,29 +42,30 @@ final class OpenAIServiceStreamingTests: XCTestCase {
 
     // MARK: - Helpers
 
-    /// 拼一条 OpenAI SSE 事件帧:`data: {json}\n\n`。
+    /// 拼一条 SSE 事件帧:`data: {json}\n\n`(SSEParser 忽略 `event:` 行,只看 data payload
+    /// 里的 `type` 判别字段,mock 不必带 event 行)。
     private func sseFrame(_ json: String) -> String {
         "data: \(json)\n\n"
     }
 
-    /// 构造一条 chunk JSON。`finishReason` 可选 — 通常只在最后一帧带 "stop" / "length"。
-    private func chunkJSON(content: String?, finishReason: String? = nil) -> String {
-        var deltaPart = "{}"
-        if let content {
-            let escaped = content
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-                .replacingOccurrences(of: "\n", with: "\\n")
-            deltaPart = "{\"content\":\"\(escaped)\"}"
-        }
-        let reasonPart = finishReason.map { "\"\($0)\"" } ?? "null"
-        return "{\"choices\":[{\"delta\":\(deltaPart),\"finish_reason\":\(reasonPart)}]}"
+    /// Anthropic 文本增量帧。
+    private func textDeltaJSON(_ content: String) -> String {
+        let escaped = content
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        return "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\(escaped)\"}}"
     }
 
-    private func makeSSEBody(frames: [String], appendDone: Bool = true) -> Data {
+    /// Anthropic 收尾信号帧(stop_reason 在 message_delta 帧,不在内容帧上)。
+    private func stopJSON(reason: String) -> String {
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"\(reason)\"}}"
+    }
+
+    private func makeSSEBody(frames: [String], appendStop: Bool = true) -> Data {
         var body = frames.map { sseFrame($0) }.joined()
-        if appendDone {
-            body += "data: [DONE]\n\n"
+        if appendStop {
+            body += sseFrame("{\"type\":\"message_stop\"}")
         }
         return body.data(using: .utf8)!
     }
@@ -94,12 +96,14 @@ final class OpenAIServiceStreamingTests: XCTestCase {
 
     // MARK: - Tests
 
-    /// 正常完成:多个 chunk + finish_reason="stop" + [DONE] → 收到 .chunk×N + .done,**不**带 .truncated。
+    /// 正常完成:多个 text_delta + message_delta(end_turn) + message_stop → 收到 .chunk×N + .done,
+    /// **不**带 .truncated。
     func test_streamReportEvents_normalCompletion_emitsChunksAndDone() async {
         let frames = [
-            chunkJSON(content: "[HEADLINE]\n"),
-            chunkJSON(content: "晴天散步\n[BODY]\n"),
-            chunkJSON(content: "今天心情不错。", finishReason: "stop")
+            textDeltaJSON("[HEADLINE]\n"),
+            textDeltaJSON("晴天散步\n[BODY]\n"),
+            textDeltaJSON("今天心情不错。"),
+            stopJSON(reason: "end_turn")
         ]
         let body = makeSSEBody(frames: frames)
         MockURLProtocol.requestHandler = { request in
@@ -116,9 +120,9 @@ final class OpenAIServiceStreamingTests: XCTestCase {
 
         // 3 个 .chunk + 终态 .done(P1 fix 2026-05-13:即便 finish_reason=stop 也走 line 200 emit .done)
         let chunkCount = events.filter { if case .chunk = $0 { return true }; return false }.count
-        XCTAssertEqual(chunkCount, 3, "三条 data 帧应该 yield 三个 .chunk")
+        XCTAssertEqual(chunkCount, 3, "三条 text_delta 帧应该 yield 三个 .chunk")
         XCTAssertFalse(events.contains { if case .truncated = $0 { return true }; return false },
-                       "finish_reason=stop 不应触发 .truncated")
+                       "stop_reason=end_turn 不应触发 .truncated")
         XCTAssertFalse(events.contains { if case .failed = $0 { return true }; return false },
                        "正常完成路径不应 emit .failed")
         // **显式锁定终态 .done**(codex P3 followup):`generateReportFromData` line 200 在没 emit
@@ -130,14 +134,16 @@ final class OpenAIServiceStreamingTests: XCTestCase {
         }
     }
 
-    /// finish_reason="length"(超 max_completion_tokens) → 最后一条 chunk 仍 yield + emit .truncated。
-    /// 锁住"max_completion_tokens 撞顶"路径不会丢掉最末 chunk 的 content(P1 fix 2026-05-13)。
+    /// stop_reason="max_tokens"(撞 max_tokens 上限)→ 内容帧全部 yield + emit .truncated。
+    /// Anthropic 把 stop_reason 放在内容帧之后的独立 message_delta 帧,内容天然先 yield 完,
+    /// 不存在旧 OpenAI "最后一条 chunk 同时带 content + finish_reason" 的丢末段问题。
     func test_streamReportEvents_finishReasonLength_emitsTruncated() async {
         let frames = [
-            chunkJSON(content: "[HEADLINE]\n散步\n[BODY]\n开头"),
-            chunkJSON(content: "中段写了一些", finishReason: "length")  // 这条 content 必须先 yield 再标 truncated
+            textDeltaJSON("[HEADLINE]\n散步\n[BODY]\n开头"),
+            textDeltaJSON("中段写了一些"),
+            stopJSON(reason: "max_tokens")
         ]
-        let body = makeSSEBody(frames: frames, appendDone: false)
+        let body = makeSSEBody(frames: frames, appendStop: false)
         MockURLProtocol.requestHandler = { request in
             let response = HTTPURLResponse(
                 url: request.url!,
@@ -155,22 +161,24 @@ final class OpenAIServiceStreamingTests: XCTestCase {
             if case .chunk(let s) = event { return s } else { return nil }
         }
         XCTAssertEqual(chunkContents.count, 2,
-                       "finish_reason=length 也要把当条 content 先 yield 出去,P1 fix 锁定")
+                       "stop_reason=max_tokens 前的内容帧都要 yield 出去")
         XCTAssertTrue(chunkContents.last?.contains("中段") == true,
                        "最末 chunk 的 content 不能因为 truncated 提前 return 丢掉")
 
         let truncatedCount = events.filter { if case .truncated = $0 { return true }; return false }.count
-        XCTAssertEqual(truncatedCount, 1, "finish_reason=length 应 emit 一条 .truncated")
+        XCTAssertEqual(truncatedCount, 1, "stop_reason=max_tokens 应 emit 一条 .truncated")
         XCTAssertFalse(events.contains { if case .failed = $0 { return true }; return false },
                        "truncated 不应同时被归类为 failed")
     }
 
-    /// finish_reason="content_filter" 也应触发 .truncated(同 hasTruncatedFinish 逻辑)。
+    /// stop_reason="refusal" 也应触发 .truncated(对应旧 content_filter 语义,
+    /// 同 isTruncatedStop 逻辑)。
     func test_streamReportEvents_finishReasonContentFilter_emitsTruncated() async {
         let frames = [
-            chunkJSON(content: "开头", finishReason: "content_filter")
+            textDeltaJSON("开头"),
+            stopJSON(reason: "refusal")
         ]
-        let body = makeSSEBody(frames: frames, appendDone: false)
+        let body = makeSSEBody(frames: frames, appendStop: false)
         MockURLProtocol.requestHandler = { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
                                             headerFields: ["Content-Type": "text/event-stream"])!
@@ -179,20 +187,19 @@ final class OpenAIServiceStreamingTests: XCTestCase {
 
         let events = await collectEvents(service.streamReportEvents(entries: fakeEntries()))
         XCTAssertTrue(events.contains { if case .truncated = $0 { return true }; return false },
-                       "content_filter 也应被 hasTruncatedFinish 识别")
+                       "refusal 也应被 isTruncatedStop 识别")
     }
 
-    /// 无 [DONE] 收尾:SSEParser 在 EOF 未见 [DONE] 时 `throw ParserError.missingDone`
-    /// ([SSEParser.swift](Chronote/Services/OpenAI/SSEParser.swift) line 182)。
-    /// `generateReportFromData` catch 路径在 `hasEmittedAnyChunk=true` 时 emit `.truncated`
-    /// (line 205-209,reason="Report incomplete (connection interrupted)"),**非** `.done` /  `.failed`。
-    /// codex P3 followup:锁住"已 yield chunk 后 server 没发 [DONE] → .truncated"的语义,
+    /// 无 message_stop 收尾:SSEParser 在 EOF 未见 [DONE](Anthropic 流里不存在)时
+    /// `throw ParserError.missingDone`。`streamClaudeChatEvents` catch 路径在
+    /// `hasEmittedAnyChunk=true` 时 emit `.truncated`,**非** `.done` / `.failed`。
+    /// codex P3 followup:锁住"已 yield chunk 后 server 没发成功终止帧 → .truncated"的语义,
     /// 防 future 把 missingDone 抹掉或改成 .failed(用户会看红 banner 而非"内容不完整"提示)。
     func test_streamReportEvents_noDoneMarkerAfterChunk_emitsTruncated() async {
         let frames = [
-            chunkJSON(content: "一行 headline\n[BODY]\n一段 body")
+            textDeltaJSON("一行 headline\n[BODY]\n一段 body")
         ]
-        let body = makeSSEBody(frames: frames, appendDone: false)
+        let body = makeSSEBody(frames: frames, appendStop: false)
         MockURLProtocol.requestHandler = { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
                                             headerFields: ["Content-Type": "text/event-stream"])!
@@ -203,17 +210,17 @@ final class OpenAIServiceStreamingTests: XCTestCase {
         let chunkCount = events.filter { if case .chunk = $0 { return true }; return false }.count
         XCTAssertGreaterThanOrEqual(chunkCount, 1, "应至少 yield 一个 chunk")
         XCTAssertFalse(events.contains { if case .failed = $0 { return true }; return false },
-                       "已 yield chunk + 缺 [DONE] 路径不应归 .failed(.failed 仅在 hasEmittedAnyChunk=false 时)")
+                       "已 yield chunk + 缺终止帧路径不应归 .failed(.failed 仅在 hasEmittedAnyChunk=false 时)")
         XCTAssertFalse(events.contains { if case .done = $0 { return true }; return false },
-                       "SSEParser throws missingDone → catch path,不走 line 200-202 的 .done emit")
+                       "SSEParser throws missingDone → catch path,不应 emit .done")
         guard case .truncated = events.last else {
-            XCTFail("缺 [DONE] 已 yield chunk 路径终态应为 .truncated,实际 events=\(events)")
+            XCTFail("缺终止帧已 yield chunk 路径终态应为 .truncated,实际 events=\(events)")
             return
         }
     }
 
     func test_askEvents_trimsLargeQuestionAndContextBeforeSending() async throws {
-        let body = makeSSEBody(frames: [chunkJSON(content: "ok", finishReason: "stop")])
+        let body = makeSSEBody(frames: [textDeltaJSON("ok")])
         MockURLProtocol.requestHandler = { request in
             let response = HTTPURLResponse(
                 url: request.url!,
@@ -252,7 +259,7 @@ final class OpenAIServiceStreamingTests: XCTestCase {
     }
 
     func test_askEvents_trimsLargeEnglishQuestionAndContextBeforeSending() async throws {
-        let body = makeSSEBody(frames: [chunkJSON(content: "ok", finishReason: "stop")])
+        let body = makeSSEBody(frames: [textDeltaJSON("ok")])
         MockURLProtocol.requestHandler = { request in
             let response = HTTPURLResponse(
                 url: request.url!,

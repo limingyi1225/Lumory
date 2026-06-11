@@ -17,7 +17,10 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,主 target
 
 - **iOS 客户端**:SwiftUI + CoreData + `NSPersistentCloudKitContainer`(CloudKit 同步)。App 入口 [Chronote/ChronoteApp.swift](Chronote/ChronoteApp.swift) 的 `var body: some Scene`,启动先走 `SplashView`(约 1s)再淡出到 `HomeView`。iOS 部署目标 26.0。
 - **后端**:Node.js + Express 5,部署在 `https://lumory.isaabby.com`(Cloudflare → nginx:443 → node:3000),PM2 进程管理。
-- **AI**:走自建后端代理 OpenAI(`/api/openai/chat/completions` / `/api/openai/embeddings` / `/api/openai/audio/transcriptions`)。Chat 走 SSE 流,模型 `gpt-5.5` / `gpt-5.4-mini`(reasoning effort 分档);转写 `gpt-4o-mini-transcribe`。
+- **AI**(2026-06-11 GPT→Claude + 端上迁移,三家分工):
+  - **端上 Apple Foundation Models**([OnDeviceAIService.swift](Chronote/Services/OnDeviceAIService.swift),`@Generable` 守护式生成):心情打分 / 主题提取 / 一句话摘要 / 写作提示建议 4 个高频任务;端上不可用(没开 Apple Intelligence / 老机型 / 超长输入 / guardrails 拒答)静默回落云端 Sonnet。
+  - **Claude**(走自建后端**哑代理** `/api/anthropic/messages`,透传 Anthropic Messages 原生格式不翻译):叙事报告 / Ask Past(SSE 流式,终止帧 `message_stop` 非 `[DONE]`)+ 导入解析 / 别名判定(非流式),模型 `claude-opus-4-8`;端上 4 任务的云端兜底 `claude-sonnet-4-6`。**thinking 只有别名判定开**(adaptive + effort medium),其余全关;JSON 输出走 structured outputs(`output_config.format` json_schema)。
+  - **OpenAI**(保留 `/api/openai/embeddings` / `/api/openai/audio/transcriptions`):embeddings `text-embedding-3-small`(Anthropic 无 embeddings API,换 provider 须全量重建向量索引,**有意保留**);转写 `gpt-4o-mini-transcribe`(backlog:跟 iOS 26 `SpeechTranscriber` 做 A/B)。旧 `/api/openai/chat/completions` 端点**服务端保留**(在野旧版本 App 还在打),客户端调用方已全删。
 - **本地化**:中(`zh-Hans.lproj`)/ 英(`en.lproj`),由 `@AppStorage("appLanguage", store: AppGroup.userDefaults)` 切换 —— 主 App + widget extension 共用 App Group `group.Mingyi.Lumory` 这个 UserDefaults suite。
 
 ## 目录(顶级)

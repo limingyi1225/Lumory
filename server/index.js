@@ -33,12 +33,18 @@ const log = pino({
       'req.body.messages[*].content',
       'req.body.input',
       'req.body.prompt',
+      'req.body.system',
       'err.response.data',
       'err.config.data',
       'err.config.headers.authorization',
       'err.config.headers.Authorization',
       'err.config.headers["x-app-secret"]',
       'err.config.headers["X-App-Secret"]',
+      // Anthropic 出站请求的 API key(axios 错误对象的 config 快照里会带 headers)。
+      // 现有 log 出口都走 safeUpstreamError(只抽 name/message/code/status)摸不到 config,
+      // 这条是 future-proof 兜底 —— 跟上面 authorization 的防御同语义。
+      'err.config.headers["x-api-key"]',
+      'err.config.headers["X-Api-Key"]',
       'err.request._header',
     ],
     censor: '[REDACTED]',
@@ -52,6 +58,15 @@ if (!OPENAI_API_KEY) {
 }
 log.info({ keyLength: OPENAI_API_KEY.length }, 'Loaded OPENAI_API_KEY');
 
+// Anthropic(Claude)迁移:chat 类调用走 Claude(Opus 4.8 / Sonnet 4.6 兜底),
+// embeddings / 转写仍走 OpenAI。fail-closed 与 OPENAI_API_KEY 同语义。
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+if (!ANTHROPIC_API_KEY) {
+  log.fatal('Missing ANTHROPIC_API_KEY. Set it in server/.env');
+  process.exit(1);
+}
+log.info({ keyLength: ANTHROPIC_API_KEY.length }, 'Loaded ANTHROPIC_API_KEY');
+
 // 客户端在每个请求里要带 `X-App-Secret: <APP_SHARED_SECRET>` 才放行。
 // 没配就让 server 在启动时直接拒绝跑（fail-closed），避免无意识把不鉴权的代理暴露出去。
 const APP_SHARED_SECRET = process.env.APP_SHARED_SECRET;
@@ -63,6 +78,8 @@ if (!APP_SHARED_SECRET) {
 }
 
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
+const ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
+const ANTHROPIC_VERSION = '2023-06-01';
 function positiveNumberEnv(name, defaultValue) {
   const value = Number(process.env[name]);
   return Number.isSafeInteger(value) && value > 0 ? value : defaultValue;
@@ -109,6 +126,14 @@ const CHAT_DEFAULT_MODEL = CHAT_MODEL_ALLOWLIST.has('gpt-5.5')
   ? 'gpt-5.5'
   : CHAT_MODEL_ALLOWLIST.values().next().value;
 const EMBEDDING_MODEL = 'text-embedding-3-small';
+// Claude 模型 allowlist:opus 给质量敏感调用(叙事/AskPast/导入/别名判定),
+// sonnet 给端上 Foundation Models 不可用时的兜底(心情/主题/摘要/建议)。
+const ANTHROPIC_MODEL_ALLOWLIST = new Set(
+  modelAllowlistEnv('ANTHROPIC_MODEL_ALLOWLIST', ['claude-opus-4-8', 'claude-sonnet-4-6'])
+);
+const ANTHROPIC_DEFAULT_MODEL = ANTHROPIC_MODEL_ALLOWLIST.has('claude-opus-4-8')
+  ? 'claude-opus-4-8'
+  : ANTHROPIC_MODEL_ALLOWLIST.values().next().value;
 // 转写模型 hardcode,不读 client `model` 字段——客户端可篡改 header,信任边界在服务端。
 // 未来要 A/B 不同模型,在这里加 allowlist。
 const TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
@@ -305,6 +330,16 @@ const chatLimiter = rateLimit({
   message: { error: 'rate_limited' },
 });
 
+// Anthropic messages 与 OpenAI chat 同额度但独立桶(迁移期两边并行跑,共享桶会互相挤兑)。
+const anthropicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  keyGenerator: installKey,
+  message: { error: 'rate_limited' },
+});
+
 const embeddingsLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 300,
@@ -394,6 +429,7 @@ app.use(
   jsonBodyErrorHandler
 );
 app.use('/api/openai/chat/completions', chatLimiter);
+app.use('/api/anthropic/messages', anthropicLimiter);
 app.use('/api/openai/embeddings', embeddingsLimiter);
 // 转写挂双层:per-install 紧 + per-IP 独立兜底。注意挂的顺序在 multer 之前,
 // 限流先于读取 multipart body —— 被限流时不浪费 25 MB 上传带宽。
@@ -474,6 +510,69 @@ function sseFrameHasDone(frame) {
     if (!line.startsWith('data:')) return false;
     return line.slice(5).trim() === '[DONE]';
   });
+}
+
+// Anthropic SSE 的成功终止帧是 `event: message_stop`(没有 OpenAI 的 `data: [DONE]`)。
+// 语义同 sawDone:上游 end 时没见过 message_stop → 半截流,destroy res 让客户端重试。
+function sseFrameHasMessageStop(frame) {
+  return frame.split(/\r?\n/).some((line) => {
+    if (!line.startsWith('event:')) return false;
+    return line.slice(6).trim() === 'message_stop';
+  });
+}
+
+// Anthropic Messages 请求清洗。信任边界与 sanitizeChatBody 同思路:
+// model 走 allowlist(防篡改客户端升级到更贵模型)、max_tokens clamp、
+// 只透传已知形状的字段(thinking 仅 adaptive;output_config 仅 effort + json_schema)。
+function sanitizeAnthropicBody(body) {
+  const requestedModel = typeof body?.model === 'string' ? body.model : ANTHROPIC_DEFAULT_MODEL;
+  const model = ANTHROPIC_MODEL_ALLOWLIST.has(requestedModel)
+    ? requestedModel
+    : ANTHROPIC_DEFAULT_MODEL;
+  // Anthropic 的 messages 只有 user/assistant;system 是独立顶层字段。
+  const messages = (Array.isArray(body?.messages) ? body.messages : []).map((message) => ({
+    role: ['user', 'assistant'].includes(message?.role) ? message.role : 'user',
+    content: sanitizeMessageContent(message?.content),
+  }));
+
+  const sanitized = {
+    model,
+    messages,
+    stream: body?.stream === true ? true : undefined,
+    max_tokens: clampCompletionTokens(body?.max_tokens),
+  };
+
+  if (typeof body?.system === 'string' && body.system.length > 0) {
+    sanitized.system = body.system;
+  }
+  // Opus 4.8 上 thinking 只有 adaptive 一种开法(enabled+budget_tokens 会 400);
+  // 省略 = 关。其他形状一律丢弃。
+  if (body?.thinking?.type === 'adaptive') {
+    sanitized.thinking = { type: 'adaptive' };
+  }
+  const outputConfig = {};
+  if (['low', 'medium', 'high'].includes(body?.output_config?.effort)) {
+    outputConfig.effort = body.output_config.effort;
+  }
+  const format = body?.output_config?.format;
+  if (
+    format?.type === 'json_schema' &&
+    format.schema &&
+    typeof format.schema === 'object' &&
+    !Array.isArray(format.schema)
+  ) {
+    outputConfig.format = { type: 'json_schema', schema: format.schema };
+  }
+  if (Object.keys(outputConfig).length > 0) {
+    sanitized.output_config = outputConfig;
+  }
+
+  return sanitized;
+}
+
+function countAnthropicBodyChars(sanitized) {
+  const systemChars = typeof sanitized.system === 'string' ? sanitized.system.length : 0;
+  return systemChars + countMessageContentChars(sanitized.messages);
 }
 
 function safeUpstreamError(err) {
@@ -701,6 +800,190 @@ app.post('/api/openai/chat/completions', async (req, res) => {
     }
     const status = upstreamStatusForError(err);
     req.log.error({ err: safeUpstreamError(err), status }, 'OpenAI request failed');
+    if (!res.headersSent) {
+      const retryAfter = err.response?.headers?.['retry-after'];
+      if (status === 429 && retryAfter) {
+        res.setHeader('Retry-After', retryAfter);
+      }
+      res.status(status).json({ error: sanitizeUpstreamError(err, status) });
+    } else if (isStreaming) {
+      res.destroy(err);
+    } else {
+      res.end();
+    }
+  }
+});
+
+// Anthropic Messages proxy(Claude)。结构与上面 OpenAI chat 路由严格同构:
+// streaming/buffered 双分支、error-listener-先于-activeStreams.add、mid-stream idle 计时器、
+// 客户端断开 sentinel。差异只有三处:上游 URL/headers、成功终止帧(message_stop 而非
+// data:[DONE])、char cap 把独立的 system 字段也计入。
+app.post('/api/anthropic/messages', async (req, res) => {
+  const isStreaming = req.body?.stream === true;
+
+  if (!Array.isArray(req.body?.messages) || req.body.messages.length === 0) {
+    res.status(400).json({ error: 'Request body must include a non-empty `messages` array.' });
+    return;
+  }
+  if (req.body.messages.length > MAX_MESSAGES_COUNT) {
+    res.status(400).json({ error: 'too many messages' });
+    return;
+  }
+  const upstreamBody = sanitizeAnthropicBody(req.body);
+  if (countAnthropicBodyChars(upstreamBody) > MAX_MESSAGES_CHARS) {
+    res.status(413).json({ error: 'messages too large' });
+    return;
+  }
+
+  const anthropicHeaders = {
+    'x-api-key': ANTHROPIC_API_KEY,
+    'anthropic-version': ANTHROPIC_VERSION,
+    'Content-Type': 'application/json',
+  };
+
+  let abortUpstream;
+  try {
+    if (isStreaming) {
+      req.log.info('anthropic streaming request started');
+
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+
+      const abortController = new AbortController();
+      abortUpstream = () => {
+        abortController.abort();
+      };
+      res.on('close', abortUpstream);
+
+      const upstream = await axios({
+        method: 'post',
+        url: `${ANTHROPIC_BASE_URL}/messages`,
+        data: upstreamBody,
+        headers: { ...anthropicHeaders, Accept: 'text/event-stream' },
+        responseType: 'stream',
+        timeout: REQUEST_TIMEOUT_MS,
+        signal: abortController.signal,
+        maxRedirects: 0,
+      });
+
+      let idleTimer = null;
+      const clearIdleTimer = () => {
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
+      };
+      const armIdleTimer = () => {
+        clearIdleTimer();
+        idleTimer = setTimeout(() => {
+          const idleError = new Error('upstream idle timeout');
+          idleError.code = 'UPSTREAM_IDLE_TIMEOUT';
+          upstream.data.destroy(idleError);
+        }, STREAM_IDLE_TIMEOUT_MS);
+      };
+
+      // 'error' listener 必须在 activeStreams.add 之前挂(见 OpenAI 路由同位置长注释)。
+      upstream.data.on('error', (error) => {
+        clearIdleTimer();
+        activeStreams.delete(upstream.data);
+        res.off('close', abortUpstream);
+        if (error?.code === 'CLIENT_DISCONNECT') {
+          req.log.info('client disconnect mid-stream — cleanup ran');
+        } else {
+          req.log.error({ err: safeUpstreamError(error) }, 'anthropic upstream stream errored');
+          if (!res.destroyed) {
+            res.destroy(error);
+          }
+        }
+      });
+
+      activeStreams.add(upstream.data);
+      armIdleTimer();
+
+      let sawStop = false;
+      let sseBuffer = '';
+      upstream.data.on('data', (chunk) => {
+        if (res.destroyed) {
+          const clientDisconnect = new Error('client disconnected');
+          clientDisconnect.code = 'CLIENT_DISCONNECT';
+          upstream.data.destroy(clientDisconnect);
+          return;
+        }
+        armIdleTimer();
+        const text = chunk.toString('utf8');
+        const combined = sseBuffer + text;
+        const frames = combined.split(/\r?\n\r?\n/);
+        sseBuffer = frames.pop() || '';
+        if (
+          !sawStop &&
+          (frames.some(sseFrameHasMessageStop) || sseFrameHasMessageStop(sseBuffer))
+        ) {
+          sawStop = true;
+        }
+        if (sseBuffer.length > 8192) {
+          sseBuffer = sseBuffer.slice(-8192);
+        }
+        if (!res.write(chunk)) {
+          upstream.data.pause();
+          if (res.listenerCount('drain') === 0) {
+            res.once('drain', () => upstream.data.resume());
+          }
+        }
+      });
+      upstream.data.on('end', () => {
+        clearIdleTimer();
+        activeStreams.delete(upstream.data);
+        res.off('close', abortUpstream);
+        if (res.destroyed) {
+          return;
+        }
+        if (!sawStop && sseFrameHasMessageStop(sseBuffer)) {
+          sawStop = true;
+        }
+        if (!sawStop) {
+          res.destroy(new Error('upstream ended without message_stop'));
+          return;
+        }
+        res.end();
+      });
+    } else {
+      req.log.info('anthropic non-streaming request started');
+
+      const nonStreamAbort = new AbortController();
+      const cancelOnClose = () => nonStreamAbort.abort();
+      res.on('close', cancelOnClose);
+      try {
+        const upstream = await axios.post(`${ANTHROPIC_BASE_URL}/messages`, upstreamBody, {
+          headers: anthropicHeaders,
+          timeout: REQUEST_TIMEOUT_MS,
+          signal: nonStreamAbort.signal,
+          maxContentLength: MAX_OPENAI_RESPONSE_BYTES,
+          maxRedirects: 0,
+        });
+        res.json(upstream.data);
+      } finally {
+        res.off('close', cancelOnClose);
+      }
+    }
+  } catch (err) {
+    if (isStreaming && abortUpstream) {
+      res.off('close', abortUpstream);
+    }
+    if (isStreaming && err.code === 'ERR_CANCELED') {
+      req.log.info('anthropic streaming request cancelled');
+      if (!res.destroyed) {
+        res.destroy(err);
+      }
+      return;
+    }
+    if (err.code === 'ERR_CANCELED') {
+      req.log.info('anthropic non-streaming request cancelled');
+      return;
+    }
+    const status = upstreamStatusForError(err);
+    req.log.error({ err: safeUpstreamError(err), status }, 'Anthropic request failed');
     if (!res.headersSent) {
       const retryAfter = err.response?.headers?.['retry-after'];
       if (status === 429 && retryAfter) {
@@ -1004,8 +1287,11 @@ module.exports = {
   positiveNumberEnv,
   modelAllowlistEnv,
   sanitizeChatBody,
+  sanitizeAnthropicBody,
+  countAnthropicBodyChars,
   sanitizeUpstreamError,
   sseFrameHasDone,
+  sseFrameHasMessageStop,
   normalizeInstallId,
   clientIPKey,
   upstreamStatusForError,

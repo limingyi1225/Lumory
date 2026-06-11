@@ -18,6 +18,7 @@ const assert = require('node:assert/strict');
 const axios = require('axios');
 
 process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-openai-key';
+process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test-anthropic-key';
 process.env.APP_SHARED_SECRET = process.env.APP_SHARED_SECRET || 'test-app-secret';
 // 设高让 chat per-install (120) / transcription per-install (10) 成为 binding 限流。
 // globalIPLimiter (per-IP) 在 999 远高于本文件任何单测的 per-IP 用量。

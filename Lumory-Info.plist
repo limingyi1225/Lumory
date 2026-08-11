@@ -2,33 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>remote-notification</string>
-	</array>
-	<key>CFBundleIconName</key>
-	<string>AppIcon</string>
-	<!-- 声明 App 不使用非豁免加密：只走 Apple 系统提供的 TLS/iCloud/CloudKit，
-	     没有实现任何自定义加密算法、没有集成第三方 crypto 库。
-	     设了这个 key，App Store Connect 每次 archive 上传后就不再弹
-	     "App Encryption Documentation" 对话框。 -->
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Lumory uses the microphone to record voice notes for your diary. Recordings are sent through Lumory's backend to OpenAI for transcription and are not retained by either service after processing.</string>
-	<key>NSFaceIDUsageDescription</key>
-	<string>Lumory uses Face ID to lock your diary. You can turn this off in Settings.</string>
-	<!-- 自定义 key — 客户端共享密钥。值由 Xcode build settings 的 APP_SHARED_SECRET 替换，
-	     该变量由 Lumory.local.xcconfig（gitignored）注入。AppSecrets.swift 在运行时读取本键。
-	     如果 build settings 没设这个变量，下面字符串会保留 "$(APP_SHARED_SECRET)" 字面量，
-	     AppSecrets.swift 检测到 "$(" 前缀会落到空字符串 fallback → 后端 401。 -->
 	<key>APP_SHARED_SECRET</key>
 	<string>$(APP_SHARED_SECRET)</string>
-	<!-- URL schemes:widget tap "mingyi-lumory://compose" 走 .onOpenURL → LumoryURLRouter
-	     → ReminderNotificationRouter.requestComposeFocus()。
-	     - **`mingyi-lumory`** 是 canonical scheme(reverse-DNS-ish,撞名概率低,widget URL 用它)。
-	     - **`lumory`** 是 legacy 兼容 —— 早期版本注册的,保留以防别处有现存引用。
-	     scheme 名跟 LumoryURLRouter.route(for:) 一致 —— 改这里要同步改 router。 -->
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -42,6 +19,10 @@
 				<string>lumory</string>
 			</array>
 		</dict>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
 	</array>
 </dict>
 </plist>

@@ -13,7 +13,7 @@ struct DiaryDetailView: View {
     // `heroHeader`)在 +Display.swift 内部仍 `private`,因为只在 view body 渲染链路内使用。
     @ObservedObject var entry: DiaryEntry
     var startInEditMode: Bool = false
-    var onDeleted: (() -> Void)? = nil
+    var onDeleted: (() -> Void)?
     @Environment(\.managedObjectContext) var viewContext
     @Environment(\.dismiss) var dismiss
     @Environment(\.aiService) var aiService
@@ -21,6 +21,9 @@ struct DiaryDetailView: View {
     @StateObject var audioPlaybackController = AudioPlaybackController() // 新的控制器
     @State var displayableAudioDuration: TimeInterval = 0.0 // State for fetched duration
     @State var resolvedAudioURL: URL?
+    /// 音频进度条拖动态(非 nil = 手指正按在进度条上)。必须放主 struct:
+    /// Swift 的 `private` 在 extension 是 file-scoped,`audioBlock` 在 +Display.swift 里够不到。
+    @State var audioScrubFraction: Double?
 
     // 编辑模式相关状态
     @State var isEditing = false

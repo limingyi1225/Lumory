@@ -259,6 +259,9 @@ struct HomeView: View {
                         searchResultsList
                     }
                 }
+                // 玻璃的折射源。挂在 NavigationStack 根这一层(不是每个 List),
+                // sub-page 不要再挂一次 —— 见 lumoryAppBackground 文档里的 alpha 叠加坑。
+                .lumoryAppBackground()
                 .navigationTitle("")
                 #if canImport(UIKit)
                 .toolbarTitleDisplayMode(.inline)
@@ -498,6 +501,9 @@ struct HomeView: View {
                 diaryContentSections
             }
             .optimizedList()
+            // List 自带的实色背景要隐掉,否则它盖住 mainContentView 的 lumoryAppBackground,
+            // 时间线卡的 glassEffect 背后又变回均匀纯色 = 卡片边缘和背景糊成一片(2026-08-11)。
+            .scrollContentBackground(.hidden)
             // iOS 26 顶部边缘软渐隐 — 内容滚到顶下时贴玻璃感更自然,不再硬切到 navigation chrome。
             .scrollEdgeEffectStyle(.soft, for: .top)
             .scrollDismissesKeyboard(.interactively)

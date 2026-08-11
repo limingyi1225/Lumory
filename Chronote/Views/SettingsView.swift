@@ -8,8 +8,8 @@ import UIKit
 // MARK: - SettingsView
 //
 // 按频率分三层：
-// 1) 主层：常用 —— AI 一键索引、数据、iCloud、语言、关于
-// 2) 进阶子页：诊断 / 修复 / 分项索引 / DEBUG 工具
+// 1) 主层：常用 —— 主题整理、数据、提醒、隐私、语言、关于
+// 2) 进阶子页：AI 重建、诊断 / 修复、危险数据操作 / DEBUG 工具
 //
 // 视觉去掉原来的 `listRowBackground(RoundedRectangle + shadow(0.2))` 重阴影，
 // 让 iOS 26 inset-grouped 原生样式发挥作用，和首页的 Liquid Glass 对齐。
@@ -17,7 +17,6 @@ import UIKit
 struct SettingsView: View {
     @Binding var isSettingsOpen: Bool
     @Environment(\.managedObjectContext) private var viewContext
-    @Environment(\.colorScheme) private var colorScheme
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \DiaryEntry.date, ascending: false)]
     ) private var entries: FetchedResults<DiaryEntry>
@@ -30,12 +29,12 @@ struct SettingsView: View {
     // 各种模态 / 确认态
     @State private var showImportSheet = false
     @State private var showExportSheet = false
+    @State private var recentlyDeletedCount = 0
+    // 删除入口在进阶子页，但任务、确认和结果反馈必须由稳定的 Settings 根持有。
+    // 否则用户确认后返回上一层，子页销毁会让完成/失败 alert 无处展示。
     @State private var showDeleteAllAlert = false
     @State private var showDeleteCompleteAlert = false
     @State private var isDeletingAllEntries = false
-    @State private var recentlyDeletedCount = 0
-    /// (2026-05-19 P1-09 audit)删除全部失败时弹这个 alert。原先 `deleteAllEntries() → false`
-    /// 只 log 不告知用户,用户以为操作成功但日记还在,信任崩。
     @State private var deleteAllFailureMessage: String?
 
     @EnvironmentObject var importService: CoreDataImportService
@@ -61,7 +60,6 @@ struct SettingsView: View {
             Form {
                 appHeaderSection
                 homeDisplaySection
-                aiIndexSection
                 reminderSection
                 privacySection
                 dataSection
@@ -75,11 +73,7 @@ struct SettingsView: View {
             .listStyle(.insetGrouped)
             #endif
             .scrollContentBackground(.hidden)
-            // backgroundGradient 不能挂 Form 上 — 用户反馈从子页面 pop 回 Settings 时背景"暗一闪"。
-            // 原因:NavigationStack pop 转场时 Form view tree 短暂重建,挂 Form 的 .background()
-            // 那一帧未应用 → 露出 sheet 的 .regularMaterial 背景 → material 透出后面被 dim 的 Home。
-            // 把 backgroundGradient 挪到 NavigationStack 外(下方 .background 调用),让它永远 in-place
-            // 不受 push/pop 影响。
+            // Form 的实色滚动背景必须隐藏,让 NavigationStack 根上的稳定 grouped 背景透出。
             .navigationTitle(NSLocalizedString("设置", comment: "Settings"))
             #if !os(macOS)
             // P1-Set-10 .inline → .automatic — iOS 26 large title 在滚顶时动态收缩,
@@ -91,6 +85,7 @@ struct SettingsView: View {
                         isSettingsOpen = false
                     }
                     .fontWeight(.semibold)
+                    .disabled(isDeletingAllEntries)
                 }
             }
             #endif
@@ -104,34 +99,56 @@ struct SettingsView: View {
                 DiaryExportView()
                     .environment(\.managedObjectContext, viewContext)
             }
-            .alert(NSLocalizedString("删除完成", comment: "Deletion complete"), isPresented: $showDeleteCompleteAlert) {
-                Button(NSLocalizedString("好", comment: "OK")) { isSettingsOpen = false }
-            } message: {
-                Text(NSLocalizedString("已删除所有日记", comment: "All entries deleted"))
-            }
-            // (2026-05-19 P1-09 audit)删除全部失败 alert — service 返 false(磁盘满 / CoreData
-            // save 失败 / 数据库正在被 CloudKit lock 等)时弹出来,而不是静默回到原状态让用户疑惑。
-            .alert(
-                NSLocalizedString("删除失败", comment: "Delete all failed alert title"),
-                isPresented: Binding(
-                    get: { deleteAllFailureMessage != nil },
-                    set: { if !$0 { deleteAllFailureMessage = nil } }
-                )
-            ) {
-                Button(NSLocalizedString("好", comment: "OK"), role: .cancel) {
-                    deleteAllFailureMessage = nil
-                }
-            } message: {
-                Text(deleteAllFailureMessage ?? "")
-            }
             .task {
                 // Settings 进来同步一次系统通知权限(用户可能在 Settings.app 改了)。
                 await reminderService.refreshAuthorizationStatus()
                 await refreshRecentlyDeletedCount()
             }
         }
-        // backgroundGradient 挂在 NavigationStack 外 — 不受 push/pop 影响,消除子页面回来"暗一闪"。
-        .background(backgroundGradient.ignoresSafeArea())
+        .alert(
+            String(
+                format: NSLocalizedString("删除全部 %d 条日记？", comment: "Delete all confirm title with count"),
+                entries.count
+            ),
+            isPresented: $showDeleteAllAlert
+        ) {
+            Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
+                #if canImport(UIKit)
+                HapticManager.shared.destructive()
+                #endif
+                Task { await deleteAllEntries() }
+            }
+            Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(NSLocalizedString(
+                "无法撤销。已合并的主题分组和 AI 历史对话也会一并清除。",
+                comment: "Delete all undo side-effect message"
+            ))
+        }
+        .alert(NSLocalizedString("删除完成", comment: "Deletion complete"), isPresented: $showDeleteCompleteAlert) {
+            Button(NSLocalizedString("好", comment: "OK")) { isSettingsOpen = false }
+        } message: {
+            Text(NSLocalizedString("已删除所有日记", comment: "All entries deleted"))
+        }
+        .alert(
+            NSLocalizedString("删除失败", comment: "Delete all failed alert title"),
+            isPresented: Binding(
+                get: { deleteAllFailureMessage != nil },
+                set: { if !$0 { deleteAllFailureMessage = nil } }
+            )
+        ) {
+            Button(NSLocalizedString("好", comment: "OK"), role: .cancel) {
+                deleteAllFailureMessage = nil
+            }
+        } message: {
+            Text(deleteAllFailureMessage ?? "")
+        }
+        // 删除期间不允许下拉关闭 sheet；返回主设置页可以，但任务和反馈仍由本层持有。
+        .interactiveDismissDisabled(isDeletingAllEntries)
+        // Settings 的 Form row 是系统实体面，背景必须是全高、恒定的 grouped base。
+        // 旧渐变在屏幕中段淡到纯白，白色 row 静止时融掉；滚进渐变区才突然出现边界。
+        // 恒定 grouped 背景让卡片无论位于屏幕哪里都有同样的分离度，也不会在 push/pop 叠层。
+        .background(Color.lumorySettingsGroupedBackground.ignoresSafeArea())
         // Settings 是 sheet,root toast overlay 被压住看不见;在 sheet 根挂一份。
         // 覆盖整个 NavigationStack,包括 push 进去的 AdvancedSettingsView —— 「清除 AI 回顾缓存」
         // 的 toast 在进阶子页触发,靠这层 overlay 浮出来。跟 InsightsView 等同 pattern。
@@ -183,44 +200,6 @@ struct SettingsView: View {
                         .frame(width: 24)
                 }
             }
-        }
-    }
-
-    // MARK: - AI(合并主题 + 重建索引一起放这里)
-
-    @ViewBuilder
-    private var aiIndexSection: some View {
-        Section(header: Text(NSLocalizedString("AI 与索引", comment: "AI section header"))) {
-            // 第一项:合并主题(原 themeAliasSection,搬过来)
-            NavigationLink {
-                ThemeAliasManagementView()
-                    .environment(\.managedObjectContext, viewContext)
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "tag.circle")
-                        .foregroundStyle(Color.accentColor)
-                        .symbolRenderingMode(.hierarchical)
-                        .frame(width: 24)
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text(NSLocalizedString("合并主题", comment: "Merge themes row"))
-                                .foregroundStyle(Color.primary)
-                            if aliasResolver.redDotVisible {
-                                Circle()
-                                    .fill(Color.red)
-                                    .frame(width: 8, height: 8)
-                                    .accessibilityLabel(NSLocalizedString("有待审建议", comment: "A11y red dot"))
-                            }
-                        }
-                        Text(themeAliasSubtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                }
-            }
-            // 第二项:重建全部 AI 分析(原 OneClickRebuildRow)
-            OneClickRebuildRow()
         }
     }
 
@@ -478,6 +457,35 @@ struct SettingsView: View {
     @ViewBuilder
     private var dataSection: some View {
         Section(header: Text(NSLocalizedString("数据", comment: "Data"))) {
+            // 主题合并直接影响日记数据如何聚合与展示，放在数据区第一项。
+            NavigationLink {
+                ThemeAliasManagementView()
+                    .environment(\.managedObjectContext, viewContext)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "tag.circle")
+                        .foregroundStyle(Color.accentColor)
+                        .symbolRenderingMode(.hierarchical)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(NSLocalizedString("合并主题", comment: "Merge themes row"))
+                                .foregroundStyle(Color.primary)
+                            if aliasResolver.redDotVisible {
+                                Circle()
+                                    .fill(Color.red)
+                                    .frame(width: 8, height: 8)
+                                    .accessibilityLabel(NSLocalizedString("有待审建议", comment: "A11y red dot"))
+                            }
+                        }
+                        Text(themeAliasSubtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+            }
+
             Button {
                 showImportSheet = true
             } label: {
@@ -515,60 +523,6 @@ struct SettingsView: View {
                 }
             }
 
-            Button {
-                showDeleteAllAlert = true
-            } label: {
-                HStack {
-                    settingsLabel(NSLocalizedString("删除所有日记", comment: "Delete all"), icon: "trash", tint: .semanticDestructive)
-                    if isDeletingAllEntries {
-                        Spacer()
-                        ProgressView()
-                    }
-                }
-            }
-            // (E-11 superreview 2026-05-19) entries 为空时禁用 —— 否则点进来弹"删除全部 0 条日记?"
-            // 很怪。空库没有可删的东西,按钮直接灰掉。
-            .disabled(isDeletingAllEntries || entries.isEmpty)
-            // 用户决定:不要红底(2026-05-05),保留 alert 内的数量 + warning haptic 已足够强警示。
-            // P0-UX (2026-05-19):title 直接量化,把数量从 message 第二行抬到 title —— Apple HIG 推荐
-            // destructive title 直接 "Delete 3 files?" 这种格式,数量是用户最关心的事实。
-            .alert(
-                String(
-                    format: NSLocalizedString("删除全部 %d 条日记？", comment: "Delete all confirm title with count"),
-                    entries.count
-                ),
-                isPresented: $showDeleteAllAlert
-            ) {
-                Button(NSLocalizedString("删除", comment: "Delete"), role: .destructive) {
-                    // P1-Set-2 destructive 确认即时 warning haptic — 区别于普通 .medium impact。
-                    #if canImport(UIKit)
-                    HapticManager.shared.destructive()
-                    #endif
-                    Task {
-                        let didDelete = await deleteAllEntries()
-                        if didDelete {
-                            showDeleteCompleteAlert = true
-                        } else {
-                            // (2026-05-19 P1-09 audit + superreview P1-4)失败必须告知用户,但
-                            // **不要**引到"数据库修复"路径 — 这里失败原因通常是 iCloud / 磁盘 /
-                            // CoreData lock,跟数据库损坏是两件事,跑修复会把用户带进死循环。
-                            #if canImport(UIKit)
-                            HapticManager.shared.notification(.error)
-                            #endif
-                            deleteAllFailureMessage = NSLocalizedString(
-                                "删除暂时无法完成。请稍后再试。如果反复失败,先确认 iCloud 已完成同步,或重启 App 后再试。",
-                                comment: "Delete all failed body"
-                            )
-                        }
-                    }
-                }
-                Button(NSLocalizedString("取消", comment: "Cancel"), role: .cancel) {}
-            } message: {
-                // title 已量化,message 留 undo + 副作用说明。
-                Text(NSLocalizedString("无法撤销。已合并的主题分组和 AI 历史对话也会一并清除。", comment: "Delete all undo side-effect message"))
-            }
-            // 「清除 AI 回顾缓存」已挪到 进阶 → AdvancedSettingsView(2026-05-14 用户决定):
-            // 它是低频维护操作,跟主层的导入/导出/删除全部不同档,放进阶更合适。
         }
     }
 
@@ -602,7 +556,12 @@ struct SettingsView: View {
     private var advancedSection: some View {
         Section(header: Text(NSLocalizedString("进阶", comment: "Advanced"))) {
             NavigationLink {
-                AdvancedSettingsView(isSettingsOpen: $isSettingsOpen)
+                AdvancedSettingsView(
+                    isSettingsOpen: $isSettingsOpen,
+                    isDeletingAllEntries: $isDeletingAllEntries,
+                    hasEntries: !entries.isEmpty,
+                    onRequestDeleteAll: { showDeleteAllAlert = true }
+                )
                     .environment(\.managedObjectContext, viewContext)
             } label: {
                 settingsLabel(
@@ -645,29 +604,27 @@ struct SettingsView: View {
         }
     }
 
-    /// 很淡的顶部 mood-tinted 渐变，让 Settings 和首页保持同一种空气感。
-    /// **P1-Dark-1**:亮色 0.08 蓝色叠白底是浅蓝空灵感成立;暗色 0.08 蓝色叠近黑底=深蓝紫色脏污。
-    /// 暗色调到 0.04 让渐变只是若隐若现的暖意,不抢内容。
-    private var backgroundGradient: some View {
-        LinearGradient(
-            colors: [
-                Color.accentColor.opacity(colorScheme == .dark ? 0.04 : 0.08),
-                Color.clear
-            ],
-            startPoint: .top,
-            endPoint: .center
-        )
-    }
-
-    // MARK: - Actions
-
-    private func deleteAllEntries() async -> Bool {
+    @MainActor
+    private func deleteAllEntries() async {
+        guard !isDeletingAllEntries else { return }
         isDeletingAllEntries = true
         defer { isDeletingAllEntries = false }
-        // (2026-05-15 megareview P1-9)`SettingsEntryDeletionService.deleteAll` 内部重新 fetch 一次,
-        // 抓 alert 弹窗到用户确认中间 CloudKit 同步进的新 entry,不再依赖这里传 snapshot。
-        return await SettingsEntryDeletionService.deleteAll(viewContext: viewContext)
+
+        // Service 会在确认后重新 fetch，包含 alert 展示期间由 CloudKit 同步进来的条目。
+        let didDelete = await SettingsEntryDeletionService.deleteAll(viewContext: viewContext)
+        if didDelete {
+            showDeleteCompleteAlert = true
+        } else {
+            #if canImport(UIKit)
+            HapticManager.shared.notification(.error)
+            #endif
+            deleteAllFailureMessage = NSLocalizedString(
+                "删除暂时无法完成。请稍后再试。如果反复失败,先确认 iCloud 已完成同步,或重启 App 后再试。",
+                comment: "Delete all failed body"
+            )
+        }
     }
+
 }
 
 struct SettingsView_Previews: PreviewProvider {

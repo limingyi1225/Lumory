@@ -5,56 +5,17 @@ import UIKit
 
 // MARK: - Backfill coordinator
 //
-// CLAUDE.md 点名的 `.shared.runningTask` race 的 UI 层解。
-// `ThemeBackfillService` / `EmbeddingBackfillService` / `PromptSuggestionEngine` 都是
-// 进程级单例且**非 actor-safe**(run() 的 `runningTask != nil` 检查没锁);OneClickRebuildRow
-// 走 theme → embedding → suggestions 串行,阶段之间 `progress.isRunning` 有 sub-ms 窗口都
-// 为 false,若此时用户从 AdvancedSettings 触发 per-service rebuild,会撞上 silent-drop。
+// `ThemeBackfillService` / `EmbeddingBackfillService` / `PromptSuggestionEngine` 都是进程级单例。
+// service 各自能防重复启动，但 OneClick 走 theme → embedding → suggestions 跨三个 service 串行；
+// 阶段之间 `progress.isRunning` 有短暂空窗，仍需要一个跨 service 的整体锁和生命周期真源。
 //
-// 这里用一个 `@Published` flag 跨 view 广播"OneClick 整体串行期间",让三个 rebuild 入口
-// 通过观察这个 flag + 各自 service 的 `isRunning` 互相 disable。
+// coordinator 同时持有阶段、停止标记和 Task。OneClick row 现在在 push 子页里，用户返回后
+// row 会销毁；运行态若仍放在 View 的 @State，重进页面就会失去进度和停止入口。
 @MainActor
 final class BackfillCoordinator: ObservableObject {
     static let shared = BackfillCoordinator()
 
-    /// OneClickRebuildRow.runAll() 整条串行流期间为 true。defer 复位,异常路径也安全。
-    @Published private(set) var isOneClickRunning: Bool = false
-
-    private init() {}
-
-    func runOneClick(_ operation: () async -> Void) async {
-        guard !isOneClickRunning else {
-            Log.info("[BackfillCoordinator] 已有一键重建在跑,忽略并发触发", category: .ui)
-            return
-        }
-        isOneClickRunning = true
-        defer { isOneClickRunning = false }
-        await operation()
-    }
-}
-
-// MARK: - One-click rebuild row
-//
-// 大版本升级后一键把三件事连着跑：重抽主题 → 补向量 → 暖 AI 提示词缓存。
-// 组合现成的 singletons，不新起 service —— 三个 @StateObject 订阅进度；
-// 编排在一个 Task 里按阶段切换。
-
-struct OneClickRebuildRow: View {
-    @StateObject private var themeService = ThemeBackfillService.shared
-    @StateObject private var embeddingService = EmbeddingBackfillService.shared
-    @StateObject private var suggestionEngine = PromptSuggestionEngine.shared
-    @StateObject private var coordinator = BackfillCoordinator.shared
-
-    @State private var stage: Stage = .idle
-    /// 待索引条目数 —— 进入设置时 / 重建完成后刷新一次。nil = 还没查过,不显示数字。
-    @State private var pendingCount: Int?
-    @State private var isCountingPending: Bool = false
-    /// (2026-05-19 superreview P1)stopAll 用的 stop sentinel — runAll 在每阶段 await 后读这个,
-    /// 一旦置 true 就立刻 stage=.idle return,后续 .embeddings / .suggestions 阶段不再启动。
-    /// 不用 Task.checkCancellation 因为 runAll 在 coordinator.runOneClick 内,外层 Task 没存 handle。
-    @State private var oneClickStopRequested: Bool = false
-
-    private enum Stage: Equatable {
+    enum Stage: Equatable {
         case idle
         case themes
         case embeddings
@@ -63,6 +24,139 @@ struct OneClickRebuildRow: View {
         case failed(String)
     }
 
+    /// 整条串行流期间为 true。即使 Advanced 页面被 pop，shared coordinator 仍保留真值。
+    @Published private(set) var isOneClickRunning: Bool = false
+    @Published private(set) var stage: Stage = .idle
+    @Published private(set) var pendingCount: Int?
+    @Published private(set) var isCountingPending: Bool = false
+
+    private var oneClickTask: Task<Void, Never>?
+    private var stopRequested = false
+    private var pendingCountGeneration = 0
+
+    private init() {}
+
+    func startOneClick() {
+        guard !isOneClickRunning,
+              !ThemeBackfillService.shared.progress.isRunning,
+              !EmbeddingBackfillService.shared.progress.isRunning,
+              !PromptSuggestionEngine.shared.isRefreshing else {
+            Log.info("[BackfillCoordinator] 已有 rebuild 在跑，忽略并发触发", category: .ui)
+            return
+        }
+
+        stopRequested = false
+        isOneClickRunning = true
+        stage = .themes
+        oneClickTask = Task { [weak self] in
+            guard let self else { return }
+            await self.executeOneClick()
+        }
+    }
+
+    /// 停止完整三阶段 chain。Theme / Embedding 可立即 cancel；Suggestions 没有 task handle，
+    /// 只能等待当前单次请求结束，但 sentinel 会阻止它落成 done 或继续任何后续工作。
+    func stopOneClick() {
+        guard isOneClickRunning else { return }
+        stopRequested = true
+
+        switch stage {
+        case .themes:
+            Task { await ThemeBackfillService.shared.cancel() }
+        case .embeddings:
+            Task { await EmbeddingBackfillService.shared.cancel() }
+        case .suggestions, .idle, .done, .failed:
+            break
+        }
+    }
+
+    /// 拉取两个 backfill 服务的待处理总数。generation 防止页面重进与任务收尾的两次查询
+    /// 乱序完成，让较老结果覆盖较新结果。
+    func refreshPendingCount() async {
+        pendingCountGeneration += 1
+        let generation = pendingCountGeneration
+        isCountingPending = true
+
+        async let themePending = ThemeBackfillService.shared.pendingCount()
+        async let embeddingPending = EmbeddingBackfillService.shared.pendingCount()
+        let total = (await themePending) + (await embeddingPending)
+
+        guard generation == pendingCountGeneration else { return }
+        pendingCount = total
+        isCountingPending = false
+    }
+
+    private func executeOneClick() async {
+        defer {
+            isOneClickRunning = false
+            oneClickTask = nil
+        }
+
+        if await finishIfStopRequested() { return }
+
+        // wordCount backfill 和主题一起跑。先跑本地的 wordCount，让累计字数最快恢复。
+        _ = await WordCountBackfillService.forceBackfill()
+        if await finishIfStopRequested() { return }
+        _ = await ThemeBackfillService.shared.backfillAll()
+        if await finishIfStopRequested() { return }
+
+        stage = .embeddings
+        _ = await EmbeddingBackfillService.shared.backfillAll()
+        if await finishIfStopRequested() { return }
+
+        stage = .suggestions
+        let suggestionGenerated = await PromptSuggestionEngine.shared.forceRefresh()
+        if await finishIfStopRequested() { return }
+
+        // 信号不足（<3 条日记）返回 false 是预期行为，不算失败。
+        let stats = await InsightsEngine.shared.writingStats()
+        let suggestionOK = suggestionGenerated || stats.totalEntries < 3
+        let themeFailed = ThemeBackfillService.shared.progress.failed
+        let embeddingFailed = EmbeddingBackfillService.shared.progress.failed
+
+        if themeFailed == 0, embeddingFailed == 0, suggestionOK {
+            stage = .done
+        } else {
+            var parts: [String] = []
+            if themeFailed > 0 {
+                parts.append(String(format: NSLocalizedString("主题 %d 失败", comment: ""), themeFailed))
+            }
+            if embeddingFailed > 0 {
+                parts.append(String(format: NSLocalizedString("向量 %d 失败", comment: ""), embeddingFailed))
+            }
+            if !suggestionOK {
+                parts.append(NSLocalizedString("提示词未生成", comment: ""))
+            }
+            stage = .failed(parts.joined(separator: "，"))
+        }
+
+        await refreshPendingCount()
+    }
+
+    private func finishIfStopRequested() async -> Bool {
+        guard stopRequested else { return false }
+        stopRequested = false
+        stage = .idle
+        await refreshPendingCount()
+        return true
+    }
+}
+
+// MARK: - One-click rebuild row
+//
+// 大版本升级后一键把三件事连着跑：重抽主题 → 补向量 → 暖 AI 提示词缓存。
+// 组合现成的 singletons，不新起 service。View 只订阅进度；完整编排由 shared coordinator 持有。
+
+struct OneClickRebuildRow: View {
+    @StateObject private var themeService = ThemeBackfillService.shared
+    @StateObject private var embeddingService = EmbeddingBackfillService.shared
+    @StateObject private var suggestionEngine = PromptSuggestionEngine.shared
+    @StateObject private var coordinator = BackfillCoordinator.shared
+
+    private var stage: BackfillCoordinator.Stage { coordinator.stage }
+    private var pendingCount: Int? { coordinator.pendingCount }
+    private var isCountingPending: Bool { coordinator.isCountingPending }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -70,9 +164,11 @@ struct OneClickRebuildRow: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(NSLocalizedString("重建全部 AI 分析", comment: "Rebuild all AI analysis"))
                             .foregroundStyle(Color.primary)
-                        Text(statusText)
-                            .font(.caption)
-                            .foregroundColor(statusColor)
+                        if showsRuntimeStatus {
+                            Text(statusText)
+                                .font(.caption)
+                                .foregroundColor(statusColor)
+                        }
                     }
                 } icon: {
                     Image(systemName: stageIcon)
@@ -92,7 +188,7 @@ struct OneClickRebuildRow: View {
             }
         }
         .task {
-            await refreshPendingCount()
+            await coordinator.refreshPendingCount()
         }
     }
 
@@ -159,6 +255,23 @@ struct OneClickRebuildRow: View {
         }
     }
 
+    /// 静止时不再放解释性副标题；只有正在执行或失败时才显示必要状态。
+    private var showsRuntimeStatus: Bool {
+        switch stage {
+        case .themes, .embeddings, .suggestions, .failed:
+            return true
+        case .idle, .done:
+            return false
+        }
+    }
+
+    private var startAccessibilityLabel: String {
+        if case .failed = stage {
+            return NSLocalizedString("重试重建全部 AI 分析", comment: "Retry all AI analysis rebuild a11y")
+        }
+        return NSLocalizedString("开始重建全部 AI 分析", comment: "Start all AI analysis rebuild a11y")
+    }
+
     @ViewBuilder
     private var trailing: some View {
         switch stage {
@@ -167,26 +280,31 @@ struct OneClickRebuildRow: View {
                 #if canImport(UIKit)
                 HapticManager.shared.click()
                 #endif
-                Task { await runAll() }
+                coordinator.startOneClick()
             } label: {
                 // P1-Set-7 .failed 态用"重试" + 旋转箭头(idle/done 仍是"开始")。
-                if case .failed = stage {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.clockwise")
-                        Text(NSLocalizedString("重试", comment: "Retry"))
-                    }
-                    .font(.caption.weight(.semibold))
-                } else {
-                    Text(NSLocalizedString("开始", comment: "Start"))
+                Group {
+                    if case .failed = stage {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.clockwise")
+                            Text(NSLocalizedString("重试", comment: "Retry"))
+                        }
                         .font(.caption.weight(.semibold))
+                    } else {
+                        Text(NSLocalizedString("开始", comment: "Start"))
+                            .font(.caption.weight(.semibold))
+                    }
                 }
+                .frame(minWidth: 44, minHeight: 44)
             }
-            // P1-Set-6 buttonStyle 统一 .glass(原来 OneClick 用 prominent / 单独 row 用 regular,
-            // 两者并列时层级跳)。视觉层级靠 Section 位置 + 文字传达。
-            .buttonStyle(.glass)
+            // 是明确的启动动作，使用实色系统按钮；它不使用 Liquid Glass，避免材质叠层。
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .controlSize(.small)
             // 另一条 rebuild 在跑(Advanced 的 per-service,或其他 OneClick 实例)→ 禁用,
             // 防撞 `.shared.runningTask` 非 actor-safe 的 race 窗口。
             .disabled(isExternalBackfillActive)
+            .accessibilityLabel(startAccessibilityLabel)
         case .themes, .embeddings, .suggestions:
             VStack(alignment: .trailing, spacing: 4) {
                 // (2026-05-19 P2-05 audit)运行中显式停止按钮 — 重建可能跑几分钟,之前只有
@@ -205,9 +323,13 @@ struct OneClickRebuildRow: View {
                             Text(NSLocalizedString("停止", comment: "Stop backfill"))
                                 .font(.caption.weight(.semibold))
                         }
+                        .frame(minWidth: 44, minHeight: 44)
                     }
-                    .buttonStyle(.glass)
-                    .accessibilityLabel(NSLocalizedString("停止重建", comment: "Stop rebuild a11y"))
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .tint(.red)
+                    .controlSize(.small)
+                    .accessibilityLabel(NSLocalizedString("停止重建全部 AI 分析", comment: "Stop all AI analysis rebuild a11y"))
                 } else {
                     ProgressView()
                 }
@@ -218,27 +340,9 @@ struct OneClickRebuildRow: View {
         }
     }
 
-    /// (2026-05-19 P2-05 audit + superreview P1)停止 OneClick 三阶段 chain。
-    /// 关键:**只 cancel 当前 service 不够** — runAll 是 sequential await chain,前一阶段返
-    /// 后立刻起下一阶段。设 oneClickStopRequested=true 让 runAll 在阶段间隙 short-circuit。
-    /// 不主动翻 stage=.idle:runAll 内部 stop check 会自己翻,避免跟 service progress publish 的
-    /// 终态写入抢状态。
+    /// 完整停止请求交给 shared coordinator；页面 pop / 重进不会换掉 sentinel。
     private func stopAll() {
-        oneClickStopRequested = true
-        switch stage {
-        case .themes:
-            Task { await themeService.cancel() }
-        case .embeddings:
-            Task { await embeddingService.cancel() }
-        case .suggestions:
-            // suggestions 阶段是单次 LLM call,没 task handle;无法 cancel,只能等它自己结束。
-            // 设 stopRequested 后 runAll 跑完该 await 立刻 short-circuit 出 .done/.idle。
-            break
-        default:
-            oneClickStopRequested = false  // idle/done/failed 不该被点,清回去
-            return
-        }
-        Task { await refreshPendingCount() }
+        coordinator.stopOneClick()
     }
 
     /// 本 row 当前不在 OneClick 运行态(那时 trailing 另走进度分支)时,外部是否有 rebuild 在跑。
@@ -290,16 +394,6 @@ struct OneClickRebuildRow: View {
         }
     }
 
-    /// 拉取两个 backfill 服务的待处理总数。一次并发 + 求和。
-    private func refreshPendingCount() async {
-        isCountingPending = true
-        async let themePending = ThemeBackfillService.shared.pendingCount()
-        async let embeddingPending = EmbeddingBackfillService.shared.pendingCount()
-        let total = (await themePending) + (await embeddingPending)
-        pendingCount = total
-        isCountingPending = false
-    }
-
     private var progressDetail: String {
         switch stage {
         case .themes:
@@ -313,94 +407,14 @@ struct OneClickRebuildRow: View {
         }
     }
 
-    private func runAll() async {
-        // 重入 guard：按钮 UI 已隐藏 start button 在 running 状态里，但 `stage = .themes` 到
-        // 第一个 await 之间如果再被触发会并行跑两条，两路都抢同一个 ThemeBackfillService.shared
-        // 的 progress 计数器。bail 掉后来的调用。
-        switch stage {
-        case .themes, .embeddings, .suggestions:
-            Log.info("[OneClickRebuild] 已有 rebuild 在跑，忽略重复触发", category: .ui)
-            return
-        default: break
-        }
-        // 兜底:Advanced 的 per-service 入口/另一条 OneClick 正在跑(按钮 disabled 之后仍
-        // 可能因观察时延被触发)→ 直接早退。
-        guard !isExternalBackfillActive else {
-            Log.info("[OneClickRebuild] 另一路 rebuild 已在跑(Advanced 或并发 OneClick)，忽略", category: .ui)
-            return
-        }
-
-        // 进入 runOneClick 前重置 sentinel(防上一轮 stopAll 残留 true)
-        oneClickStopRequested = false
-
-        await coordinator.runOneClick {
-            stage = .themes
-            // wordCount backfill 和主题一起跑——两者都扫全表，挂一块儿不额外往返。
-            // 先跑 wordCount：不依赖网络，几十 ms 搞定；顺序上放最前面让"累计字数"最快恢复。
-            _ = await WordCountBackfillService.forceBackfill()
-            _ = await ThemeBackfillService.shared.backfillAll()
-
-            // (2026-05-19 superreview P1)stop check 1:theme 阶段结束后用户若按停止,
-            // 立刻 short-circuit,不再起 embedding 阶段。
-            if oneClickStopRequested {
-                stage = .idle
-                oneClickStopRequested = false
-                await refreshPendingCount()
-                return
-            }
-
-            stage = .embeddings
-            _ = await EmbeddingBackfillService.shared.backfillAll()
-
-            // stop check 2:embedding 阶段结束后停止 → 不再起 suggestions。
-            if oneClickStopRequested {
-                stage = .idle
-                oneClickStopRequested = false
-                await refreshPendingCount()
-                return
-            }
-
-            stage = .suggestions
-            // forceRefresh 现在返回 Bool：true 表示真的生成了新 bundle；false 表示失败或信号不够。
-            // 旧的 `current != nil` 判定在 AI 失败时会被旧 cache 误判成成功。
-            let suggestionGenerated = await PromptSuggestionEngine.shared.forceRefresh()
-
-            // stop check 3:suggestions 完成后若用户曾按停止,跳过 done 翻 .idle。
-            if oneClickStopRequested {
-                stage = .idle
-                oneClickStopRequested = false
-                await refreshPendingCount()
-                return
-            }
-            // 信号不足（<3 条日记）走的也是 false，但这是预期行为不算失败——拿 writingStats 兜底判定一次。
-            let stats = await InsightsEngine.shared.writingStats()
-            let suggestionOk = suggestionGenerated || stats.totalEntries < 3
-
-            let themeFailed = themeService.progress.failed
-            let embeddingFailed = embeddingService.progress.failed
-
-            if themeFailed == 0, embeddingFailed == 0, suggestionOk {
-                stage = .done
-            } else {
-                var parts: [String] = []
-                if themeFailed > 0 { parts.append(String(format: NSLocalizedString("主题 %d 失败", comment: ""), themeFailed)) }
-                if embeddingFailed > 0 { parts.append(String(format: NSLocalizedString("向量 %d 失败", comment: ""), embeddingFailed)) }
-                if !suggestionOk { parts.append(NSLocalizedString("提示词未生成", comment: "")) }
-                stage = .failed(parts.joined(separator: "，"))
-            }
-
-            // 跑完后回到 idle 之前刷一遍 pending —— 用户立刻能看到"已是最新 ✓"。
-            await refreshPendingCount()
-        }
-    }
 }
 
 // MARK: - Embedding backfill row
 
 struct EmbeddingBackfillRow: View {
     @StateObject private var service = EmbeddingBackfillService.shared
-    // OneClickRow / ThemeBackfillRow / suggestion refresh 在跑时禁用本按钮,
-    // 避免与 `.shared.runningTask` 的非 actor-safe 入队撞 race。
+    // OneClickRow / ThemeBackfillRow / suggestion refresh 在跑时禁用本按钮，
+    // 避免不同入口争用同一组进程级 service。
     @StateObject private var themeService = ThemeBackfillService.shared
     @StateObject private var suggestionEngine = PromptSuggestionEngine.shared
     @StateObject private var coordinator = BackfillCoordinator.shared
@@ -417,9 +431,14 @@ struct EmbeddingBackfillRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(NSLocalizedString("生成语义索引", comment: "Build embedding index"))
                         .foregroundStyle(Color.primary)
-                    Text(statusText)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if !service.progress.isRunning, service.progress.total > 0 {
+                        Text(backfillLastRunText(
+                            processed: service.progress.processed,
+                            failed: service.progress.failed
+                        ))
+                            .font(.caption)
+                            .foregroundStyle(service.progress.failed > 0 ? Color.orange : Color.secondary)
+                    }
                 }
             } icon: {
                 Image(systemName: "sparkle.magnifyingglass")
@@ -435,7 +454,11 @@ struct EmbeddingBackfillRow: View {
                         #if canImport(UIKit)
                         HapticManager.shared.impact(.light)
                         #endif
-                        Task { await service.cancel() }
+                        if coordinator.isOneClickRunning {
+                            coordinator.stopOneClick()
+                        } else {
+                            Task { await service.cancel() }
+                        }
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "stop.fill")
@@ -443,9 +466,14 @@ struct EmbeddingBackfillRow: View {
                             Text(NSLocalizedString("停止", comment: "Stop backfill"))
                                 .font(.caption.weight(.semibold))
                         }
+                        .frame(minWidth: 44, minHeight: 44)
                     }
-                    .buttonStyle(.glass)
-                    .accessibilityLabel(NSLocalizedString("停止重建", comment: "Stop rebuild a11y"))
+                    .buttonStyle(.borderless)
+                    .tint(.red)
+                    .controlSize(.small)
+                    .accessibilityLabel(coordinator.isOneClickRunning
+                        ? NSLocalizedString("停止重建全部 AI 分析", comment: "Stop all AI analysis rebuild a11y")
+                        : NSLocalizedString("停止生成语义索引", comment: "Stop embedding index rebuild a11y"))
                     Text("\(service.progress.processed)/\(service.progress.total)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -454,29 +482,15 @@ struct EmbeddingBackfillRow: View {
                 Button(action: start) {
                     Text(NSLocalizedString("开始", comment: "Start"))
                         .font(.caption.weight(.semibold))
+                        .frame(minWidth: 44, minHeight: 44)
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.capsule)
+                .controlSize(.small)
                 .disabled(isOtherBackfillActive)
+                .accessibilityLabel(NSLocalizedString("开始生成语义索引", comment: "Start embedding index rebuild a11y"))
             }
         }
-    }
-
-    private var statusText: String {
-        if service.progress.isRunning {
-            return String(
-                format: NSLocalizedString("进度 %d%%（失败 %d）", comment: "Backfill progress"),
-                Int(service.progress.fraction * 100),
-                service.progress.failed
-            )
-        }
-        if service.progress.total > 0 {
-            return String(
-                format: NSLocalizedString("上次处理 %d 条，失败 %d 条", comment: "Backfill last result"),
-                service.progress.processed,
-                service.progress.failed
-            )
-        }
-        return NSLocalizedString("为历史日记生成语义向量，用于语义搜索和 Ask Your Past", comment: "Backfill subtitle")
     }
 
     private func start() {
@@ -491,8 +505,7 @@ struct EmbeddingBackfillRow: View {
 
 struct ThemeBackfillRow: View {
     @StateObject private var service = ThemeBackfillService.shared
-    // 同样的 `.shared.runningTask` race —— OneClick / Embedding / Suggestion 路径在跑时
-    // 禁用本菜单。
+    // OneClick / Embedding / Suggestion 路径在跑时禁用本菜单。
     @StateObject private var embeddingService = EmbeddingBackfillService.shared
     @StateObject private var suggestionEngine = PromptSuggestionEngine.shared
     @StateObject private var coordinator = BackfillCoordinator.shared
@@ -510,9 +523,14 @@ struct ThemeBackfillRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(NSLocalizedString("刷新主题", comment: "Refresh themes"))
                         .foregroundStyle(Color.primary)
-                    Text(statusText)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if !service.progress.isRunning, service.progress.total > 0 {
+                        Text(backfillLastRunText(
+                            processed: service.progress.processed,
+                            failed: service.progress.failed
+                        ))
+                            .font(.caption)
+                            .foregroundStyle(service.progress.failed > 0 ? Color.orange : Color.secondary)
+                    }
                 }
             } icon: {
                 Image(systemName: "tag.square.fill")
@@ -528,7 +546,11 @@ struct ThemeBackfillRow: View {
                         #if canImport(UIKit)
                         HapticManager.shared.impact(.light)
                         #endif
-                        Task { await service.cancel() }
+                        if coordinator.isOneClickRunning {
+                            coordinator.stopOneClick()
+                        } else {
+                            Task { await service.cancel() }
+                        }
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "stop.fill")
@@ -536,9 +558,14 @@ struct ThemeBackfillRow: View {
                             Text(NSLocalizedString("停止", comment: "Stop backfill"))
                                 .font(.caption.weight(.semibold))
                         }
+                        .frame(minWidth: 44, minHeight: 44)
                     }
-                    .buttonStyle(.glass)
-                    .accessibilityLabel(NSLocalizedString("停止重建", comment: "Stop rebuild a11y"))
+                    .buttonStyle(.borderless)
+                    .tint(.red)
+                    .controlSize(.small)
+                    .accessibilityLabel(coordinator.isOneClickRunning
+                        ? NSLocalizedString("停止重建全部 AI 分析", comment: "Stop all AI analysis rebuild a11y")
+                        : NSLocalizedString("停止刷新主题", comment: "Stop theme refresh a11y"))
                     Text("\(service.progress.processed)/\(service.progress.total)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -564,9 +591,13 @@ struct ThemeBackfillRow: View {
                         Image(systemName: "chevron.down")
                     }
                     .font(.caption.weight(.semibold))
+                    .frame(minWidth: 44, minHeight: 44)
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.capsule)
+                .controlSize(.small)
                 .disabled(isOtherBackfillActive)
+                .accessibilityLabel(NSLocalizedString("刷新主题选项", comment: "Theme refresh options a11y"))
             }
         }
         .alert(NSLocalizedString("重抽所有日记的主题？", comment: "Backfill all confirm title"),
@@ -583,23 +614,12 @@ struct ThemeBackfillRow: View {
                                    comment: "Backfill all confirm message"))
         }
     }
+}
 
-    private var statusText: String {
-        if service.progress.isRunning {
-            return String(
-                format: NSLocalizedString("进度 %d%%（失败 %d）", comment: "Backfill progress"),
-                Int(service.progress.fraction * 100),
-                service.progress.failed
-            )
-        }
-        if service.progress.total > 0 {
-            return String(
-                format: NSLocalizedString("上次处理 %d 条，失败 %d 条", comment: "Backfill last result"),
-                service.progress.processed,
-                service.progress.failed
-            )
-        }
-        return NSLocalizedString("用新的提取逻辑把存量日记的主题重新整理。",
-                                 comment: "Theme backfill subtitle")
-    }
+private func backfillLastRunText(processed: Int, failed: Int) -> String {
+    String(
+        format: NSLocalizedString("上次处理 %d 条，失败 %d 条", comment: "Backfill last result"),
+        processed,
+        failed
+    )
 }

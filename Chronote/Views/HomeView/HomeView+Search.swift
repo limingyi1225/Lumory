@@ -163,21 +163,33 @@ extension HomeView {
                 }
             }
             .optimizedList()
+            // 跟主时间线 List 一致:隐掉 List 实色背景,透出 mainContentView 的
+            // lumoryAppBackground,搜索结果卡的玻璃才有折射源(2026-08-11)。
+            .scrollContentBackground(.hidden)
             .scrollDismissesKeyboard(.interactively)
         }
     }
 
     @ViewBuilder
     private func searchResultRow(_ entry: DiaryEntry) -> some View {
-        Button {
-            shouldStartEditing = false
-            selectedEntry = entry
-        } label: {
-            HomeTimelineCard(entry: entry, appLanguage: appLanguage)
-                .padding(.bottom, 10)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(PlainButtonStyle())
+        // 与主时间线统一使用带位移容差的 TapGesture。Button 在没有 leading
+        // swipeActions 接管时会在右滑后保持 armed，抬手误开详情。
+        HomeTimelineCard(entry: entry, appLanguage: appLanguage)
+            .padding(.bottom, 10)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                #if canImport(UIKit)
+                HapticManager.shared.impact(.light)
+                #endif
+                shouldStartEditing = false
+                selectedEntry = entry
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction {
+                shouldStartEditing = false
+                selectedEntry = entry
+            }
         // §4.4 (2026-05-19) — 三件套(hidden separator + clear bg + 16/16 inset)走共享 modifier。
         .lumoryGlassListRow()
     }

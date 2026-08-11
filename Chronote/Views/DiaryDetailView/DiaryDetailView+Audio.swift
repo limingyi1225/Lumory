@@ -36,6 +36,23 @@ extension DiaryDetailView {
         return try? await audioAsset.load(.duration).seconds
     }
 
+    /// 纯预加载失败由调用点直接反馈。不能依赖 `onPlayError`：那个 callback 只有用户按下
+    /// 播放按钮时才会安装，而详情页 `.task` 和首次拖动都发生得更早。
+    func prepareAudioForSeeking(url: URL, fileName: String) {
+        do {
+            try audioPlaybackController.prepare(url: url, fileName: fileName)
+        } catch {
+            Log.error(
+                "[DiaryDetailView] Audio prepare failed for \(fileName): \(error.localizedDescription)",
+                category: .ui
+            )
+            LumoryToastCenter.shared.show(
+                NSLocalizedString("音频播放失败", comment: "DiaryDetailView audio playback error toast"),
+                severity: .warning
+            )
+        }
+    }
+
     func playOrPauseAudio(url: URL, fileName: String) {
         // **关键顺序**:callback 必须在 `play()` **之前**注册。AVAudioPlayer init 偶尔会同步抛
         // (corrupt file / unsupported codec),controller.play 内 catch 后**同步** call onPlayError。

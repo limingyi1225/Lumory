@@ -12,7 +12,7 @@ import CryptoKit
 //   - summarize       —— 日记摘要
 //   - analyzeMood     —— 情绪分数(0-1)
 //   - firstValidScore —— 静态 helper:从自由文本提取 mood 分数(测试可见)
-//   - extractThemes   —— 抽 2-4 个主题标签
+//   - extractThemes   —— 抽 0-4 个主题标签
 //   - embed           —— 向量嵌入
 //   - bannedThemes / embeddingPayload —— 私有静态 helper
 
@@ -119,7 +119,7 @@ extension OpenAIService {
     }
 
     // MARK: Themes — 抽取
-    /// 从日记里抽取 2-4 个「可聚合」标签：具体的人、地方、活动、项目、事件名。
+    /// 从日记里抽取 0-4 个「可聚合」标签：具体的人、地方、活动、项目、事件名。
     /// 情绪 / 心情 / 感受这类元描述是另一条线单独捕获的（见 analyzeMood），
     /// 不应混进来——否则所有 entry 都会被贴"情绪"，导致聚合时出现一大堆同名噪音。
     func extractThemes(text: String) async -> [String] {
@@ -138,48 +138,34 @@ extension OpenAIService {
         let prompt: String
         if isZh {
             prompt = """
-            从下面这篇日记里抽取 2-4 个最具辨识度的标签。
-            标签必须是**具体的实体**：人、宠物、地方、项目、活动、事件。
+            从下面这篇日记里抽取 0-4 个最具辨识度的标签。
+            标签必须是具体、值得跨日记聚合或在未来回顾的实体：人、宠物、地方、项目、活动、事件。
 
-            **重要：可以保留完整的多词短语**，带关系/修饰的更好：
-              ✓ "女朋友 Abby"（比单个 "Abby" 强——保留了角色关系）
-              ✓ "Orion 项目"、"上海出差"、"周三的跑步"、"妈妈打来的电话"
-              ✗ 单独的 "男朋友"、"项目"（太泛）
-              ✗ "情绪"、"焦虑"、"心情"（元描述，禁止）
+            原则：
+            - 标签长度 2-12 字，保持原文大小写、中英混合和 emoji 原样。
+            - 优先使用稳定、简洁的名称。同一实体应尽量使用可重复匹配的形式，例如“orgo老师Martin”应提取为“Martin”。
+            - 不要为了凑数生成标签。
+            - 禁止使用情绪、评价和泛化描述词，例如“焦虑”“开心”“感受”“日常”“生活”。
 
-            原则：标签长度 2-12 字，保持原文大小写、中英混合、emoji 原样。
-            同一实体在不同日记里要**能稳定聚合**——比如 Abby 这个人名本身是主键，
-            如果这篇里写的是"女朋友 Abby"而上篇是"Abby"，两篇都返回 "Abby" 即可，
-            关系/修饰词只在**第一次**出现或特别有意义时保留。
-
-            禁止使用情绪/评价词：情绪、心情、感受、反思、日常、记录、生活、
-            思考、想法、感想、焦虑、开心、难过、疲惫。情绪单独记录了。
-
-            如果整篇只是抒情没有具体对象，返回空数组。
+            如果日记里没有符合条件的具体实体，返回空数组。
             只返回 JSON：{"themes": ["标签1","标签2"]}
 
             日记：\"\(diaryEscaped)\"
             """
         } else {
             prompt = """
-            Extract 2-4 highly specific entity tags from this diary entry.
-            Tags MUST be concrete entities: people, pets, places, projects, activities, events.
+            Extract 0-4 of the most distinctive tags from this diary entry.
+            Tags must be concrete entities worth aggregating across diary entries or revisiting in the future:
+            people, pets, places, projects, activities, events.
 
-            **Multi-word phrases are allowed and often better** when they carry relationship or modifier context:
-              ✓ "girlfriend Abby" (beats bare "Abby" — preserves role)
-              ✓ "Orion project", "trip to Tokyo", "Wednesday run", "call from mom"
-              ✗ bare "boyfriend", "project" (too generic)
-              ✗ "emotion", "anxiety", "mood" (meta, banned)
+            Rules:
+            - Each tag must be 2-12 characters. Preserve the original casing, mixed scripts, and emoji exactly.
+            - Prefer stable, concise names. Use a consistently matchable form for the same entity;
+              for example, extract "Martin" from "orgo teacher Martin".
+            - Do not generate tags just to fill the quota.
+            - Do not use emotions, evaluations, or generic descriptors such as "anxiety", "happy", "feelings", "daily life", or "life".
 
-            Rules: 2-12 characters per tag, keep original casing, mixed script, emoji.
-            For the same entity across entries (e.g. Abby), **stable canonical form** matters —
-            prefer bare name once it's established; only carry the role modifier on first mention
-            or when the relationship is the salient part of the entry.
-
-            NEVER use feeling/evaluation words. Banned: emotion, feeling, mood, reflection, daily,
-            journal, thought, anxiety, happy, sad, tired, vibe, general, life.
-
-            If the entry is pure venting with no concrete subject, return an empty array.
+            If the diary contains no qualifying concrete entities, return an empty array.
             Return JSON only: {"themes": ["tag1","tag2"]}
 
             Diary: "\(diaryEscaped)"

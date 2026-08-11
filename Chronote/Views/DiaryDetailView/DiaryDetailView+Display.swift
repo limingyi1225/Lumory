@@ -25,7 +25,6 @@ struct DiaryDetailThemeSubject: Identifiable {
 }
 
 extension DiaryDetailView {
-
     // MARK: - Themes (footer)
 
     /// 主题来自 AI 自动抽取(写入/编辑后台流水线里 extractThemes),
@@ -50,11 +49,20 @@ extension DiaryDetailView {
                     Button {
                         openThemeFilter(theme)
                     } label: {
+                        // 2026-08-11 从 `liquidGlassCapsule(tint:)` 换成 mood 淡色实体药丸
+                        // (用户:"下面的 theme 作为玻璃看起来也很丑")。
+                        // 玻璃在这里本来就不成立:chip 只有 ~24pt 高、贴在实色 sheet 底上,
+                        // 折射面积小到只剩一圈灰边,视觉上就是"脏描边的小方块"。实体淡色填充
+                        // 才能让 mood 色真正读出来,也跟旁边的正文层级拉开。
                         Text(theme)
                             .font(.footnote)
+                            .foregroundStyle(.primary)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .liquidGlassCapsule(tint: moodTint)
+                            .background(moodTint.opacity(colorScheme == .dark ? 0.28 : 0.16), in: Capsule())
+                            .overlay(
+                                Capsule().strokeBorder(moodTint.opacity(colorScheme == .dark ? 0.34 : 0.26), lineWidth: 0.5)
+                            )
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(index == 0
@@ -299,41 +307,66 @@ extension DiaryDetailView {
         let isPlayingThis = audioPlaybackController.isPlaying && audioPlaybackController.currentPlayingFileName == audioFileName
         HStack(spacing: 14) {
             Button {
+                // 2026-08-11 用户"点播放/暂停感觉很迟缓,首页却灵敏"。
+                // 底层耗时两边一样(`AVAudioSession.setActive` + `AVAudioPlayer` 构造都是主线程
+                // 同步),差别在**按下去有没有立刻回应**:首页那个有 `.light` 震动 +
+                // `PressableScaleButtonStyle` 缩放,这里原来是 `PlainButtonStyle()`,两样都没有,
+                // 于是要等图标翻转才有反馈 —— 那已经是几十毫秒之后了。
+                #if canImport(UIKit)
+                HapticManager.shared.impact(.light)
+                #endif
                 playOrPauseAudio(url: audioURL, fileName: audioFileName)
             } label: {
-                Image(systemName: isPlayingThis ? "pause.circle.fill" : "play.circle.fill")
-                    .font(LumoryFonts.diaryImagePlaceholder)
+                // 2026-08-11 从 36pt 的 `play.circle.fill` 换成裸 `play.fill`(用户:"去掉外面的
+                // 圆形填充")。裸符号少一层形状,跟同页去玻璃化的主题药丸、无圆点的进度条一致。
+                // 尺寸退到 `.title2` 是因为 `circle.fill` 那 36pt 里大半是圆环占的,
+                // 直接把 36 套给三角形会突兀地大。颜色仍走 `entry.moodColor`,跟进度条同色系。
+                Image(systemName: isPlayingThis ? "pause.fill" : "play.fill")
+                    .font(.title2.weight(.semibold))
                     .foregroundStyle(entry.moodColor)
-                    .symbolRenderingMode(.hierarchical)
+                    // 图标切换本身也给个过渡,避免"啪"地硬换。
+                    // `contentTransition` 只在变化被动画包住时才生效,而 `isPlaying` 来自
+                    // controller 的 @Published、不在任何 withAnimation 里 —— 所以必须显式挂
+                    // `.animation(_:value:)`,否则这行是死的。
+                    .contentTransition(.symbolEffect(.replace))
+                    .animation(AnimationConfig.gentleSpring, value: isPlayingThis)
+                    // 符号变小后自身不再是够大的目标,显式补回 44pt。
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(PlainButtonStyle())
+            .buttonStyle(PressableScaleButtonStyle())
             .accessibilityLabel(isPlayingThis
                 ? NSLocalizedString("暂停录音", comment: "Pause recording a11y")
                 : NSLocalizedString("播放录音", comment: "Play recording a11y"))
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 2) {
                 let isCurrentFile = audioPlaybackController.currentPlayingFileName == audioFileName
-                let playbackTime = isCurrentFile ? audioPlaybackController.currentTime : 0
                 let playbackDuration = isCurrentFile && audioPlaybackController.duration > 0
                     ? audioPlaybackController.duration
                     : displayableAudioDuration
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.secondary.opacity(0.18))
-                            .frame(height: 5)
-                        if isCurrentFile && playbackDuration > 0 {
-                            Capsule()
-                                .fill(entry.moodColor)
-                                .frame(width: geo.size.width * audioPlaybackController.progress, height: 5)
-                        }
-                    }
+                // 拖动中读数跟手指走,不跟播放头走。
+                let shownTime = audioScrubFraction.map { $0 * playbackDuration }
+                    ?? (isCurrentFile ? audioPlaybackController.currentTime : 0)
+
+                AudioScrubber(
+                    scrubFraction: $audioScrubFraction,
+                    progress: isCurrentFile ? audioPlaybackController.progress : 0,
+                    duration: playbackDuration,
+                    tint: entry.moodColor,
+                    onScrubBegin: {
+                        // 还没播过的录音 player 尚未建立,先预加载,否则 seek 无处可去。
+                        prepareAudioForSeeking(url: audioURL, fileName: audioFileName)
+                    },
+                    onSeek: { audioPlaybackController.seek(to: $0) }
+                )
+
+                // 已播 / 剩余两端读数(系统播放器惯例),替掉原来的 `00:14 / 01:23` 合并串。
+                HStack(spacing: 0) {
+                    Text(formattedTimestamp(shownTime))
+                    Spacer(minLength: 0)
+                    Text("-" + formattedTimestamp(max(0, playbackDuration - shownTime)))
                 }
-                .frame(height: 5)
-                Text(formattedDuration(
-                    currentTime: playbackTime,
-                    totalDuration: playbackDuration
-                ))
-                .font(.caption.monospacedDigit())
+                .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
             }
 
@@ -361,6 +394,12 @@ extension DiaryDetailView {
         .liquidGlassCard(cornerRadius: LumoryCornerRadius.card)
         .task(id: audioFileName) {
             displayableAudioDuration = await fetchAudioDuration(url: audioURL) ?? 0.0
+            guard !Task.isCancelled else { return }
+            // 进详情就把 player 建好(只 prepareToPlay,不激活 audio session、不出声),
+            // 用户真按播放时省掉 `AVAudioPlayer(contentsOf:)` 这一步主线程构造 —— 这是
+            // "迟缓感"里**真实**的那部分延迟,haptic 只解决了感知的那部分。
+            // `prepare` 自身幂等,重复进出详情不会打断已在播放的音频。
+            prepareAudioForSeeking(url: audioURL, fileName: audioFileName)
         }
     }
 

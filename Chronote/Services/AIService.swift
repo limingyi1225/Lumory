@@ -140,7 +140,7 @@ protocol AIServiceProtocol: Sendable {
 
     // MARK: - Phase 0: AI × 统计融合地基
 
-    /// 从日记文本抽取 2-4 个主题标签（如：工作 / 家人 / 健康 / 睡眠）。
+    /// 从日记文本抽取 0-4 个主题标签。
     /// 返回值顺序不重要，语言应匹配输入文本。
     func extractThemes(text: String) async -> [String]
 

@@ -47,32 +47,28 @@ struct HomeComposerCard: View {
     @State private var draftDateBeforePicker: Date?
 
     var body: some View {
-        // GlassEffectContainer 包 outer card glass + inner send button(.glassProminent),
-        // SwiftUI 合并渲染,给 .glassProminent 必要的 surface 上下文。
-        // 不保证视觉上有明显玻璃感 —— .glassProminent 在没有可折射 backdrop 时可能就是
-        // tinted 色块,原生就这样,算了。
-        GlassEffectContainer(spacing: 12) {
-            VStack(alignment: .leading, spacing: 10) {
-                textInputArea
-                recordingsSection
-                if !photoVM.selectedImageItems.isEmpty { photosSection }
-                if photoVM.compressionFailureCount > 0 { compressionFailureBanner }
-                // 卡内分隔线:把"内容区"和"动作区(工具栏)"隔开。
-                // P1-Dark-3 用 .separator system color — 暗色下系统自动算到约 0.20 alpha,
-                // 之前 primary.opacity(0.06) 在 OLED 暗色基本不可见,分隔线消失。
-                Capsule()
-                    .fill(Color(.separator))
-                    .frame(height: 1)
-                    .padding(.horizontal, 4)
-                // 工具栏:photo / mic / 计时 / 发送。
-                HStack(spacing: 18) {
-                    keyboardActionsBar
-                }
-                .padding(.top, 2)
+        // Composer 自己是这一层唯一的 Liquid Glass。卡内按钮 / 录音行只用实体 fill、
+        // transparency 和 vibrancy,避免 glass-on-glass 把层级叠成两块镜片。
+        VStack(alignment: .leading, spacing: 10) {
+            textInputArea
+            recordingsSection
+            if !photoVM.selectedImageItems.isEmpty { photosSection }
+            if photoVM.compressionFailureCount > 0 { compressionFailureBanner }
+            // 卡内分隔线:把"内容区"和"动作区(工具栏)"隔开。
+            // P1-Dark-3 用 .separator system color — 暗色下系统自动算到约 0.20 alpha,
+            // 之前 primary.opacity(0.06) 在 OLED 暗色基本不可见,分隔线消失。
+            Capsule()
+                .fill(Color(.separator))
+                .frame(height: 1)
+                .padding(.horizontal, 4)
+            // 工具栏:photo / mic / 计时 / 发送。
+            HStack(spacing: 18) {
+                keyboardActionsBar
             }
-            .padding(16)
-            .liquidGlassCard(cornerRadius: LumoryCornerRadius.chip)
+            .padding(.top, 2)
         }
+        .padding(16)
+        .liquidGlassCard(cornerRadius: LumoryCornerRadius.chip)
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
                 Button {
@@ -268,13 +264,23 @@ struct HomeComposerCard: View {
     private var recordingsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let rec = recordingVM.audioRecordings.first {
-                    RecordingRow(
-                        recording: rec,
-                        controller: audioPlaybackController,
-                        isTranscribing: recordingVM.isTranscribing,
-                        isRecording: recorder.isRecording,
-                        onPlay: { onPlayRecording(rec.fileName) },
-                        onDelete: {
+                RecordingRow(
+                    recording: rec,
+                    controller: audioPlaybackController,
+                    isTranscribing: recordingVM.isTranscribing,
+                    isRecording: recorder.isRecording,
+                    onPlay: { onPlayRecording(rec.fileName) },
+                    onPrepareError: { error in
+                        Log.error(
+                            "[HomeComposer] Audio prepare failed for \(rec.fileName): \(error.localizedDescription)",
+                            category: .ui
+                        )
+                        recordingVM.audioPlaybackError = NSLocalizedString(
+                            "无法播放该录音,文件可能已损坏或丢失。",
+                            comment: "Audio playback failure banner"
+                        )
+                    },
+                    onDelete: {
                         recordingVM.deleteTarget = rec.fileName
                         recordingVM.showingDeleteAlert = true
                     }
@@ -560,9 +566,8 @@ struct HomeComposerCard: View {
 
         Spacer()
 
-        // 原生 `.buttonStyle(.glassProminent)` + accent tint。Apple 文档说这是 most prominent
-        // action 用的 Liquid Glass style。在 GlassEffectContainer 里 + 外层 liquidGlassCard 提供
-        // surface 上下文。渲染成什么样交给 SwiftUI,不手绘装饰。
+        // 外层 composer 已是 Liquid Glass。发送按钮改为单层 accent fill；在玻璃上再套
+        // `.glassProminent` 会形成 glass-on-glass,阴影 / rim 叠加后反而像另一块镜片。
         Button {
             // 点下时给 soft submit 反馈,完成时仍由 parent 的 handleSendAction 发 success。
             #if canImport(UIKit)
@@ -570,17 +575,26 @@ struct HomeComposerCard: View {
             #endif
             onSend()
         } label: {
-            if inputVM.sendButtonState == .sending {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Image(systemName: "arrow.up")
-                    .font(LumoryFonts.composerSendIcon)
+            ZStack {
+                Circle()
+                    .fill(sendButtonFill)
+                    .frame(width: 36, height: 36)
+                if inputVM.sendButtonState == .sending {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                } else {
+                    Image(systemName: "arrow.up")
+                        .font(LumoryFonts.composerSendIcon)
+                        .foregroundStyle(isSendActionAvailable ? Color.white : Color.secondary)
+                }
             }
+            // 视觉圆仍是 36pt，外层命中区保持系统建议的 44×44pt。
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.glassProminent)
-        .tint(Color.accentColor)
-        .disabled(!hasSendableContent || inputVM.sendButtonState != .idle)
+        .buttonStyle(PressableScaleButtonStyle())
+        .disabled(!isSendActionAvailable)
         .accessibilityLabel(NSLocalizedString("发送", comment: "Send"))
         .accessibilityIdentifier("home.keyboard.send")
     }
@@ -607,5 +621,16 @@ struct HomeComposerCard: View {
             && !recordingVM.isTranscribing
             && !photoVM.isProcessingSelection
             && !inputVM.isSending
+    }
+
+    private var isSendActionAvailable: Bool {
+        hasSendableContent && inputVM.sendButtonState == .idle
+    }
+
+    private var sendButtonFill: Color {
+        if isSendActionAvailable || inputVM.sendButtonState == .sending {
+            return Color.accentColor
+        }
+        return Color.secondary.opacity(colorScheme == .dark ? 0.22 : 0.16)
     }
 }

@@ -319,7 +319,7 @@
 "删除主题" = "Delete Theme";
 "无法连接到服务器,请稍后再试。" = "Couldn't reach the server. Please try again in a moment.";
 "AI 返回内容无法解析,请稍后再试。" = "Couldn't parse the AI response. Please try again later.";
-"想只跑其中一个时用。常规升级请用主页的『重建全部 AI 分析』。" = "Use these to run a single step. For normal upgrades, use 'Rebuild All AI Analysis' on the main Settings page.";
+"危险操作" = "Destructive Actions";
 "%d 篇" = "%d entries";
 "加载中…" = "Loading…";
 "没找到相关日记" = "No related entries";
@@ -367,7 +367,6 @@
 "下午状态如何？" = "How's your afternoon going?";
 "下降" = "Falling";
 "与过去对话" = "Chat with your past";
-"为历史日记生成语义向量，用于语义搜索和 Ask Your Past" = "Generate semantic vectors for past entries, used for semantic search and Ask Your Past";
 "主题 %d 失败" = "Theme %d failed";
 "今天发生了什么？" = "What happened today?";
 "今天想到 %@ 了吗？" = "Thinking about %@ today?";
@@ -393,7 +392,6 @@
 "原日记已不可用" = "Original entry no longer available";
 "发送" = "Send";
 "只修有问题的" = "Fix only issues";
-"只有同步出问题 / 数据显示异常时才需要用到这一层。" = "Only needed when sync goes wrong or data display looks abnormal.";
 "向量 %d 失败" = "Vector %d failed";
 "哪些日子因为 %@ 特别开心？" = "Which days were especially happy because of %@?";
 "回到顶部" = "Back to top";
@@ -452,7 +450,6 @@
 "点击修改时间" = "Tap to edit time";
 "现在的我最担心什么？" = "What am I most worried about right now?";
 "生成%@故事" = "Generate %@ story";
-"用新的提取逻辑把存量日记的主题重新整理。" = "Apply the new extraction logic to all existing entries.";
 "确定" = "OK";
 "积极" = "Positive";
 "第 2 / 3 步：补全语义向量…" = "Step 2/3: Filling semantic vectors…";
@@ -469,7 +466,6 @@
 "这段时间整体偏积极" = "Mood is generally positive for this period";
 "这段时间还没有日记。" = "No entries for this time range yet.";
 "这段时间还没有日记数据" = "No entries for this time range";
-"进度 %d%%（失败 %d）" = "Progress %d%% (%d failed)";
 "连续天数" = "Streak";
 "重抽所有日记的主题？" = "Re-extract themes for all entries?";
 "重新生成" = "Regenerate";
@@ -613,7 +609,6 @@
 "全部忽略" = "Ignore All";
 "它们会在下次 AI 扫描时重新出现。" = "They'll reappear after the next AI scan.";
 "不是" = "Not the same";
-"停止重建" = "Stop rebuild";
 "在 Insights 里生成一份 AI 回顾,这里会留下时间轴。" = "Generate an AI reflection from Insights and a timeline will appear here.";
 "问几个关于过去的问题,记录会出现在这里。" = "Ask a few questions about the past, and your records will show up here.";
 "删除这条记录?" = "Delete this record?";
@@ -680,5 +675,14 @@
 
 /* megareview i18n fix */
 "仅当 App 启动时报错 / 反复同步失败时使用。会重建本地数据库并尝试从 iCloud 恢复,期间数据不可访问。" = "Use this only if the app fails to launch or sync keeps failing. It rebuilds the local database and tries to recover from iCloud; your data is unavailable during the process.";
-"清除后 Insights「历史回顾」里的「故事」记录会全部消失,下次进入可重新生成。日记本身不受影响。" = "After clearing, the Story records under Insights › History will all be removed and can be regenerated next time you open it. Your diary entries themselves are not affected.";
 "录音文件已丢失" = "Recording file was lost";
+
+/* AudioScrubber — 可拖动进度条 a11y label */
+"播放进度" = "Playback progress";
+"开始重建全部 AI 分析" = "Start rebuilding all AI analysis";
+"重试重建全部 AI 分析" = "Retry rebuilding all AI analysis";
+"停止重建全部 AI 分析" = "Stop rebuilding all AI analysis";
+"开始生成语义索引" = "Start building semantic index";
+"停止生成语义索引" = "Stop building semantic index";
+"刷新主题选项" = "Theme refresh options";
+"停止刷新主题" = "Stop refreshing themes";

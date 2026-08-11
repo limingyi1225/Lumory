@@ -135,8 +135,12 @@ struct RecentlyDeletedView: View {
                         Text(NSLocalizedString("恢复", comment: "Restore"))
                     }
                 }
-                .buttonStyle(.glass)
+                // 外层 archive card 已经是 glass；恢复是卡内次级动作,用 borderless tint
+                // 保留交互层级,不再叠第二层 glass rim / shadow。
+                .buttonStyle(.borderless)
+                .tint(.accentColor)
                 .controlSize(.small)
+                .frame(minWidth: 44, minHeight: 44)
                 .disabled(operationInFlight != nil)
             }
             .font(.caption)

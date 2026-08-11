@@ -5,6 +5,13 @@ import Foundation
 import UIKit
 #endif
 
+/// 单个时间点 → `M:SS`(不补前导零的分钟,跟系统播放器 / 语音备忘录一致)。
+/// 播放器用"已播 / 剩余"两端读数,不再用 `formattedDuration` 那种 `00:14 / 01:23` 合并串。
+func formattedTimestamp(_ time: TimeInterval) -> String {
+    let total = Int(max(0, time.rounded()))
+    return String(format: "%d:%02d", total / 60, total % 60)
+}
+
 // 全局辅助函数：格式化时长
 func formattedDuration(currentTime: TimeInterval, totalDuration: TimeInterval) -> String {
     let currentIntSec = Int(max(0, currentTime))
@@ -136,6 +143,68 @@ final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate, Observable
         player.pause()
         isPlaying = false
         stopDisplayLink()
+    }
+
+    /// 只加载不播放 —— 让用户**在按播放之前就能拖进度条**。
+    ///
+    /// 没有这条的话,进度条在首次播放前 `audioPlayer == nil`,`seek` 无处可去,用户拖了没反应。
+    /// 幂等:同一个 fileName 且 player 还在就直接返回,不会打断正在播放的音频。
+    /// 正常纯预加载**不激活 audio session**，不抢别的 App 的音频焦点；session 激活留给
+    /// 真正的 `play()`。唯一例外是替换本 controller 正在播放的旧 player，此时会先结束旧播放。
+    func prepare(url: URL, fileName: String) throws {
+        if audioPlayer != nil && currentPlayingFileName == fileName { return }
+        // prepare 自己从不激活 AVAudioSession，因此替换一个纯预加载 / 已暂停的 player
+        // 也不能无条件 setActive(false)。AVAudioSession 是进程级共享资源，Detail 的独立
+        // controller 若在这里停 session，会把 Home 正在播放甚至正在录制的音频一起打断。
+        // 只有这个 controller 确实还在播放时，才需要把自己使用中的 session 一并停掉。
+        if let existingPlayer = audioPlayer {
+            let wasPlaying = existingPlayer.isPlaying || isPlaying
+            existingPlayer.stop()
+            isPlaying = false
+            stopDisplayLink()
+            audioPlayer = nil
+            if wasPlaying {
+                deactivateAudioSession(reason: "prepare replacement")
+            }
+        }
+        do {
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.delegate = self
+            guard player.prepareToPlay() else {
+                throw Self.playbackStartError()
+            }
+            audioPlayer = player
+            currentPlayingFileName = fileName
+            duration = player.duration
+            currentTime = 0
+            progress = 0
+        } catch {
+            Log.error("[AudioPlaybackController] prepare failed for \(fileName): \(error)", category: .ui)
+            // prepare 没有激活 session，失败清理只能碰本 controller 的 player / UI state。
+            // 这里绝不能复用 stopPlaybackCleanup()；后者会停用进程级 AVAudioSession。
+            currentPlayingFileName = nil
+            duration = 0
+            currentTime = 0
+            progress = 0
+            isPlaying = false
+            stopDisplayLink()
+            audioPlayer = nil
+            throw error
+        }
+    }
+
+    /// 拖动进度条后跳转。`AVAudioPlayer.currentTime` 是可写的,播放中直接赋值即可生效,
+    /// 不需要 pause → seek → resume 三步(那样会有一声爆音)。
+    ///
+    /// 播放中 seek 后 displayLink 下一帧就会用新的 `player.currentTime` 覆盖回来,
+    /// 所以这里同步写一遍 `currentTime` / `progress` 是给**暂停态**用的 —— 暂停时
+    /// displayLink 不跑,不写这两个 UI 就不动。
+    func seek(to time: TimeInterval) {
+        guard let player = audioPlayer, duration > 0 else { return }
+        let clamped = min(max(0, time), duration)
+        player.currentTime = clamped
+        currentTime = clamped
+        progress = clamped / duration
     }
 
     func stopPlayback(clearCurrentFile: Bool = true) {

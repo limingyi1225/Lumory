@@ -6,11 +6,14 @@ import UIKit
 
 // MARK: - Advanced sub-page
 //
-// 不常用的东西全放这里：同步诊断、数据库修复、分项 AI 索引控件、(DEBUG) 样本数据、UI 预览。
+// 不常用的东西全放这里：AI 重建、同步诊断、数据库修复、危险数据操作。
 // NavigationLink 过来一层深度，平时看不见。
 
 struct AdvancedSettingsView: View {
     @Binding var isSettingsOpen: Bool
+    @Binding var isDeletingAllEntries: Bool
+    let hasEntries: Bool
+    let onRequestDeleteAll: () -> Void
     @Environment(\.managedObjectContext) private var viewContext
     @EnvironmentObject private var syncMonitor: CloudKitSyncMonitor
 
@@ -29,17 +32,18 @@ struct AdvancedSettingsView: View {
     @State private var isSyncing = false
     @State private var syncMessage: String?
 
-    // 清除 AI 回顾缓存(2026-05-14 从主 Settings 搬进进阶 —— 低频维护操作,不该跟
-    // 导入/导出/删除全部同档摆在主层)。
+    // 清除 AI 回顾缓存(2026-05-14 从主 Settings 搬进进阶 —— 低频维护操作)。
     @State private var showResetNarrativeAlert = false
     @State private var isResettingNarrative = false
     @State private var resetNarrativeFailureMessage: String?
 
     var body: some View {
         Form {
+            oneClickRebuildSection
             troubleshootingSection
             perServiceIndexSection
             narrativeCacheSection
+            destructiveDataSection
         }
         #if os(macOS)
         .listStyle(.plain)
@@ -47,6 +51,9 @@ struct AdvancedSettingsView: View {
         .listStyle(.insetGrouped)
         #endif
         .scrollContentBackground(.hidden)
+        // Push 进来的 Form 不能依赖 parent 背景在所有转场 / 滚动状态下透传。
+        // 自己铺同一块不透明 grouped base，白色 section 才会和主 Settings 一样始终有边界。
+        .background(Color.lumorySettingsGroupedBackground.ignoresSafeArea())
         .navigationTitle(NSLocalizedString("进阶", comment: "Advanced"))
         #if !os(macOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -87,14 +94,17 @@ struct AdvancedSettingsView: View {
     }
 
     @ViewBuilder
+    private var oneClickRebuildSection: some View {
+        Section(header: Text(NSLocalizedString("AI 与索引", comment: "AI section header"))) {
+            OneClickRebuildRow()
+        }
+    }
+
+    @ViewBuilder
     private var troubleshootingSection: some View {
         // P1-Set-5 拆两个 Section — "立即同步 / 同步诊断" 是日常操作,"数据库修复" 是危险操作,
         // 之前共一个 Section 视觉权重平等,用户容易误点修复。独立 + 专属 footer 警告。
-        Section(
-            header: Text(NSLocalizedString("诊断与修复", comment: "Diagnose & repair")),
-            footer: Text(NSLocalizedString("只有同步出问题 / 数据显示异常时才需要用到这一层。",
-                                           comment: "Troubleshooting footer"))
-        ) {
+        Section(header: Text(NSLocalizedString("诊断与修复", comment: "Diagnose & repair"))) {
             Button {
                 performManualSync()
             } label: {
@@ -169,13 +179,37 @@ struct AdvancedSettingsView: View {
 
     @ViewBuilder
     private var perServiceIndexSection: some View {
-        Section(
-            header: Text(NSLocalizedString("分项索引", comment: "Per-service index")),
-            footer: Text(NSLocalizedString("想只跑其中一个时用。常规升级请用主页的『重建全部 AI 分析』。",
-                                           comment: "Per-service footer"))
-        ) {
+        Section(header: Text(NSLocalizedString("分项索引", comment: "Per-service index"))) {
             EmbeddingBackfillRow()
             ThemeBackfillRow()
+        }
+    }
+
+    // MARK: - Destructive data operations
+
+    @ViewBuilder
+    private var destructiveDataSection: some View {
+        Section(header: Text(NSLocalizedString("危险操作", comment: "Destructive operations section"))) {
+            Button {
+                onRequestDeleteAll()
+            } label: {
+                HStack {
+                    Label {
+                        Text(NSLocalizedString("删除所有日记", comment: "Delete all"))
+                            .foregroundStyle(Color.primary)
+                    } icon: {
+                        Image(systemName: "trash")
+                            .foregroundStyle(Color.semanticDestructive)
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(width: 24)
+                    }
+                    Spacer()
+                    if isDeletingAllEntries {
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(isDeletingAllEntries || !hasEntries)
         }
     }
 
@@ -187,13 +221,7 @@ struct AdvancedSettingsView: View {
     /// `.lumoryToastOverlay()`(本页是它 NavigationStack 内 push 的子页)。
     @ViewBuilder
     private var narrativeCacheSection: some View {
-        Section(
-            header: Text(NSLocalizedString("AI 回顾", comment: "AI narrative section")),
-            footer: Text(NSLocalizedString(
-                "清除后 Insights「历史回顾」里的「故事」记录会全部消失,下次进入可重新生成。日记本身不受影响。",
-                comment: "Reset narrative cache footer"
-            ))
-        ) {
+        Section(header: Text(NSLocalizedString("AI 回顾", comment: "AI narrative section"))) {
             Button {
                 showResetNarrativeAlert = true
             } label: {

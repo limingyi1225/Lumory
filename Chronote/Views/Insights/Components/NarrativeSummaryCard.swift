@@ -6,7 +6,7 @@ import Combine
 //
 // InsightsView 顶部"AI 浓缩卡" — 收起态只显一行诗意 headline,tap 整卡 present
 // NarrativeDetailSheet 进沉浸阅读。**wave15** 改造:删 inline 展开机制,headline
-// 跟 body 都由 gpt-5.5 一并生成,客户端 stream 收完后用 NarrativeStreamSplitter 一次
+// 跟 body 都由重活模型一并生成,客户端 stream 收完后用 NarrativeStreamSplitter 一次
 // split。streaming 期间用 sparks animate + thinking caption 占位。
 //
 // **生成策略**:.month 由 NarrativePrecomputeService 在写日记后 8s debounce 后台

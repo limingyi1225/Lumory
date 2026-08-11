@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Theme Alias(主题别名 AI 子系统)
 //
 // **wave11 拆出**:从 OpenAIService.swift 把"主题别名"两条入口聚到一起。
-// 共同特征:都是"标签去重"业务,模型 = gpt-5.5 + reasoning=medium(mini 抓不住跨语言
+// 共同特征:都是"标签去重"业务,模型 = AIModel.heavy + reasoning=medium(轻活模型抓不住跨语言
 // 昵称对应,low 抓不全,medium 是 quality/cost 折中)。`ThemeAliasResolver` 是真源,
 // 这里两个 API 都是发请求 + 解析 → 返回结构化结果给 resolver 入队待审。
 //
@@ -17,7 +17,7 @@ import Foundation
 extension OpenAIService {
     // MARK: - Theme alias judge (on-write + scan)
     //
-    // 模型 = gpt-5.5 + reasoning=medium。
+    // 模型 = AIModel.heavy + reasoning=medium。
     // mini 太弱抓不到"宝贝 ↔ Abby"这种跨语言昵称对应;5.5 + medium 是 quality/cost 折中。
     // 这两个接口都是写日记 hot-path 上跑的,延迟不敏感(banner 是异步软提示),但要稳定。
 
@@ -67,7 +67,7 @@ extension OpenAIService {
         没有匹配:{"matches":[]}
         """
 
-        // gpt-5.5 + reasoning=medium —— `low` 抓不住"宝贝 ↔ Abby"这种跨语言昵称。
+        // 重活模型(terra) + reasoning=medium —— `low` 抓不住"宝贝 ↔ Abby"这种跨语言昵称。
         // medium 的 reasoning token 大概 800-1500,output JSON ~300。max_completion_tokens 升到 4096
         // 给 p99 长 inventory 留余量;原 3072 下长清单 + medium reasoning 会偶发截断 JSON →
         // parse fail → 静默漏匹配。superreview P2 fix。
@@ -75,7 +75,7 @@ extension OpenAIService {
         // 否则持续 401/429 / 解析失败时 alias 索引完全静默失效,无从诊断。
         guard let raw = await chat(
             prompt: prompt,
-            model: "gpt-5.5",
+            model: AIModel.heavy,
             maxTokens: 4096,
             forceJSON: true,
             reasoningEffort: "medium"
@@ -169,14 +169,21 @@ extension OpenAIService {
         没有任何同实体组:{"groups":[]}
         """
 
-        // gpt-5.5 + reasoning=medium。scan 一次扫全量,JSON 输出可能很大,maxTokens 给到 6144。
+        // 重活模型(terra) + reasoning=medium。
+        // **maxTokens 12288(2026-08-11 从 6144 抬上来)**:`max_completion_tokens` 是
+        // **reasoning + 可见输出的总预算**,不是"留给 JSON 的空间"。这里输入是 top 150 个标签的
+        // 两两同实体比对,medium reasoning 的开销远大于隔壁 judgeThemeAliases(那边只判几个新标签,
+        // 4096 还是从 3072 抬上去才不截断的)—— scan 输入大一个量级却只给 1.5 倍预算,比例失衡。
+        // 可见输出侧其实很小(每组 ~40-50 token,40 组也才 ~2000),所以余量全是留给 reasoning 的。
+        // **抬高它几乎不花钱**:这是上限不是配额,只有真生成才计费;而截断的代价是用户主动点的
+        // "扫描已有主题"直接失败。服务端 MAX_CHAT_COMPLETION_TOKENS=16384,12288 在 cap 内。
         // **throws 区分**:chat() 返 nil → 网络/后端故障 → throw .requestFailed
         //                 JSON 解析失败 → throw .parsingFailed
         //                 真的 0 条匹配 → return [](Settings 显示"没找到")
         guard let raw = await chat(
             prompt: prompt,
-            model: "gpt-5.5",
-            maxTokens: 6144,
+            model: AIModel.heavy,
+            maxTokens: 12288,
             forceJSON: true,
             reasoningEffort: "medium"
         )?.trimmingCharacters(in: .whitespacesAndNewlines) else {
@@ -186,7 +193,9 @@ extension OpenAIService {
         guard let data = raw.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let arr = json["groups"] as? [[String: Any]] else {
-            // rawLength 接近 maxTokens(~24KB)→ 多半是被截断,不是模型故障。
+            // 两种截断长相不一样,别只认第一种:rawLength 接近 maxTokens(~24KB)= JSON 写到一半被切;
+            // **rawLength=0 / 极小 = reasoning 把预算吃光了**(该预算含 reasoning token)。两种都不是
+            // 模型故障。`chat()` 里的 finish_reason=length 打点会先落一条日志确认是哪种。
             Log.error("[OpenAIService] scanThemeAliasGroups: parse failed (rawLength=\(raw.count))", category: .ai)
             throw ThemeAliasError.parsingFailed
         }

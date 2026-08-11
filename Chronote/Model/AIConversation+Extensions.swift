@@ -18,7 +18,6 @@ import CoreData
 // 关系跨 CloudKit cascade,直接 JSON 更可靠)。
 
 extension AIConversation {
-
     // MARK: - Kind enum(避免 free-string 误用)
 
     enum Kind: String, CaseIterable {
@@ -59,7 +58,7 @@ extension AIConversation {
     /// 让 InsightsView 顶部浓缩卡能按"语义 range"(.month/.quarter/.year/.all)而非滚动
     /// 区间精确匹配查 cache。
     ///
-    /// **v3 (payloadVersion=3)**:加 `headline` —— gpt-5.5 一次输出 [HEADLINE]\\n一两句诗\\n[BODY]\\n长文,
+    /// **v3 (payloadVersion=3)**:加 `headline` —— 重活模型一次输出 [HEADLINE]\\n一两句诗\\n[BODY]\\n长文,
     /// 客户端 stream 收完后 split。卡收起态显 headline,tap 进 detail 显 body。v2 老 cache 没 headline
     /// → view 层 fallback 用 body 第一段第一句作 placeholder,不强制重生。
     struct NarrativePayload: Codable, Equatable {

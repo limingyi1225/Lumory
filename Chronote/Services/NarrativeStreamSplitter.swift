@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - NarrativeStreamSplitter
 //
-// gpt-5.5 narrative stream 完整结束后,把 raw output 拆成 (headline, body)。
+// narrative stream 完整结束后,把 raw output 拆成 (headline, body)。
 // prompt 让模型按 `[HEADLINE]\n一两句诗意\n[BODY]\n长文` 输出,客户端 done 后一次 split。
 //
 // **为什么不 mid-stream 切分**:marker 可能跨 chunk(模型 token 拆 "[" "HEAD" "LINE" "]"),
@@ -17,7 +17,6 @@ import Foundation
 // 部分**并入 body 前**(不静默丢失内容,codex 反馈)。
 
 enum NarrativeStreamSplitter {
-
     /// 限定 headline 最大长度;超过判模型 leak 正文,截前两句剩下并回 body。
     private static let headlineCharLimit = 80
 
@@ -188,7 +187,7 @@ enum NarrativeStreamSplitter {
     private static let endingPunctuation: Set<Character> = [
         ".", "。", "?", "?", "!", "!", "…",
         "\u{FF1F}",  // 全宽 ? (FULLWIDTH QUESTION MARK)
-        "\u{FF01}",  // 全宽 ! (FULLWIDTH EXCLAMATION MARK)
+        "\u{FF01}"  // 全宽 ! (FULLWIDTH EXCLAMATION MARK)
     ]
 }
 

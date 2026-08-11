@@ -96,7 +96,7 @@ test('transcription model is server-side hardcoded ignoring client field', async
   assert.equal(adapterCallCount, 1, 'upstream should be called exactly once');
   assert.equal(
     capturedModel,
-    'gpt-4o-mini-transcribe',
+    'gpt-transcribe',
     'server must hardcode TRANSCRIPTION_MODEL and ignore client-provided model field'
   );
 });

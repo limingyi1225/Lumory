@@ -32,16 +32,16 @@ extension OpenAIService {
             } else {
                 prompt = "Summarize the following diary entry, focusing on the key points, in no more than 10 words, using only commas and semicolons.\n# Steps\n1. Read and understand the diary entry.\n2. Identify the key information and theme.\n3. Summarize using concise and precise language.\n4. Ensure the summary does not exceed 10 words.\n5. Use only commas and semicolons as punctuation.\n# Output Format\n- A short summary, no more than 10 words.\n- Only commas and semicolons used.\nDiary:\n\n\(text)"
             }
-            // 显式 maxTokens: 512——`chat` 的默认 128 对 gpt-5.5 "low" reasoning 太紧，
+            // 显式 maxTokens: 512——`chat` 的默认 128 对 "low" reasoning 太紧，
             // reasoning tokens 本身就会吃掉一半以上，content 经常被截 / 返回空串。
-            return await self.chat(prompt: prompt, model: "gpt-5.5", maxTokens: 512, reasoningEffort: "low")
+            return await self.chat(prompt: prompt, model: AIModel.heavy, maxTokens: 512, reasoningEffort: "low")
         }
     }
 
     func analyzeMood(text: String) async -> Double {
-        // gpt-5.4-mini + effort=none。mini 家族支持 `none`（零推理开销），大模型 5.5 只支持 low+。
+        // 轻活模型(luna) + effort=none —— gpt-5.6 全家支持 `none`（零推理开销）。
         // prompt 显式列出 1-20 / 21-40 / 41-60 / 61-80 / 81-100 五档 + "avoid 50" 强硬指令，
-        // 让 mini 不经推理也能直接给出决断分。
+        // 让模型不经推理也能直接给出决断分。
         let diaryEscaped = text.replacingOccurrences(of: "\"", with: "\\\"")
         let prompt = """
             Classify the mood of this diary entry on a 1-100 scale. Be decisive — avoid 50 unless truly neutral.
@@ -61,10 +61,10 @@ extension OpenAIService {
 
         let rawOpt = await self.chat(
             prompt: prompt,
-            model: "gpt-5.4-mini",
+            model: AIModel.light,
             maxTokens: 256,
             forceJSON: true,
-            reasoningEffort: "none"      // mini 家族支持 none，直接省掉推理开销
+            reasoningEffort: "none"      // gpt-5.6 全家支持 none，直接省掉推理开销
         )?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -185,8 +185,8 @@ extension OpenAIService {
             Diary: "\(diaryEscaped)"
             """
         }
-        // 用 gpt-5.4-mini + reasoning=none；mini 支持 none，标签抽取不需要推理
-        guard let raw = await chat(prompt: prompt, model: "gpt-5.4-mini",
+        // 用轻活模型(luna) + reasoning=none；标签抽取不需要推理
+        guard let raw = await chat(prompt: prompt, model: AIModel.light,
                                    maxTokens: 256, forceJSON: true,
                                    reasoningEffort: "none")?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -262,7 +262,8 @@ extension OpenAIService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.applyBackendAuth(sharedSecret: appSharedSecret)
-        let body = RequestBody(model: "text-embedding-3-small", input: payload)
+        // 注意:服务端硬编码 `EMBEDDING_MODEL` 不读这个字段,改这里不会真的换模型(见 AIModel.embedding)。
+        let body = RequestBody(model: AIModel.embedding, input: payload)
         // (2026-05-15 megareview P2-2)同 `chat()`,显式 catch 让 encode 失败可诊断。
         do {
             request.httpBody = try jsonEncoder.encode(body)

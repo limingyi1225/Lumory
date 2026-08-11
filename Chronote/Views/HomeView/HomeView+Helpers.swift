@@ -23,7 +23,6 @@ private enum HomeDraftStorageKeys {
 }
 
 extension HomeView {
-
     // MARK: - 草稿持久化
 
     /// composer 文本变化:500ms debounce 写 AppGroup defaults;空白立即同步清(防 send 后 OOM 还原)。
@@ -109,7 +108,7 @@ extension HomeView {
 
     /// Pull-to-refresh：触发 CloudKit 同步 + 换一条占位语（从当前池里挑一个不同项）。
     /// AI 池的 `refreshIfNeeded` 走**独立 detached Task**，不塞进 refreshable 窗口——
-    /// 否则如果指纹变了要调一次 gpt-5.5（~2-3s），用户会感觉"下拉卡好几秒"。
+    /// 否则如果指纹变了要调一次重活模型（~2-3s），用户会感觉"下拉卡好几秒"。
     /// AI 刷完之后下一次下拉/聚焦才用得上，体感上毫无损失。
     func triggerManualSync() async {
         syncMonitor.forceSync()

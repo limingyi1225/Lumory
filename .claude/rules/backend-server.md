@@ -32,9 +32,23 @@ per-install(客户端 `X-Install-Id` = Keychain UUID,`InstallIdentity.current`)+
 - `REQUEST_TIMEOUT_MS=120_000`(和客户端 `timeoutIntervalForResource=300s` 对齐,给长 SSE 流留余量)。
 - `STREAM_IDLE_TIMEOUT_MS=120_000`(流式 SSE 的 **mid-stream idle 上限**)。axios 的 `timeout` 对 `responseType:'stream'` 只管到 TTFB(响应头一到就 settle / `isDone=true`,socket 级 `req.setTimeout` 的 handler 之后 no-op),**管不了 chunk 间空闲**。流式 handler 自挂 idle 计时器:每收到 chunk 重置,超时则带 `code:'UPSTREAM_IDLE_TIMEOUT'` `destroy` upstream → 走 `'error'` cleanup 链让客户端断流重试。防"上游连上吐头后卡死不吐数据"白占连接到客户端 300s。
 
+## Chat 模型解析 / 换代(`resolveChatModel`)
+
+当前:重活 `gpt-5.6-terra`,轻活 `gpt-5.6-luna`(effort=none)。三个旋钮:
+
+- `CHAT_MODEL_ALLOWLIST`(env,逗号分隔,默认 `gpt-5.6-terra,gpt-5.6-luna`)— 唯一放行名单。
+- `CHAT_DEFAULT_MODEL`(env)— 兜底模型,**值必须落在 allowlist 内否则忽略**,兜底的兜底是 allowlist 首项。
+- `LEGACY_MODEL_ALIASES`(代码内 Map)— `gpt-5.5` → terra / `gpt-5.4-mini` → luna。**老版本 App 装在用户手机上不会更新,仍发旧名**;这张表让旧装机不发版就跑新模型。等旧版本装机量归零可删。
+
+`resolveChatModel` 的顺序是 **先查 allowlist、再查 alias**,不能倒过来:运维收窄 allowlist 做 cost rollback(只留 luna)时,旧 App 的 `gpt-5.5` 经 alias 得到 terra、terra 不在名单 → 继续落 `CHAT_DEFAULT_MODEL`,alias 表不会偷偷绕过成本回滚。`index.test.js` 有测试锁这条。
+
+`MODEL_EFFORT_POLICY` 按模型给 reasoning effort 白名单 + 缺省档(terra 默认 `low`,luna 默认 `none`)。**gpt-5.6 真实支持 `xhigh` / `max`,这里故意不放行** —— 客户端 body 可篡改,一个传 `max` 的请求能把单次成本抬一个量级。加档位要显式改这张表。未知模型走保守档(不放行 `none`,免得上游 400)。
+
+**换代 checklist**:改 allowlist 默认值 → 在 alias 表里把上一代名字指向新模型 → 给新模型加 `MODEL_EFFORT_POLICY` 条目 → 同步改 iOS 的 `AIModel`(`Chronote/Services/OpenAI/AIModelCatalog.swift`)→ 跑 `npm test`。
+
 ## 转写路由 model hardcode
 
-`/api/openai/audio/transcriptions` 服务端固定 `gpt-4o-mini-transcribe`,**不读** client 传的 model 字段(信任边界在服务端,防客户端篡改改更贵模型)。`language` 字段如客户端传需 ISO-639-1 两字母 lowercase,否则丢弃让模型自动检测。
+`/api/openai/audio/transcriptions` 服务端固定 `gpt-transcribe`,**不读** client 传的 model 字段(信任边界在服务端,防客户端篡改改更贵模型)。`language` 字段如客户端传需 ISO-639-1 两字母 lowercase,否则丢弃让模型自动检测。
 
 ## SSE 错误处理
 

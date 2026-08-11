@@ -71,7 +71,7 @@ test('streaming idle upstream is torn down by server-side idle timer', async (t)
   t.after(() => close(server));
 
   const payload = JSON.stringify({
-    model: 'gpt-5.5',
+    model: 'gpt-5.6-terra',
     stream: true,
     messages: [{ role: 'user', content: 'hello' }],
   });

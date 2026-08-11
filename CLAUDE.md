@@ -17,7 +17,7 @@ iOS 日记 App。产品名 **Lumory**,Xcode 项目 `Lumory.xcodeproj`,主 target
 
 - **iOS 客户端**:SwiftUI + CoreData + `NSPersistentCloudKitContainer`(CloudKit 同步)。App 入口 [Chronote/ChronoteApp.swift](Chronote/ChronoteApp.swift) 的 `var body: some Scene`,启动先走 `SplashView`(约 1s)再淡出到 `HomeView`。iOS 部署目标 26.0。
 - **后端**:Node.js + Express 5,部署在 `https://lumory.isaabby.com`(Cloudflare → nginx:443 → node:3000),PM2 进程管理。
-- **AI**:走自建后端代理 OpenAI(`/api/openai/chat/completions` / `/api/openai/embeddings` / `/api/openai/audio/transcriptions`)。Chat 走 SSE 流,模型 `gpt-5.5` / `gpt-5.4-mini`(reasoning effort 分档);转写 `gpt-4o-mini-transcribe`。
+- **AI**:走自建后端代理 OpenAI(`/api/openai/chat/completions` / `/api/openai/embeddings` / `/api/openai/audio/transcriptions`)。Chat 走 SSE 流,模型 `gpt-5.6-terra`(重活)/ `gpt-5.6-luna`(轻活,effort=none),reasoning effort 分档;转写 `gpt-transcribe`;embedding `text-embedding-3-small`。**客户端模型名的唯一真源是 [`Chronote/Services/OpenAI/AIModelCatalog.swift`](Chronote/Services/OpenAI/AIModelCatalog.swift)**(`AIModel.heavy` / `.light`),别再往 callsite 写字面量。服务端 `resolveChatModel` 有 legacy alias 表(`gpt-5.5` → terra / `gpt-5.4-mini` → luna),**老版本 App 不发版也跑新模型**;转写 / embedding 模型客户端根本不传,纯服务端说了算。
 - **本地化**:中(`zh-Hans.lproj`)/ 英(`en.lproj`),由 `@AppStorage("appLanguage", store: AppGroup.userDefaults)` 切换 —— 主 App + widget extension 共用 App Group `group.Mingyi.Lumory` 这个 UserDefaults suite。
 
 ## 目录(顶级)

@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Suggestions(AI 写作建议)
 //
 // **wave11 拆出**:从 OpenAIService.swift 把"写作建议"子系统聚到一起。
-// `PromptSuggestionEngine` 是真源,这里是它调的 AI 接口 —— 一次 gpt-5.5 同时生成
+// `PromptSuggestionEngine` 是真源,这里是它调的 AI 接口 —— 一次重活模型调用同时生成
 // AskPast 4 条预设 + 首页 5 条占位语,JSON 返回。
 //
 // 包含:
@@ -13,13 +13,13 @@ import Foundation
 
 @available(iOS 15.0, macOS 12.0, *)
 extension OpenAIService {
-    /// 一次 gpt-5.5 调用生成 AskPast 预设 + 首页占位语池，JSON 返回。
+    /// 一次重活模型调用生成 AskPast 预设 + 首页占位语池，JSON 返回。
     /// 失败 / 畸形 / 字段不全 → 返回 nil，让 PromptSuggestionEngine 保留旧 cache 或上游 fallback。
     func composeSuggestions(context: SuggestionContext) async -> SuggestionBundle? {
         let prompt = Self.buildSuggestionPrompt(context: context)
         guard let raw = await chat(
             prompt: prompt,
-            model: "gpt-5.5",
+            model: AIModel.heavy,
             maxTokens: 1024,
             forceJSON: true,
             reasoningEffort: "low"

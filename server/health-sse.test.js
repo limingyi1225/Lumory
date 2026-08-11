@@ -234,7 +234,7 @@ test('chat_streamingUpstreamError_destroysClientSocketWithoutSendingDone', async
     install: 'a7d9673d-eba6-4cf8-a209-cc87f4f7cbba',
     secret: process.env.APP_SHARED_SECRET,
     payload: {
-      model: 'gpt-5.5',
+      model: 'gpt-5.6-terra',
       stream: true,
       messages: [{ role: 'user', content: 'hello' }],
     },
@@ -328,7 +328,7 @@ test('chat_clientDisconnectMidStream_releasesActiveStreamsReference', async (t) 
   // `res.destroyed` branch on the server side.
   await new Promise((resolve, reject) => {
     const data = JSON.stringify({
-      model: 'gpt-5.5',
+      model: 'gpt-5.6-terra',
       stream: true,
       messages: [{ role: 'user', content: 'hello' }],
     });
@@ -413,7 +413,7 @@ test('chat_streamingUpstreamEndsWithoutDone_destroysClientSocket', async (t) => 
     install: 'a7d9673d-eba6-4cf8-a209-cc87f4f7cbbc',
     secret: process.env.APP_SHARED_SECRET,
     payload: {
-      model: 'gpt-5.5',
+      model: 'gpt-5.6-terra',
       stream: true,
       messages: [{ role: 'user', content: 'hello' }],
     },

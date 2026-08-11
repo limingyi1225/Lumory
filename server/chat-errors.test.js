@@ -78,7 +78,7 @@ function postJSONFull(server, path, body, headers = {}) {
 const VALID_UUID = 'c7d9673d-eba6-4cf8-a209-cc87f4f7cbcc';
 
 const baseChatBody = {
-  model: 'gpt-5.5',
+  model: 'gpt-5.6-terra',
   messages: [{ role: 'user', content: 'hi' }],
 };
 
@@ -185,7 +185,7 @@ test('chat_sanitizedBodyReachesUpstream_strippingUnsupportedFields', async (t) =
   t.after(() => close(server));
 
   const dirtyBody = {
-    model: 'gpt-5.5',
+    model: 'gpt-5.6-terra',
     messages: [{ role: 'user', content: 'hi' }],
     stream: false,
     tools: [{ type: 'function', function: { name: 'evil' } }],
@@ -206,7 +206,7 @@ test('chat_sanitizedBodyReachesUpstream_strippingUnsupportedFields', async (t) =
 
   // 白名单字段保留(model/messages 必有;stream=false 在 sanitizeChatBody 里被设为 undefined,
   // 序列化时 JSON.stringify 自动 drop;reasoning_effort/max_completion_tokens 总是会有值)。
-  assert.equal(capturedData.model, 'gpt-5.5');
+  assert.equal(capturedData.model, 'gpt-5.6-terra');
   assert.deepEqual(capturedData.messages, [{ role: 'user', content: 'hi' }]);
   assert.equal('stream' in capturedData, false, 'stream:false → undefined → dropped from JSON');
   assert.ok('reasoning_effort' in capturedData, 'reasoning_effort always set by sanitize');

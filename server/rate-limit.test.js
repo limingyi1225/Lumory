@@ -89,7 +89,7 @@ function audioBlob() {
 
 function chatBody() {
   // 极小 messages,过 count + char cap,不被 sanitizeChatBody 改坏。
-  return { model: 'gpt-5.5', messages: [{ role: 'user', content: 'hi' }] };
+  return { model: 'gpt-5.6-terra', messages: [{ role: 'user', content: 'hi' }] };
 }
 
 // chat 上游 mock — 立即返一条最小完整 chat completion JSON。

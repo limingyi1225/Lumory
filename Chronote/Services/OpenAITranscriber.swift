@@ -1,6 +1,6 @@
 import Foundation
 
-/// 走 Lumory 后端代理 OpenAI `gpt-4o-mini-transcribe` 的转写实现。
+/// 走 Lumory 后端代理 OpenAI `gpt-transcribe` 的转写实现。
 ///
 /// 流程:
 ///   1. 后台 Task 读取 m4a + 拼 multipart/form-data(避免 25 MB 文件落在 main actor)
@@ -192,7 +192,7 @@ final class OpenAITranscriber: TranscriberProtocol {
             content: audioData
         )
         try Task.checkCancellation()
-        // **故意不附 `model` 字段** — 后端 hardcode `gpt-4o-mini-transcribe`,任何 client 传的
+        // **故意不附 `model` 字段** — 后端 hardcode `gpt-transcribe`,任何 client 传的
         // model 值都会被服务端忽略(防客户端篡改改更贵模型,trust boundary 在服务端)。这里只附
         // `response_format` 让后端透传给 OpenAI;backend-server.md "转写路由 model hardcode" 段。
         body.appendBoundaryField(boundary: boundary, name: "response_format", value: "json")

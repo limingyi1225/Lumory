@@ -14,6 +14,7 @@ const {
   countMessageContentChars,
   positiveNumberEnv,
   modelAllowlistEnv,
+  resolveChatModel,
   sanitizeChatBody,
   sanitizeUpstreamError,
   sseFrameHasDone,
@@ -144,7 +145,7 @@ test('sanitizeChatBody clamps model and strips unsupported cost controls', () =>
     tools: [{ type: 'function' }],
   });
 
-  assert.equal(body.model, 'gpt-5.5');
+  assert.equal(body.model, 'gpt-5.6-terra');
   assert.equal(body.max_completion_tokens, 16384);
   assert.equal(body.reasoning_effort, 'low');
   assert.equal(body.tools, undefined);
@@ -152,17 +153,91 @@ test('sanitizeChatBody clamps model and strips unsupported cost controls', () =>
 
 test('sanitizeChatBody allows configured app models and JSON response format', () => {
   const body = sanitizeChatBody({
-    model: 'gpt-5.4-mini',
+    model: 'gpt-5.6-luna',
     messages: [{ role: 'user', content: 'hello' }],
     response_format: { type: 'json_object' },
     reasoning_effort: 'none',
     max_completion_tokens: 256,
   });
 
-  assert.equal(body.model, 'gpt-5.4-mini');
+  assert.equal(body.model, 'gpt-5.6-luna');
   assert.deepEqual(body.response_format, { type: 'json_object' });
   assert.equal(body.reasoning_effort, 'none');
   assert.equal(body.max_completion_tokens, 256);
+});
+
+// 老版本 App 装在用户手机上不会自己更新,仍然发 gpt-5.5 / gpt-5.4-mini。这两条锁住
+// "旧装机不发版也跑新模型"的契约 —— 删了 LEGACY_MODEL_ALIASES 会直接红。
+test('resolveChatModel maps legacy app model names onto the current generation', () => {
+  assert.equal(resolveChatModel('gpt-5.5'), 'gpt-5.6-terra');
+  assert.equal(resolveChatModel('gpt-5.4-mini'), 'gpt-5.6-luna');
+});
+
+test('resolveChatModel passes through current names and falls back for unknown ones', () => {
+  assert.equal(resolveChatModel('gpt-5.6-terra'), 'gpt-5.6-terra');
+  assert.equal(resolveChatModel('gpt-5.6-luna'), 'gpt-5.6-luna');
+  assert.equal(resolveChatModel('gpt-4-32k'), 'gpt-5.6-terra');
+  assert.equal(resolveChatModel(undefined), 'gpt-5.6-terra');
+});
+
+// 旧 App 的 reasoning effort 语义必须跨映射存活:轻活传的 `none` 落到 luna 仍是 `none`
+// (零推理开销),不能因为换代被悄悄抬成 low 多烧 token。
+test('sanitizeChatBody preserves legacy reasoning effort semantics across the alias', () => {
+  const light = sanitizeChatBody({
+    model: 'gpt-5.4-mini',
+    messages: [{ role: 'user', content: 'hi' }],
+    reasoning_effort: 'none',
+  });
+  assert.equal(light.model, 'gpt-5.6-luna');
+  assert.equal(light.reasoning_effort, 'none');
+
+  const heavy = sanitizeChatBody({
+    model: 'gpt-5.5',
+    messages: [{ role: 'user', content: 'hi' }],
+    reasoning_effort: 'medium',
+  });
+  assert.equal(heavy.model, 'gpt-5.6-terra');
+  assert.equal(heavy.reasoning_effort, 'medium');
+});
+
+// `xhigh` / `max` 是 gpt-5.6 真实支持的档位,但我们**故意不放行** —— 客户端 body 可篡改,
+// 一个传 max 的请求能把单次成本抬一个量级。降到该模型的缺省档。
+test('sanitizeChatBody refuses reasoning efforts the app never uses', () => {
+  for (const effort of ['xhigh', 'max']) {
+    assert.equal(
+      sanitizeChatBody({ model: 'gpt-5.6-terra', messages: [], reasoning_effort: effort })
+        .reasoning_effort,
+      'low',
+      `${effort} must be clamped on terra`
+    );
+    assert.equal(
+      sanitizeChatBody({ model: 'gpt-5.6-luna', messages: [], reasoning_effort: effort })
+        .reasoning_effort,
+      'none',
+      `${effort} must be clamped on luna`
+    );
+  }
+});
+
+// Cost rollback:运维把 allowlist 收窄到只留便宜模型时,legacy alias **不能**把旧 App 的
+// gpt-5.5 偷偷送回 terra —— 那会绕过 incident-mitigation 意图。这是 resolveChatModel
+// "先查 allowlist 再查 alias" 的顺序所锁住的不变量。
+test('legacy aliases cannot bypass a narrowed allowlist', () => {
+  const modulePath = require.resolve('./index');
+  const previous = process.env.CHAT_MODEL_ALLOWLIST;
+  process.env.CHAT_MODEL_ALLOWLIST = 'gpt-5.6-luna';
+  delete require.cache[modulePath];
+  try {
+    const narrowed = require('./index');
+    assert.equal(narrowed.resolveChatModel('gpt-5.5'), 'gpt-5.6-luna');
+    assert.equal(narrowed.resolveChatModel('gpt-5.6-terra'), 'gpt-5.6-luna');
+    assert.equal(narrowed.resolveChatModel('gpt-5.6-luna'), 'gpt-5.6-luna');
+  } finally {
+    if (previous === undefined) delete process.env.CHAT_MODEL_ALLOWLIST;
+    else process.env.CHAT_MODEL_ALLOWLIST = previous;
+    // 复原 module registry,后续 test 继续用文件顶部 require 到的那个实例。
+    delete require.cache[modulePath];
+  }
 });
 
 test('normalizeInstallId lowercases valid UUIDs', () => {
@@ -386,7 +461,7 @@ test('streaming client abort cancels the upstream OpenAI request', async (t) => 
   t.after(() => close(server));
 
   const payload = JSON.stringify({
-    model: 'gpt-5.5',
+    model: 'gpt-5.6-terra',
     stream: true,
     messages: [{ role: 'user', content: 'hello' }],
   });

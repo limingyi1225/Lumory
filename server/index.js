@@ -100,18 +100,30 @@ const DEFAULT_CHAT_COMPLETION_TOKENS = positiveNumberEnv('DEFAULT_CHAT_COMPLETIO
 const MAX_OPENAI_RESPONSE_BYTES = positiveNumberEnv('MAX_OPENAI_RESPONSE_BYTES', 8 * 1024 * 1024);
 const GLOBAL_IP_LIMIT_MAX = positiveNumberEnv('GLOBAL_IP_LIMIT_MAX', 600);
 const CHAT_MODEL_ALLOWLIST = new Set(
-  modelAllowlistEnv('CHAT_MODEL_ALLOWLIST', ['gpt-5.5', 'gpt-5.4-mini'])
+  modelAllowlistEnv('CHAT_MODEL_ALLOWLIST', ['gpt-5.6-terra', 'gpt-5.6-luna'])
 );
-// Fallback 必须在当前 allowlist 内 —— 否则 cost-rollback 配置(把 allowlist 限制到只有 mini 时)
-// 还会被 fallback 默默升回 gpt-5.5,绕过 incident-mitigation 意图。allowlist 总有至少一个值
-// (modelAllowlistEnv 在 split 后空数组会回退到 defaults),first() 取确定项。
-const CHAT_DEFAULT_MODEL = CHAT_MODEL_ALLOWLIST.has('gpt-5.5')
-  ? 'gpt-5.5'
+// 老版本 App 的模型名 → 新模型。**装在用户手机上的旧 build 不会自己更新**,它们仍然硬编码
+// 发 `gpt-5.5` / `gpt-5.4-mini`;这张表让旧装机不等 App 审核就用上新模型。新 build 已直接
+// 发新名(见 `Chronote/Services/OpenAI/AIModelCatalog.swift`),等旧版本装机量归零后可以删这张表。
+const LEGACY_MODEL_ALIASES = new Map([
+  ['gpt-5.5', 'gpt-5.6-terra'],
+  ['gpt-5.4-mini', 'gpt-5.6-luna'],
+]);
+// Fallback 必须在当前 allowlist 内 —— 否则 cost-rollback 配置(把 allowlist 限制到只有便宜
+// 模型时)还会被 fallback 默默升回旗舰,绕过 incident-mitigation 意图。allowlist 总有至少一个值
+// (modelAllowlistEnv 在 split 后空数组会回退到 defaults),values().next() 取确定项。
+// 2026-08-11:原实现硬编码 `has('gpt-5.5') ? 'gpt-5.5' : first()`,每次换代都要改代码。改成读
+// `CHAT_DEFAULT_MODEL` env(值必须落在 allowlist 内否则忽略),兜底仍取 allowlist 首项。
+const CHAT_DEFAULT_MODEL = CHAT_MODEL_ALLOWLIST.has(process.env.CHAT_DEFAULT_MODEL)
+  ? process.env.CHAT_DEFAULT_MODEL
   : CHAT_MODEL_ALLOWLIST.values().next().value;
 const EMBEDDING_MODEL = 'text-embedding-3-small';
 // 转写模型 hardcode,不读 client `model` 字段——客户端可篡改 header,信任边界在服务端。
 // 未来要 A/B 不同模型,在这里加 allowlist。
-const TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
+// 2026-08-11:`gpt-4o-mini-transcribe` → `gpt-transcribe`(官方对新集成的推荐首选,旧的没弃用
+// 但不再是推荐起点)。**因为客户端故意不传 model,这一行改完老版本 App 立刻跟着换,不用发版**。
+// 注意 mini → 全尺寸是涨价方向,转写量大起来要回看账单;真要回滚改回上面那行即可。
+const TRANSCRIPTION_MODEL = 'gpt-transcribe';
 // OpenAI `/audio/transcriptions` 上限 25 MB。multer 用 fileSize 触发 LIMIT_FILE_SIZE,
 // 我们 catch 后回 413 给客户端,让客户端 banner 区分"分段录制"提示。
 const MAX_TRANSCRIPTION_FILE_BYTES = positiveNumberEnv(
@@ -425,12 +437,39 @@ function sanitizeMessageContent(content) {
     .map((part) => ({ type: 'text', text: part.text }));
 }
 
+// 每个模型放行的 reasoning effort + 缺省档。**故意只列 App 真实用到的档位** —— gpt-5.6 家族
+// 还支持 `xhigh` / `max`,这里不放行:客户端 body 可篡改,信任边界在服务端,一个传 `max` 的
+// 请求能把单次成本抬一个量级。将来真要用新档位在这里显式加。
+// 缺省档按"这个模型承担什么活"定:terra 跑重活(narrative / Ask-Your-Past)默认 `low`;
+// luna 跑轻活(打分 / 抽标签)默认 `none`,零推理开销。
+// legacy 两项(5.5 / 5.4-mini)正常路径查不到 —— 旧 App 的请求已被 resolveChatModel 映射成新名;
+// 留着是防 allowlist 被显式配置成包含旧模型时仍有正确的档位表(旧模型不支持全部新档)。
+const MODEL_EFFORT_POLICY = new Map([
+  ['gpt-5.6-terra', { allowed: new Set(['none', 'low', 'medium', 'high']), fallback: 'low' }],
+  ['gpt-5.6-sol', { allowed: new Set(['none', 'low', 'medium', 'high']), fallback: 'low' }],
+  ['gpt-5.6-luna', { allowed: new Set(['none', 'low', 'medium', 'high']), fallback: 'none' }],
+  ['gpt-5.5', { allowed: new Set(['low', 'medium', 'high']), fallback: 'low' }],
+  ['gpt-5.4-mini', { allowed: new Set(['none', 'low']), fallback: 'none' }],
+]);
+// 未知模型(运维往 allowlist 里加了新名但忘了配策略)走保守档:不放行 `none`,免得
+// 一个不支持 none 的模型收到 none 被上游 400。
+const DEFAULT_EFFORT_POLICY = { allowed: new Set(['low', 'medium', 'high']), fallback: 'low' };
+
 function sanitizeReasoningEffort(model, effort) {
-  if (model === 'gpt-5.4-mini') {
-    return effort === 'low' ? 'low' : 'none';
-  }
-  if (effort === 'medium' || effort === 'high') return effort;
-  return 'low';
+  const policy = MODEL_EFFORT_POLICY.get(model) ?? DEFAULT_EFFORT_POLICY;
+  return policy.allowed.has(effort) ? effort : policy.fallback;
+}
+
+// 客户端传的 model → 实际下发上游的 model。
+// 顺序刻意:**先查 allowlist,再查 legacy alias**。这样运维收窄 allowlist 做 cost rollback 时
+// (例如只留 luna),旧 App 的 `gpt-5.5` 经 alias 得到 terra、但 terra 不在 allowlist → 继续落到
+// CHAT_DEFAULT_MODEL(luna),alias 表不会偷偷绕过成本回滚意图。
+function resolveChatModel(requested) {
+  if (typeof requested !== 'string') return CHAT_DEFAULT_MODEL;
+  if (CHAT_MODEL_ALLOWLIST.has(requested)) return requested;
+  const aliased = LEGACY_MODEL_ALIASES.get(requested);
+  if (aliased && CHAT_MODEL_ALLOWLIST.has(aliased)) return aliased;
+  return CHAT_DEFAULT_MODEL;
 }
 
 function clampCompletionTokens(value) {
@@ -447,8 +486,7 @@ function clampCompletionTokens(value) {
 const MAX_MESSAGES_COUNT = 64;
 
 function sanitizeChatBody(body) {
-  const requestedModel = typeof body?.model === 'string' ? body.model : CHAT_DEFAULT_MODEL;
-  const model = CHAT_MODEL_ALLOWLIST.has(requestedModel) ? requestedModel : CHAT_DEFAULT_MODEL;
+  const model = resolveChatModel(body?.model);
   const messages = (Array.isArray(body?.messages) ? body.messages : []).map((message) => ({
     role: ['system', 'user', 'assistant'].includes(message?.role) ? message.role : 'user',
     content: sanitizeMessageContent(message?.content),
@@ -1003,6 +1041,7 @@ module.exports = {
   countMessageContentChars,
   positiveNumberEnv,
   modelAllowlistEnv,
+  resolveChatModel,
   sanitizeChatBody,
   sanitizeUpstreamError,
   sseFrameHasDone,

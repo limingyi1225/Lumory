@@ -47,7 +47,7 @@ struct HomeView: View {
     // AI 服务从 SwiftUI Environment 注入，默认指向 `OpenAIService.shared`。
     // 生产零行为变化；测试 / Preview 里可以 `.environment(\.aiService, MockAIService())` 替换。
     @Environment(\.aiService) var aiService
-    // 语音转录（独立的服务，不和 AI 混在一起）。走 Lumory 后端代理 OpenAI gpt-4o-mini-transcribe。
+    // 语音转录（独立的服务，不和 AI 混在一起）。走 Lumory 后端代理 OpenAI gpt-transcribe。
     let transcriber: TranscriberProtocol = OpenAITranscriber()
     
     // 导入服务（与 SettingsView 共享）

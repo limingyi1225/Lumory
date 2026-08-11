@@ -18,7 +18,7 @@ struct SuggestionBundle: Codable, Equatable {
     }
 }
 
-/// 喂给 LLM 的 grounding 数据。**极简化**:gpt-5.5 自己能从原文里识别主题 / 情绪 /
+/// 喂给 LLM 的 grounding 数据。**极简化**:重活模型自己能从原文里识别主题 / 情绪 /
 /// 重复人物,不再做客户端预聚合(topThemes / mood 极值 / 平均)那套老模型脚手架。
 /// `today` 是给模型的时间锚 —— 让它能推断"上周说要去滑冰"是已经发生过的,而不是未来事件。
 struct SuggestionContext {
@@ -84,7 +84,7 @@ final class PromptSuggestionEngine: ObservableObject {
     // V5:home placeholder 改成第二人称 + 当下相关(App 跟今天的用户搭话)。
     //     V4 的 placeholder 是第一人称内心独白("我..."),和 askPast 重了,且没有"现在"
     //     框架。askPast 仍是第一人称(用户问自己),两套视角分得更清楚。
-    private nonisolated static let currentCacheKey = "promptSuggestionCacheV6"
+    nonisolated private static let currentCacheKey = "promptSuggestionCacheV6"
     private let cacheKey = PromptSuggestionEngine.currentCacheKey
     private let ttl: TimeInterval = 24 * 60 * 60   // 24 小时
 
@@ -267,7 +267,7 @@ final class PromptSuggestionEngine: ObservableObject {
     /// file protection——这份 bundle 里含用户日记派生的 prompt（指向 Abby / 工作 / 某天某事），
     /// 以前放在 UserDefaults 里明文，越狱 / sysdiagnose / 第三方备份都能读。file protection 能保证
     /// 设备锁定后的磁盘镜像里是加密的。
-    private nonisolated static func cacheFileURL(key: String) -> URL? {
+    nonisolated private static func cacheFileURL(key: String) -> URL? {
         guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
@@ -275,7 +275,7 @@ final class PromptSuggestionEngine: ObservableObject {
         return support.appendingPathComponent("\(key).protected.json")
     }
 
-    private nonisolated static func loadCache(key: String) -> SuggestionBundle? {
+    nonisolated private static func loadCache(key: String) -> SuggestionBundle? {
         if let url = cacheFileURL(key: key), FileManager.default.fileExists(atPath: url.path) {
             do {
                 let data = try Data(contentsOf: url)
@@ -297,7 +297,7 @@ final class PromptSuggestionEngine: ObservableObject {
         return nil
     }
 
-    private nonisolated static func saveCache(bundle: SuggestionBundle, key: String) {
+    nonisolated private static func saveCache(bundle: SuggestionBundle, key: String) {
         guard let data = try? JSONEncoder().encode(bundle), let url = cacheFileURL(key: key) else { return }
         do {
             try data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
@@ -306,7 +306,7 @@ final class PromptSuggestionEngine: ObservableObject {
         }
     }
 
-    private nonisolated static func removeCacheFile(key: String) {
+    nonisolated private static func removeCacheFile(key: String) {
         guard let url = cacheFileURL(key: key), FileManager.default.fileExists(atPath: url.path) else { return }
         do {
             try FileManager.default.removeItem(at: url)

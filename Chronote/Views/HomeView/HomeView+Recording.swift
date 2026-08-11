@@ -25,7 +25,6 @@ import AVFoundation
 #endif
 
 extension HomeView {
-
     /// Mic 按钮 tap:isRecording → 走 stop 路径(转写跟进);否则启录,真起录才发 start haptic。
     /// 权限未定时 startRecording 触发授权 alert 后 return false,这种"假启动"不该 haptic 暗示已开始。
     func handleMicTap() {
@@ -193,7 +192,7 @@ extension HomeView {
             recordingVM.isTranscribing = false
             if let transcribedText = transcribedTextOpt {
                 Log.info("[HomeView transcriptionTask] 成功,长度=\(transcribedText.count)", category: .ui)
-                // gpt-4o-mini-transcribe 会自带句末标点;只在缺失时补一个,避免双句号("test.." / "你好。。")。
+                // gpt-transcribe 会自带句末标点;只在缺失时补一个,避免双句号("test.." / "你好。。")。
                 // 末尾如果是闭合引号 / 括号 / 中文版书名号(常见模式 "test." / 他说"你好。"),
                 // 视作已终结 —— 句末标点惯例放在闭合符号内,外面再补 `.` 反而怪。
                 let endingPunctuation: Set<Character> = [

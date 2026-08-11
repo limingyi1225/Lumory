@@ -55,7 +55,6 @@ final class OpenAIService: AIServiceProtocol, @unchecked Sendable {
     //   parseImportedDiaries → +Import.swift
     // wave11 拆分,主文件只保留共享基础设施(chat / chatThrowing / debouncedRequest / 类壳)。
 
-
     // MARK: - Core
     /// 非流式 chat。流式路径走 `streamChatEvents` / `generateReportFromData` 自建 RequestBody,
     /// 不经过这里 —— 历史上 `chat()` 还有一个 `stream:true` 分支(~35 行 SSE 累加 buffer),
@@ -85,13 +84,21 @@ final class OpenAIService: AIServiceProtocol, @unchecked Sendable {
                 case maxCompletionTokens = "max_completion_tokens"
             }
         }
+        // Choice 平铺在 ResponseBody 外 —— 嵌进去 `CodingKeys` 就是第 3 层,触 SwiftLint nesting。
+        struct Choice: Codable {
+            let message: Message
+            let finishReason: String?
+            enum CodingKeys: String, CodingKey {
+                case message
+                case finishReason = "finish_reason"
+            }
+        }
         struct ResponseBody: Codable {
-            struct Choice: Codable { let message: Message }
             let choices: [Choice]
         }
 
         let requestBody = RequestBody(
-            model: model ?? "gpt-5.5",
+            model: model ?? AIModel.heavy,
             messages: [Message(role: "user", content: prompt)],
             response_format: forceJSON ? RequestBody.ResponseFormat(type: "json_object") : nil,
             reasoning_effort: reasoningEffort,
@@ -146,6 +153,20 @@ final class OpenAIService: AIServiceProtocol, @unchecked Sendable {
                     }
                 }
                 let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
+                // `max_completion_tokens` 是 **reasoning + 可见输出的总预算**,不是"给 JSON 的空间"。
+                // reasoning effort 高 + 预算给紧时,推理能把预算吃光,上游回 finish_reason=length 且
+                // content 是空串 / 半截 JSON —— caller 那边只看到"解析失败",查不出真因。这里显式打点,
+                // 让日志一眼区分"模型没答对"和"预算不够"。**只记不改控制流**:截断的内容交给 caller
+                // 自己的解析失败分支处理(它们的错误分类已经是对的)。
+                if let choice = decoded.choices.first, choice.finishReason == "length" {
+                    Log.error(
+                        "[OpenAIService] 输出被 max_completion_tokens 截断 — model=\(requestBody.model) "
+                        + "maxTokens=\(maxTokens) effort=\(reasoningEffort ?? "nil") "
+                        + "contentLen=\(choice.message.content.count)。该预算含 reasoning token,"
+                        + "contentLen 很小说明推理吃光了预算,应调高 maxTokens。",
+                        category: .ai
+                    )
+                }
                 guard let content = decoded.choices.first?.message.content.trimmingCharacters(in: .whitespacesAndNewlines) else {
                     throw NSError(
                         domain: "OpenAIService",
@@ -192,8 +213,16 @@ final class OpenAIService: AIServiceProtocol, @unchecked Sendable {
                 case maxCompletionTokens = "max_completion_tokens"
             }
         }
+        // Choice 平铺在 ResponseBody 外 —— 嵌进去 `CodingKeys` 就是第 3 层,触 SwiftLint nesting。
+        struct Choice: Codable {
+            let message: Message
+            let finishReason: String?
+            enum CodingKeys: String, CodingKey {
+                case message
+                case finishReason = "finish_reason"
+            }
+        }
         struct ResponseBody: Codable {
-            struct Choice: Codable { let message: Message }
             let choices: [Choice]
         }
 
@@ -208,7 +237,7 @@ final class OpenAIService: AIServiceProtocol, @unchecked Sendable {
         }
 
         let requestBody = RequestBody(
-            model: model ?? "gpt-5.5",
+            model: model ?? AIModel.heavy,
             messages: [Message(role: "user", content: prompt)],
             stream: nil,
             reasoning_effort: reasoningEffort,
@@ -229,6 +258,16 @@ final class OpenAIService: AIServiceProtocol, @unchecked Sendable {
                 throw BackendErrorMapper.error(forStatus: statusCode, retryAfter: httpResponse?.value(forHTTPHeaderField: "Retry-After"))
             }
             let decoded = try self.jsonDecoder.decode(ResponseBody.self, from: data)
+            // 同 `chat()`:预算含 reasoning token,截断时先留证据再走既有错误分支。
+            // import 解析用 16384,真撞上说明单批日记太大,该分批而不是继续调高。
+            if let choice = decoded.choices.first, choice.finishReason == "length" {
+                Log.error(
+                    "[OpenAIService] chatThrowing 输出被 max_completion_tokens 截断 — "
+                    + "model=\(requestBody.model) maxTokens=\(maxTokens) "
+                    + "contentLen=\(choice.message.content.count)",
+                    category: .ai
+                )
+            }
             guard let content = decoded.choices.first?.message.content
                 .trimmingCharacters(in: .whitespacesAndNewlines), !content.isEmpty else {
                 throw NSError(

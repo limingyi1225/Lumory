@@ -132,7 +132,7 @@ extension OpenAIService {
         do {
             content = try await self.chatThrowing(
                 prompt: prompt,
-                model: "gpt-5.5",
+                model: AIModel.heavy,
                 maxTokens: 16384,
                 reasoningEffort: "low"
             )
